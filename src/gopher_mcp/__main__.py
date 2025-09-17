@@ -6,7 +6,7 @@ from .server import mcp
 
 
 def main() -> None:
-    """Main entry point."""
+    """Run the main entry point."""
     try:
         if len(sys.argv) > 1 and sys.argv[1] == "--http":
             # HTTP transport not yet implemented in FastMCP
