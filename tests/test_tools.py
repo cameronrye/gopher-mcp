@@ -11,19 +11,19 @@ class TestCreateGopherFetchTool:
     def test_create_gopher_fetch_tool_returns_tool(self):
         """Test that create_gopher_fetch_tool returns a Tool instance."""
         tool = create_gopher_fetch_tool()
-        
+
         assert isinstance(tool, Tool)
 
     def test_create_gopher_fetch_tool_name(self):
         """Test that the tool has the correct name."""
         tool = create_gopher_fetch_tool()
-        
+
         assert tool.name == "gopher.fetch"
 
     def test_create_gopher_fetch_tool_description(self):
         """Test that the tool has a proper description."""
         tool = create_gopher_fetch_tool()
-        
+
         assert tool.description is not None
         assert len(tool.description) > 0
         assert "Fetch Gopher menus or text by URL" in tool.description
@@ -33,12 +33,12 @@ class TestCreateGopherFetchTool:
     def test_create_gopher_fetch_tool_input_schema(self):
         """Test that the tool has the correct input schema."""
         tool = create_gopher_fetch_tool()
-        
+
         assert tool.inputSchema is not None
         assert tool.inputSchema["type"] == "object"
         assert "url" in tool.inputSchema["required"]
         assert "url" in tool.inputSchema["properties"]
-        
+
         url_property = tool.inputSchema["properties"]["url"]
         assert url_property["type"] == "string"
         assert url_property["format"] == "uri"
@@ -47,13 +47,13 @@ class TestCreateGopherFetchTool:
     def test_create_gopher_fetch_tool_url_property_details(self):
         """Test the URL property has proper description and examples."""
         tool = create_gopher_fetch_tool()
-        
+
         url_property = tool.inputSchema["properties"]["url"]
-        
+
         assert "description" in url_property
         assert "Full Gopher URL to fetch" in url_property["description"]
         assert "examples" in url_property
-        
+
         examples = url_property["examples"]
         assert len(examples) >= 3
         assert any("gopher://gopher.floodgap.com/1/" in example for example in examples)
@@ -63,15 +63,15 @@ class TestCreateGopherFetchTool:
     def test_create_gopher_fetch_tool_no_additional_properties(self):
         """Test that the input schema doesn't allow additional properties."""
         tool = create_gopher_fetch_tool()
-        
+
         assert tool.inputSchema["additionalProperties"] is False
 
     def test_create_gopher_fetch_tool_examples_are_valid_gopher_urls(self):
         """Test that all examples are valid Gopher URLs."""
         tool = create_gopher_fetch_tool()
-        
+
         examples = tool.inputSchema["properties"]["url"]["examples"]
-        
+
         for example in examples:
             assert example.startswith("gopher://")
             assert "://" in example
@@ -83,7 +83,7 @@ class TestCreateGopherFetchTool:
     def test_create_gopher_fetch_tool_description_mentions_types(self):
         """Test that the description mentions supported Gopher types."""
         tool = create_gopher_fetch_tool()
-        
+
         description = tool.description
         assert "type 1" in description  # menus
         assert "type 0" in description  # text files
@@ -93,16 +93,16 @@ class TestCreateGopherFetchTool:
     def test_create_gopher_fetch_tool_description_mentions_llm_optimization(self):
         """Test that the description mentions LLM optimization."""
         tool = create_gopher_fetch_tool()
-        
+
         description = tool.description
         assert "optimized for LLM consumption" in description
 
     def test_create_gopher_fetch_tool_url_description_has_examples(self):
         """Test that the URL description includes inline examples."""
         tool = create_gopher_fetch_tool()
-        
+
         url_description = tool.inputSchema["properties"]["url"]["description"]
-        
+
         # Should have inline examples in the description
         assert "gopher://gopher.floodgap.com/1/" in url_description
         assert "gopher://gopher.floodgap.com/0/" in url_description
@@ -111,12 +111,14 @@ class TestCreateGopherFetchTool:
     def test_create_gopher_fetch_tool_consistent_examples(self):
         """Test that examples in description match examples array."""
         tool = create_gopher_fetch_tool()
-        
+
         url_property = tool.inputSchema["properties"]["url"]
         description = url_property["description"]
         examples_array = url_property["examples"]
-        
+
         # Examples mentioned in description should be in examples array
         for example in examples_array:
             if "gopher.floodgap.com" in example:
-                assert example in description or any(part in description for part in example.split("/"))
+                assert example in description or any(
+                    part in description for part in example.split("/")
+                )
