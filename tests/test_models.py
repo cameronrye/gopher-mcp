@@ -202,6 +202,48 @@ class TestGopherURL:
             )
         assert "Gopher type must be a single character" in str(exc_info.value)
 
+    def test_port_validation_invalid_low(self):
+        """Test port validation for values too low."""
+        with pytest.raises(ValidationError) as exc_info:
+            GopherURL(
+                host="example.com",
+                port=0,  # Invalid port
+                gopher_type="1",
+                selector="/",
+            )
+        assert "Port must be between 1 and 65535" in str(exc_info.value)
+
+    def test_port_validation_invalid_high(self):
+        """Test port validation for values too high."""
+        with pytest.raises(ValidationError) as exc_info:
+            GopherURL(
+                host="example.com",
+                port=65536,  # Invalid port
+                gopher_type="1",
+                selector="/",
+            )
+        assert "Port must be between 1 and 65535" in str(exc_info.value)
+
+    def test_port_validation_valid_boundary(self):
+        """Test port validation for boundary values."""
+        # Test minimum valid port
+        url1 = GopherURL(
+            host="example.com",
+            port=1,
+            gopher_type="1",
+            selector="/",
+        )
+        assert url1.port == 1
+
+        # Test maximum valid port
+        url2 = GopherURL(
+            host="example.com",
+            port=65535,
+            gopher_type="1",
+            selector="/",
+        )
+        assert url2.port == 65535
+
 
 class TestCacheEntry:
     """Test CacheEntry model."""
