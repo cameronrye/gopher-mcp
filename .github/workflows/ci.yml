@@ -87,6 +87,7 @@ jobs:
   security:
     name: Security checks
     runs-on: ubuntu-latest
+    # Retry after transient GitHub Actions infrastructure issues
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -123,6 +124,7 @@ jobs:
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
+    # Retry after transient GitHub Actions infrastructure issues
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
