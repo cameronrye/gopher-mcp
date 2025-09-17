@@ -1,0 +1,16 @@
+/* Extra CSS for Gopher MCP documentation */
+
+/* Custom styling can be added here */
+.md-content {
+    max-width: none;
+}
+
+/* Code block improvements */
+.highlight {
+    margin: 1em 0;
+}
+
+/* Navigation improvements */
+.md-nav__item--active > .md-nav__link {
+    font-weight: bold;
+}
