@@ -67,9 +67,13 @@ cd gopher-mcp
 uv sync --all-extras
 ```
 
+> **Note:** PyPI installation will be available once the package is published. For now, please use the GitHub installation methods above.
+
 ### 🔧 Claude Desktop Integration
 
 Add to your `claude_desktop_config.json`:
+
+**Unix/macOS/Linux:**
 
 ```json
 {
@@ -86,22 +90,41 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-## 🛠️ Cross-Platform Development
+**Windows:**
 
-This project includes a unified task management system that works across all platforms:
-
-### Unix/macOS/Linux
-
-```bash
-make <command>              # Traditional make
-uv run task <command>       # Cross-platform alternative
+```json
+{
+  "mcpServers": {
+    "gopher": {
+      "command": "uv",
+      "args": ["--directory", "C:\\path\\to\\gopher-mcp", "run", "task", "serve"],
+      "env": {
+        "MAX_RESPONSE_SIZE": "1048576",
+        "TIMEOUT_SECONDS": "30"
+      }
+    }
+  }
+}
 ```
 
-### Windows
+## 🛠️ Cross-Platform Development
 
-```batch
-task.bat <command>          # Windows batch file
-uv run task <command>       # Cross-platform alternative
+This project includes a **unified Python-based task management system** that works across all platforms:
+
+### Recommended (All Platforms)
+
+```bash
+python task.py <command>    # Unified Python task runner (recommended)
+```
+
+### Alternative Options
+
+```bash
+# Unix/macOS/Linux
+make <command>              # Traditional make (delegates to task.py)
+
+# Universal fallback
+uv run task <command>       # Direct taskipy usage
 ```
 
 ### Available Commands
