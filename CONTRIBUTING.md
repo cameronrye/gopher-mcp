@@ -46,17 +46,26 @@ uv run task quality
 
 ### Available Development Commands
 
+**Recommended (Unified Python Task Runner):**
+
+| Command                    | Description                    |
+| -------------------------- | ------------------------------ |
+| `python task.py dev-setup` | Set up development environment |
+| `python task.py quality`   | Run all quality checks         |
+| `python task.py test`      | Run all tests                  |
+| `python task.py test-cov`  | Run tests with coverage        |
+| `python task.py lint`      | Run ruff linting               |
+| `python task.py format`    | Format code with ruff          |
+| `python task.py typecheck` | Run mypy type checking         |
+| `python task.py serve`     | Run MCP server locally         |
+| `python task.py docs-serve`| Serve documentation locally    |
+
+**Alternative Commands:**
+
 | Command                  | Description                    |
 | ------------------------ | ------------------------------ |
-| `uv run task dev-setup`  | Set up development environment |
-| `uv run task quality`    | Run all quality checks         |
-| `uv run task test`       | Run all tests                  |
-| `uv run task test-cov`   | Run tests with coverage        |
-| `uv run task lint`       | Run ruff linting               |
-| `uv run task format`     | Format code with ruff          |
-| `uv run task typecheck`  | Run mypy type checking         |
-| `uv run task serve`      | Run MCP server locally         |
-| `uv run task docs-serve` | Serve documentation locally    |
+| `make <command>`         | Unix/macOS (delegates to task.py) |
+| `uv run task <command>`  | Direct taskipy usage (fallback)   |
 
 ## 📝 Code Standards
 
