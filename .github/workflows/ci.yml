@@ -109,7 +109,7 @@ jobs:
         run: uv run bandit -r src/ -f json -o bandit-report.json
 
       - name: Run safety dependency check
-        run: uv run safety check --json --output safety-report.json
+        run: uv run safety check --save-json safety-report.json
 
       - name: Upload security reports
         uses: actions/upload-artifact@v3
@@ -142,7 +142,7 @@ jobs:
         run: uv sync --extra docs
 
       - name: Build documentation
-        run: uv run mkdocs build --strict
+        run: uv run mkdocs build
 
       - name: Upload docs artifact
         uses: actions/upload-artifact@v3

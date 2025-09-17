@@ -35,29 +35,9 @@ theme:
 
 nav:
   - Home: index.md
-  - Getting Started:
-      - Installation: installation.md
-      - Quick Start: quickstart.md
-      - Configuration: configuration.md
-  - User Guide:
-      - Usage: usage.md
-      - Gopher Protocol: gopher-protocol.md
-      - MCP Integration: mcp-integration.md
-      - Examples: examples.md
-  - API Reference:
-      - API Overview: api/index.md
-      - Server: api/server.md
-      - Client: api/client.md
-      - Models: api/models.md
-      - Tools: api/tools.md
-  - Development:
-      - Contributing: contributing.md
-      - Development Setup: development.md
-      - Testing: testing.md
-      - Architecture: architecture.md
-  - About:
-      - Changelog: changelog.md
-      - License: license.md
+  - Installation: installation.md
+  - Advanced Features: advanced-features.md
+  - Gopher Specification: gopher-specification-for-llms.md
 
 plugins:
   - search
@@ -91,9 +71,7 @@ markdown_extensions:
       pygments_lang_class: true
   - pymdownx.inlinehilite
   - pymdownx.snippets
-  - pymdownx.emoji:
-      emoji_index: "material.extensions.emoji.twemoji"
-      emoji_generator: "material.extensions.emoji.to_svg"
+
   - attr_list
   - md_in_html
   - tables
