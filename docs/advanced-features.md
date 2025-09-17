@@ -1,0 +1,217 @@
+# Advanced Features
+
+This document describes the advanced features implemented in Phase 3 of the gopher-mcp project.
+
+## Security Safeguards
+
+The Gopher client includes comprehensive security features to protect against malicious content and ensure safe operation:
+
+### Input Validation
+
+- **Selector Length Limits**: Configurable maximum selector string length (default: 1024 characters)
+- **Search Query Limits**: Configurable maximum search query length (default: 256 characters)
+- **Control Character Filtering**: Rejects selectors and search queries containing dangerous control characters (CR, LF, TAB)
+- **Port Validation**: Ensures port numbers are within valid range (1-65535)
+
+### Host Allowlisting
+
+Configure allowed Gopher hosts to restrict access to trusted servers:
+
+```python
+client = GopherClient(
+    allowed_hosts=["gopher.floodgap.com", "gopher.quux.org"]
+)
+```
+
+Environment variable configuration:
+```bash
+export GOPHER_ALLOWED_HOSTS="gopher.floodgap.com,gopher.quux.org"
+```
+
+### Size and Timeout Limits
+
+- **Response Size Limits**: Maximum response size (default: 1MB)
+- **Request Timeouts**: Configurable timeout for Gopher requests (default: 30 seconds)
+- **Cache Size Limits**: Maximum number of cached entries (default: 1000)
+
+## Caching System
+
+The client implements an intelligent LRU (Least Recently Used) caching system:
+
+### Features
+
+- **TTL-based Expiration**: Configurable time-to-live for cached responses (default: 5 minutes)
+- **LRU Eviction**: Automatically removes oldest entries when cache is full
+- **Cache Hit/Miss Tracking**: Structured logging for cache performance monitoring
+- **Memory Efficient**: Stores only essential response data
+
+### Configuration
+
+```python
+client = GopherClient(
+    cache_enabled=True,
+    cache_ttl_seconds=300,  # 5 minutes
+    max_cache_entries=1000
+)
+```
+
+Environment variables:
+```bash
+export GOPHER_CACHE_ENABLED=true
+export GOPHER_CACHE_TTL_SECONDS=300
+export GOPHER_MAX_CACHE_ENTRIES=1000
+```
+
+## Transport Support
+
+The MCP server supports both stdio and HTTP transports for maximum flexibility:
+
+### Stdio Transport (Default)
+
+Best for local desktop applications like Claude Desktop:
+
+```bash
+uv run task serve
+```
+
+### HTTP Transport
+
+Ideal for remote access and web-based integrations:
+
+```bash
+# Install HTTP dependencies
+uv add --optional-group http
+
+# Start HTTP server
+uv run task serve-http
+```
+
+Configuration:
+```bash
+export GOPHER_HTTP_HOST=localhost
+export GOPHER_HTTP_PORT=8000
+```
+
+### HTTP API
+
+The HTTP transport provides a JSON-RPC 2.0 API:
+
+**Endpoint**: `POST /mcp`
+**Health Check**: `GET /health`
+
+Example request:
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "gopher_fetch",
+    "arguments": {
+      "url": "gopher://gopher.floodgap.com/1/"
+    }
+  }
+}
+```
+
+## Structured Logging
+
+Comprehensive logging with structured data for monitoring and debugging:
+
+### Log Fields
+
+- **Request Details**: URL, host, port, gopher type, selector, search query
+- **Response Metadata**: Type, size, cache status
+- **Performance Metrics**: Request duration, cache hit/miss ratios
+- **Error Information**: Error type, message, stack traces
+
+### Example Log Output
+
+```json
+{
+  "event": "Gopher fetch successful",
+  "url": "gopher://gopher.floodgap.com/1/",
+  "host": "gopher.floodgap.com",
+  "port": 70,
+  "gopher_type": "1",
+  "selector": "",
+  "search": null,
+  "response_type": "menu",
+  "response_size": 2048,
+  "cached": false,
+  "timestamp": "2024-01-15T10:30:00Z"
+}
+```
+
+## Search Functionality
+
+Full support for Gopher search servers (type 7):
+
+### URL Formats
+
+Standard query parameter:
+```
+gopher://veronica.example.com/7/search?python
+```
+
+Tab-encoded format:
+```
+gopher://veronica.example.com/7/search%09python
+```
+
+### Search Processing
+
+- Automatic detection of search servers
+- Proper tab-separated query encoding
+- Search results returned as structured menu data
+- Support for complex search queries
+
+## Configuration Reference
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GOPHER_MAX_RESPONSE_SIZE` | 1048576 | Maximum response size in bytes |
+| `GOPHER_TIMEOUT_SECONDS` | 30.0 | Request timeout in seconds |
+| `GOPHER_CACHE_ENABLED` | true | Enable response caching |
+| `GOPHER_CACHE_TTL_SECONDS` | 300 | Cache TTL in seconds |
+| `GOPHER_MAX_CACHE_ENTRIES` | 1000 | Maximum cache entries |
+| `GOPHER_ALLOWED_HOSTS` | - | Comma-separated list of allowed hosts |
+| `GOPHER_MAX_SELECTOR_LENGTH` | 1024 | Maximum selector length |
+| `GOPHER_MAX_SEARCH_LENGTH` | 256 | Maximum search query length |
+| `GOPHER_HTTP_HOST` | localhost | HTTP server host |
+| `GOPHER_HTTP_PORT` | 8000 | HTTP server port |
+
+### Programmatic Configuration
+
+```python
+from gopher_mcp.gopher_client import GopherClient
+
+client = GopherClient(
+    max_response_size=2 * 1024 * 1024,  # 2MB
+    timeout_seconds=60.0,
+    cache_enabled=True,
+    cache_ttl_seconds=600,  # 10 minutes
+    max_cache_entries=2000,
+    allowed_hosts=["trusted.gopher.site"],
+    max_selector_length=2048,
+    max_search_length=512,
+)
+```
+
+## Performance Considerations
+
+- **Caching**: Significantly reduces response times for repeated requests
+- **Connection Reuse**: Pituophis handles connection pooling efficiently
+- **Async Processing**: Non-blocking I/O for concurrent requests
+- **Memory Management**: Automatic cache eviction prevents memory leaks
+- **Size Limits**: Prevents resource exhaustion from large responses
+
+## Security Best Practices
+
+1. **Use Host Allowlists**: Restrict access to trusted Gopher servers
+2. **Set Reasonable Limits**: Configure appropriate size and timeout limits
+3. **Monitor Logs**: Use structured logging for security monitoring
+4. **Regular Updates**: Keep dependencies updated for security patches
+5. **Network Isolation**: Consider running in isolated network environments

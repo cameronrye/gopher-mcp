@@ -1,0 +1,124 @@
+site_name: Gopher MCP
+site_description: A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources
+site_url: https://gopher-mcp.readthedocs.io
+repo_url: https://github.com/cameronrye/gopher-mcp
+repo_name: cameronrye/gopher-mcp
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    # Palette toggle for light mode
+    - scheme: default
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Palette toggle for dark mode
+    - scheme: slate
+      primary: blue
+      accent: blue
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Installation: installation.md
+      - Quick Start: quickstart.md
+      - Configuration: configuration.md
+  - User Guide:
+      - Usage: usage.md
+      - Gopher Protocol: gopher-protocol.md
+      - MCP Integration: mcp-integration.md
+      - Examples: examples.md
+  - API Reference:
+      - API Overview: api/index.md
+      - Server: api/server.md
+      - Client: api/client.md
+      - Models: api/models.md
+      - Tools: api/tools.md
+  - Development:
+      - Contributing: contributing.md
+      - Development Setup: development.md
+      - Testing: testing.md
+      - Architecture: architecture.md
+  - About:
+      - Changelog: changelog.md
+      - License: license.md
+
+plugins:
+  - search
+  - autorefs
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_source: true
+            show_root_heading: true
+            show_root_toc_entry: false
+            merge_init_into_class: true
+            separate_signature: true
+            show_signature_annotations: true
+            signature_crossrefs: true
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: "pymdownx.superfences.fence_code_format"
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.emoji:
+      emoji_index: "material.extensions.emoji.twemoji"
+      emoji_generator: "material.extensions.emoji.to_svg"
+  - attr_list
+  - md_in_html
+  - tables
+  - footnotes
+  - def_list
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.arithmatex:
+      generic: true
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/cameronrye/gopher-mcp
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/gopher-mcp/
+  version:
+    provider: mike
+
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+copyright: Copyright &copy; 2025 Gopher MCP Team

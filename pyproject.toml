@@ -1,0 +1,250 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gopher-mcp"
+version = "0.1.0"
+description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources"
+readme = "README.md"
+license = "MIT"
+authors = [
+    { name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }
+]
+maintainers = [
+    { name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }
+]
+keywords = ["mcp", "gopher", "protocol", "llm", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Networking",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "mcp>=1.0.0",
+    "pituophis>=1.0.0",
+    "pydantic>=2.5.0",
+    "structlog>=23.2.0",
+    "anyio>=4.0.0",
+]
+
+[project.optional-dependencies]
+http = [
+    "aiohttp>=3.9.0",
+]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.11.0",
+    "mypy>=1.7.0",
+    "ruff>=0.1.6",
+    "pre-commit>=3.5.0",
+    "bandit>=1.7.5",
+    "safety>=2.3.0",
+]
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.4.0",
+    "mkdocs-autorefs>=0.5.0",
+    "mkdocstrings[python]>=0.24.0",
+]
+test = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.1.0",
+    "pytest-mock>=3.11.0",
+    "coverage[toml]>=7.3.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/cameronrye/gopher-mcp"
+Documentation = "https://gopher-mcp.readthedocs.io"
+Repository = "https://github.com/cameronrye/gopher-mcp"
+Issues = "https://github.com/cameronrye/gopher-mcp/issues"
+Changelog = "https://github.com/cameronrye/gopher-mcp/blob/main/CHANGELOG.md"
+
+[project.scripts]
+gopher-mcp = "gopher_mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gopher_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src",
+    "/tests",
+    "/docs",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+]
+
+# Ruff configuration
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+    "PTH", # flake8-use-pathlib
+    "ERA", # eradicate
+    "PL",  # pylint
+    "RUF", # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long, handled by formatter
+    "PLR0913", # too many arguments
+    "PLR0915", # too many statements
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["PLR2004", "S101", "ARG"]  # Allow magic values and assert in tests
+
+[tool.ruff.lint.isort]
+known-first-party = ["gopher_mcp"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# MyPy configuration
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "pituophis.*",
+    "mcp.*",
+]
+ignore_missing_imports = true
+
+# Pytest configuration
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--cov=gopher_mcp",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+    "--cov-report=xml",
+    "--cov-fail-under=50",
+]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*",
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+# Task runner configuration
+[tool.taskipy.tasks]
+# Development setup
+dev-setup = "bash scripts/dev-setup.sh"
+install-hooks = "pre-commit install"
+
+# Code quality
+lint = "ruff check src/ tests/"
+format = "ruff format src/ tests/"
+typecheck = "mypy src/ --ignore-missing-imports"
+quality = "uv run task lint && uv run task typecheck && uv run task test"
+
+# Testing
+test = "pytest tests/ -v"
+test-cov = "pytest tests/ -v --cov=src/gopher_mcp --cov-report=term-missing --cov-report=html"
+test-unit = "pytest tests/ -v -m 'not integration and not slow'"
+test-integration = "pytest tests/ -v -m integration"
+test-slow = "pytest tests/ -v -m slow"
+
+# Server operations
+serve = "python -m gopher_mcp"
+serve-http = "python -m gopher_mcp.http_server"
+
+# Documentation
+docs-serve = "mkdocs serve"
+docs-build = "mkdocs build"
+
+# Maintenance
+clean = "rm -rf .pytest_cache .coverage htmlcov dist build *.egg-info .mypy_cache .ruff_cache"
+clean-win = "if exist .pytest_cache rmdir /s /q .pytest_cache && if exist .coverage del .coverage && if exist htmlcov rmdir /s /q htmlcov && if exist dist rmdir /s /q dist && if exist build rmdir /s /q build && for /d %%i in (*.egg-info) do rmdir /s /q \"%%i\" && if exist .mypy_cache rmdir /s /q .mypy_cache && if exist .ruff_cache rmdir /s /q .ruff_cache"
+
+# Combined workflows
+check = "uv run task lint && uv run task typecheck"
+ci = "uv run task check && uv run task test-cov"
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# Bandit security linting
+[tool.bandit]
+exclude_dirs = ["tests"]
+skips = ["B101"]  # Skip assert_used test
+
+[dependency-groups]
+dev = [
+    "taskipy>=1.14.1",
+]
+
+# Additional tool configurations can be added here as needed

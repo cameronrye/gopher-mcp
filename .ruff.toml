@@ -1,0 +1,48 @@
+# Ruff configuration file
+# https://docs.astral.sh/ruff/configuration/
+
+# Additional ruff-specific settings
+cache-dir = ".ruff_cache"
+
+# Output format
+output-format = "grouped"
+
+# Show fixes
+show-fixes = true
+
+[lint.flake8-quotes]
+docstring-quotes = "double"
+inline-quotes = "double"
+multiline-quotes = "double"
+
+[lint.flake8-import-conventions]
+[lint.flake8-import-conventions.aliases]
+"typing" = "t"
+"datetime" = "dt"
+"numpy" = "np"
+"pandas" = "pd"
+
+[lint.pylint]
+max-args = 8
+max-branches = 15
+max-returns = 8
+max-statements = 60
+
+[lint.mccabe]
+max-complexity = 12
+
+[format]
+# Use single quotes for strings
+quote-style = "double"
+
+# Use spaces for indentation
+indent-style = "space"
+
+# Respect magic trailing commas
+skip-magic-trailing-comma = false
+
+# Use Unix line endings
+line-ending = "lf"
+
+# Format docstrings
+# Note: docstring-code-format moved to [tool.ruff.format] in newer versions

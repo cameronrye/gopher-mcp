@@ -1,203 +1,181 @@
-# MCP Server for the **Gopher** Protocol
+# Gopher MCP - Implementation
 
-> Goal: a cross‑platform **Model Context Protocol (MCP)** server that lets LLMs browse Gopher resources safely and efficiently.
+A cross-platform Model Context Protocol (MCP) server for browsing Gopher
+resources safely and efficiently.
 
----
+## Overview
 
-## 1) What you need to read first
+This project implements an MCP server that enables LLMs to browse Gopher
+protocol resources through a single `gopher.fetch` tool. The server provides
+structured, LLM-friendly JSON responses for Gopher menus, text files, search
+results, and binary content metadata.
 
-* **MCP (spec + concepts)**
-  * MCP spec (latest revisions, server features, messages, etc.).
-    • Overview & base protocol → JSON‑RPC, lifecycle, capabilities. ([Model Context Protocol][1])
-    • **Tools** (how tools are defined, listed, invoked). ([Model Context Protocol][2])
-    • **Transports** (stdio and Streamable HTTP; choose per deployment). ([Model Context Protocol][3])
-    • Architecture: clients discover primitives via `*/list` and execute with `tools/call`. ([Model Context Protocol][4])
-* **Gopher (protocol + URI scheme)**
-  * **RFC0-1436** (protocol): client sends selector + `CRLF`, server returns text; menus are lines ending CRLF and responses terminate with a `.` line. ([RFC Editor][5])
-  * **RFC-4266** (URI scheme): `gopher://host:port/<gophertype><selector>[%09<search>…]`; default port **70**; type is a **one‑character** prefix; search strings follow a **tab** (`%09`). ([IETF Datatracker][6])
-* **Reference MCP servers for inspiration** (patterns, ergonomics)
-  * Model Context Protocol **reference servers**: includes **Fetch** (HTML→text conversion patterns) and **Filesystem** (safe, read‑only operations). ([GitHub][7])
-* **SDKs**
-  * **Go SDK (official)** — great for single‑binary, cross‑platform builds. ([GitHub][8])
-  * **Python SDK (official)** — rapid iteration; stdio & HTTP transports supported. ([GitHub][9])
-  * **TypeScript SDK (official)** — if you prefer Node runtimes. ([GitHub][10])
+## Features
 
----
+- **Single Tool Interface**: `gopher.fetch` tool for all Gopher operations
+- **Comprehensive Support**: Handles menus (type 1), text files (type 0),
+  search servers (type 7), and binary files
+- **Real Gopher Protocol**: Uses the Pituophis library for authentic Gopher communication
+- **Safety First**: Built-in timeouts, size limits, and input sanitization
+- **LLM-Optimized**: Returns structured JSON responses optimized for
+  language model consumption
+- **Cross-Platform**: Works on Windows, macOS, and Linux with unified task management
+- **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
 
-## 2) Suggested stack (portable + simple)
+## Quick Start
 
-**Option A — Go (recommended for production)**
+### Prerequisites
 
-* *Why*: strong stdlib networking, easy concurrency, single static binary for macOS/Windows/Linux.
-* *Pieces*:
-  • **modelcontextprotocol/go-sdk** for MCP;
-  • **go‑gopher** lib for RFC-1436 client ops. ([GitHub][8])
+- Python 3.11 or higher
+- [uv](https://docs.astral.sh/uv/) package manager
 
-**Option B — Python (fastest to prototype)**
+### Installation
 
-* *Why*: batteries‑included sockets, rich SDK, easy packaging via `uv`/`pipx`.
-* *Pieces*:
-  • **mcp (Python SDK)**;
-  • **Pituophis** for Gopher client utilities. ([GitHub][9])
+```bash
+# Clone the repository
+git clone https://github.com/your-username/gopher-mcp.git
+cd gopher-mcp
 
-> Transport: prefer **stdio** for local/desktop hosts (Claude Desktop, IDE clients), add **Streamable HTTP** if you want remote usage. ([Model Context Protocol][3])
+# Set up development environment
+./scripts/dev-setup.sh  # Unix/macOS
+# or
+scripts\dev-setup.bat   # Windows
 
----
+# Run the server
+uv run task serve
+```
 
-## 3) Minimal server design (MVP)
+## Cross-Platform Development
 
-**Expose one tool** (name it `gopher.fetch`):
+This project includes a unified task management system that works across all platforms:
 
-* **Input (JSON Schema)**
+### Unix/macOS/Linux
 
-  * `url` *(string, required)* — full `gopher://…` URL per RFC 4266; or
-  * Advanced form: `{ host, port=70, type, selector, search? }`. ([IETF Datatracker][6])
-* **Behavior**
+```bash
+make <command>              # Traditional make
+uv run task <command>       # Cross-platform alternative
+```
 
-  1. Parse URL: extract `host`, `port` (default 70), `gophertype`, `selector`, optional `search` (tab‑separated). ([IETF Datatracker][6])
-  2. Open TCP → send `selector` (and, for type `7`, append `\t<search>`) + **`\r\n`**. ([RFC Editor][5])
-  3. Read until close; for menus: stop on a line `.`. ([RFC Editor][5])
-* **Output (LLM‑friendly)**
+### Windows
 
-  * If **menu** (type `1`): return **structured JSON** list of items:
-    `{ type, title, selector, host, port }` (the five tab‑separated fields from each line). ([RFC Editor][5])
-  * If **text** (type `0`): return `text` as UTF‑8.
-  * If **binary/unknown**: return `{ kind:"binary", bytes:N, note:"not returned" }`.
+```batch
+task.bat <command>          # Windows batch file
+uv run task <command>       # Cross-platform alternative
+```
 
-> Tool lifecycle and discovery: implement `tools/list` and `tools/call` per spec so clients can discover and invoke `gopher.fetch`. ([Model Context Protocol][2])
+### Available Commands
 
----
+| Command            | Description                    |
+| ------------------ | ------------------------------ |
+| `dev-setup`        | Set up development environment |
+| `install-hooks`    | Install pre-commit hooks       |
+| `lint`             | Run ruff linting               |
+| `format`           | Format code with ruff          |
+| `typecheck`        | Run mypy type checking         |
+| `quality`          | Run all quality checks         |
+| `check`            | Run lint + typecheck           |
+| `test`             | Run all tests                  |
+| `test-cov`         | Run tests with coverage        |
+| `test-unit`        | Run unit tests only            |
+| `test-integration` | Run integration tests          |
+| `serve`            | Run MCP server (stdio)         |
+| `serve-http`       | Run MCP server (HTTP)          |
+| `docs-serve`       | Serve docs locally             |
+| `docs-build`       | Build documentation            |
+| `clean`            | Clean build artifacts          |
+| `ci`               | Run CI pipeline locally        |
 
-## 4) Gopher implementation notes (hardening)
+## Usage
 
-* **Menu format**: first char is item **type** (`0` text, `1` menu, `7` search, etc.); fields are **tab‑separated**; lines end **CRLF**; response ends with a line `.`. ([RFC Editor][5])
-* **Search (type `7`)**: send `selector`, **tab**, `search`, then `CRLF`. Handle URL `%09` decoding. ([IETF Datatracker][6])
-* **URL parsing**: if path is empty, type defaults to `1` (directory). Mind the leading type char in the path. ([IETF Datatracker][6])
-* **Libraries**:
-  • Go: `github.com/prologic/go-gopher` (client & server helpers). ([Go Packages][11])
-  • Python: **Pituophis** (simple `get(host, port, path, query)` APIs). ([PyPI][12])
+The server provides a single MCP tool:
 
----
+### `gopher.fetch`
 
-## 5) Features that matter to **LLMs**
+Fetches Gopher menus or text by URL.
 
-* **Structured menus**: always parse menus into JSON objects (not raw text). This improves planning (“pick item titled *FAQ* next”). (Pattern borrowed from the **Fetch** server’s HTML→text shaping.) ([GitHub][13])
-* **Deterministic output shapes**: define a stable schema for `MenuResult` and `TextResult` so the host can render or chain calls.
-* **Type‑aware follow‑ups**: include `nextUrl` (fully formed `gopher://…`) for each item to make recursive navigation trivial for the model.
-* **Search support**: accept `search` input to drive Veronica‑style indices (type `7`). ([RFC Editor][5])
-* **Result size controls**: `maxBytes`, `maxItems`, `timeoutMs` to protect model context.
-* **Caching**: in‑memory LRU keyed by `host|port|selector|search` (Gopher content is mostly static).
-* **Binary guardrails**: detect non‑text; return metadata only (size, guessed MIME) to avoid polluting context.
-* **Provenance**: echo back the exact request (`host`, `port`, `selector`, `type`) in the result so models can cite or retry.
+**Parameters:**
 
----
+- `url` (string): Full Gopher URL (e.g., `gopher://gopher.floodgap.com/1/`)
 
-## 6) Security & reliability checklist
+**Returns:**
 
-* **Transport choice**: prefer **stdio** for local hosts; use **Streamable HTTP** only when you need remote connectivity. ([Model Context Protocol][3])
-* **Sanitize & bound**: cap line length, item count, and total bytes per fetch; reject selectors containing tab/CR/LF in violation of RFC rules. ([IETF Datatracker][6])
-* **Time/outbound limits**: set connection/read timeouts; optional allow‑list of Gopher hosts.
-* **Credentials**: RFC-4266 notes Gopher has **no privacy** and **plaintext auth** (if used); treat it as public‑data only. ([IETF][14])
-* **Observability**: structured logs per call (host, selector, size, duration).
-* **Permission model**: expose a single read‑only tool; no file writes or command exec (use Filesystem server patterns as inspiration). ([GitHub][15])
+- **MenuResult**: For Gopher menus (type 1) and search results (type 7)
+- **TextResult**: For text files (type 0)
+- **BinaryResult**: Metadata only for binary files (types 4, 5, 6, 9, g, I)
+- **ErrorResult**: For errors or unsupported content
 
----
+### Example Usage with Claude Desktop
 
-## 7) Development flow (quick)
+Add to your `claude_desktop_config.json`:
 
-1. **Scaffold** an MCP server (Go/Python SDK quickstarts). ([GitHub][8])
-2. **Add `gopher.fetch`** tool definition (schema + handler). ([Model Context Protocol][2])
-3. **Implement**: RFC-4266 URL parse → RFC-1436 request/response → menu parser. ([IETF Datatracker][6])
-4. **Test** with an MCP client/inspector and a few public Gopher holes (e.g., menus & text retrieval).
-5. **Polish**: caching, size limits, error taxonomy, structured outputs.
-
----
-
-## 8) “Competition” & inspiration
-
-* **Gopher‑specific MCP servers**: none clearly discovered in public listings/repositories at time of writing (searched GitHub + MCP server directories). That’s an opportunity to be first. ([GitHub][7])
-* **Inspiration**: study **Fetch** (document shaping) and **Filesystem** (defensive IO & safe scopes) reference servers. ([GitHub][13])
-
-*(Search notes: looked for “Gopher MCP server / Model Context Protocol gopher”; results surfaced general MCP repos and a “GopherSecurity/gopher‑mcp” **C++ SDK**, which is unrelated to the Gopher protocol.)* ([GitHub][16])
-
----
-
-## 9) Language/tech recommendation (summary)
-
-* **Go + go‑sdk + go‑gopher** → best portability/perf; single binary, easy CI/CD. ([GitHub][8])
-* **Python + mcp + Pituophis** → fastest to build; great for experimentation and richer text processing. ([GitHub][9])
-
----
-
-## 10) Handy links
-
-* **MCP**
-  • Spec overview · server features · tools · transports. ([Model Context Protocol][1])
-  • Reference servers (Fetch, Filesystem, etc.). ([GitHub][7])
-  • Go SDK · Python SDK · TypeScript SDK. ([GitHub][8])
-* **Gopher**
-  • **RFC-1436** (protocol). ([RFC Editor][5])
-  • **RFC-4266** (URI scheme). ([IETF Datatracker][6])
-  • Python **Pituophis** · Go **go‑gopher**. ([PyPI][12])
-
----
-
-## 11) Example I/O shapes (keep it this small)
-
-### tools/list -> define once
 ```json
 {
-  "name": "gopher.fetch",
-  "description": "Fetch Gopher menus or text by URL.",
-  "inputSchema": {
-    "type": "object",
-    "required": ["url"],
-    "properties": { "url": { "type": "string", "format": "uri" } }
+  "mcpServers": {
+    "gopher": {
+      "command": "uv",
+      "args": ["--directory", "/path/to/gopher-mcp", "run", "task", "serve"]
+    }
   }
 }
 ```
 
-### Success: menu
-```json
-{
-  "kind": "menu",
-  "items": [
-    { "type": "1", "title": "Floodgap Home", "selector": "/home", "host": "gopher.floodgap.com", "port": 70, "nextUrl": "gopher://gopher.floodgap.com:70/1/home" }
-  ]
-}
+## Development
+
+### Project Structure
+
+```text
+gopher-mcp/
+├── src/gopher_mcp/          # Main package
+│   ├── __init__.py
+│   ├── server.py            # MCP server implementation
+│   ├── gopher_client.py     # Gopher protocol client
+│   ├── models.py            # Pydantic data models
+│   ├── tools.py             # MCP tool definitions
+│   └── utils.py             # Utility functions
+├── tests/                   # Test suite
+├── docs/                    # Documentation
+├── scripts/                 # Development scripts
+├── .github/workflows/       # CI/CD pipelines
+├── Makefile                 # Unix/macOS task runner
+├── task.bat                 # Windows task runner
+└── pyproject.toml           # Project configuration
 ```
 
-### Success: text
-```json
-{ "kind": "text", "charset": "utf-8", "bytes": 2314, "text": "..." }
-```
+### Development Workflow
 
-### Error
-```json
-{ "error": { "code": "ECONN", "message": "dial tcp 203.0.113.1:70: i/o timeout" } }
-```
+1. **Setup**: `uv run task dev-setup`
+2. **Code**: Make your changes
+3. **Quality**: `uv run task quality` (lint + typecheck + test)
+4. **Test**: `uv run task test-cov`
+5. **Commit**: Pre-commit hooks run automatically
 
----
+## Configuration
 
-### Final tips
+The server can be configured through environment variables or initialization parameters:
 
-* Keep the **tool surface small**, the **outputs structured**, and the **timeouts strict**.
-* Document limits (max bytes/items), and surface provenance for every fetch.
-* Use the reference servers’ ergonomics to make it “automatic” for LLMs to chain calls. ([GitHub][13])
+- `MAX_RESPONSE_SIZE`: Maximum response size in bytes (default: 1MB)
+- `TIMEOUT_SECONDS`: Request timeout (default: 30s)
+- `CACHE_ENABLED`: Enable response caching (default: true)
+- `CACHE_TTL_SECONDS`: Cache TTL (default: 300s)
 
-[1]: https://modelcontextprotocol.io/specification/2025-06-18 "Specification - Model Context Protocol"
-[2]: https://modelcontextprotocol.io/specification/2025-06-18/server/tools "Tools - Model Context Protocol"
-[3]: https://modelcontextprotocol.io/docs/concepts/transports "Transports - Model Context Protocol"
-[4]: https://modelcontextprotocol.io/docs/learn/architecture "Architecture overview - Model Context Protocol"
-[5]: https://www.rfc-editor.org/rfc/rfc1436 "RFC 1436:  The Internet Gopher Protocol (a distributed document search and retrieval protocol) "
-[6]: https://datatracker.ietf.org/doc/html/rfc4266 "RFC 4266 - The gopher URI Scheme"
-[7]: https://github.com/modelcontextprotocol/servers "GitHub - modelcontextprotocol/servers: Model Context Protocol Servers"
-[8]: https://github.com/modelcontextprotocol/go-sdk "GitHub - modelcontextprotocol/go-sdk: The official Go SDK for Model ..."
-[9]: https://github.com/modelcontextprotocol/python-sdk "GitHub - modelcontextprotocol/python-sdk: The official Python SDK for ..."
-[10]: https://github.com/modelcontextprotocol/typescript-sdk "GitHub - modelcontextprotocol/typescript-sdk: The official TypeScript ..."
-[11]: https://pkg.go.dev/github.com/prologic/go-gopher "gopher package - github.com/prologic/go-gopher - Go Packages"
-[12]: https://pypi.org/project/Pituophis/ "Pituophis · PyPI"
-[13]: https://github.com/modelcontextprotocol/servers/blob/main/src/fetch "servers/src/fetch at main · modelcontextprotocol/servers · GitHub"
-[14]: https://www.ietf.org/rfc/rfc4266.txt "www.ietf.org"
-[15]: https://github.com/modelcontextprotocol/servers/blob/main/src/filesystem "servers/src/filesystem at main · modelcontextprotocol/servers · GitHub"
-[16]: https://github.com/GopherSecurity/gopher-mcp "GitHub - GopherSecurity/gopher-mcp: MCP C++ SDK - Model Context ..."
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Set up development environment: `uv run task dev-setup`
+4. Make your changes
+5. Run quality checks: `uv run task quality`
+6. Commit your changes: `git commit -m 'Add amazing feature'`
+7. Push to the branch: `git push origin feature/amazing-feature`
+8. Submit a pull request
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE)
+file for details.
+
+## Acknowledgments
+
+- [Model Context Protocol](https://modelcontextprotocol.io/) by Anthropic
+- [Pituophis](https://github.com/dotcomboom/pituophis) Gopher client library
+- The Gopher protocol community
