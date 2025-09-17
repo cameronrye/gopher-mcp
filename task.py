@@ -199,7 +199,7 @@ class TaskRunner:
         """Run a specific task."""
         if task_name not in self.tasks:
             error_msg = self._colorize(
-                f"❌ Unknown task: {task_name}", Colors.RED + Colors.BOLD
+                f"Error: Unknown task: {task_name}", Colors.RED + Colors.BOLD
             )
             print(error_msg)
             available_tasks = self._colorize(
@@ -220,10 +220,10 @@ class TaskRunner:
             cmd += " " + " ".join(extra_args)
 
         running_msg = self._colorize(
-            f"🚀 Running: {task['desc']}", Colors.GREEN + Colors.BOLD
+            f"Running: {task['desc']}", Colors.GREEN + Colors.BOLD
         )
         print(running_msg)
-        command_msg = self._colorize(f"📝 Command: {cmd}", Colors.BLUE + Colors.DIM)
+        command_msg = self._colorize(f"Command: {cmd}", Colors.BLUE + Colors.DIM)
         print(command_msg)
 
         # Change to project root
