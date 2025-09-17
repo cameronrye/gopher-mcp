@@ -246,6 +246,7 @@ skips = ["B101"]  # Skip assert_used test
 
 [dependency-groups]
 dev = [
+    "ruff>=0.13.0",
     "taskipy>=1.14.1",
 ]
 

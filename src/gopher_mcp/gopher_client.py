@@ -281,11 +281,11 @@ class GopherClient:
             text_content = response.text()
 
             # Sanitize the text content
-            # Remove any control characters except newlines and tabs
+            # Remove any control characters except newlines, carriage returns, and tabs
             sanitized_text = "".join(
                 char
                 for char in text_content
-                if char.isprintable() or char in ["\n", "\t"]
+                if char.isprintable() or char in ["\n", "\t", "\r"]
             )
 
             return TextResult(
