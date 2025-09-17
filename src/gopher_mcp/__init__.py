@@ -9,11 +9,9 @@ __author__ = "Gopher MCP Team"
 __email__ = "team@gopher-mcp.dev"
 __license__ = "MIT"
 
-from .server import mcp, gopher_fetch
+from .server import gopher_fetch, mcp
 
 __all__ = [
     "mcp",
     "gopher_fetch",
 ]
-
-__all__ = ["GopherMCPServer"]

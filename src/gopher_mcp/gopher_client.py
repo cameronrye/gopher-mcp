@@ -49,6 +49,7 @@ class GopherClient:
             allowed_hosts: List of allowed hostnames (None = allow all)
             max_selector_length: Maximum selector string length
             max_search_length: Maximum search query length
+
         """
         self.max_response_size = max_response_size
         self.timeout_seconds = timeout_seconds
@@ -73,6 +74,7 @@ class GopherClient:
 
         Raises:
             ValueError: If security validation fails
+
         """
         # Check allowed hosts
         if self.allowed_hosts and parsed_url.host not in self.allowed_hosts:
@@ -110,6 +112,7 @@ class GopherClient:
 
         Returns:
             Structured response based on content type
+
         """
         try:
             # Parse the URL
@@ -188,6 +191,7 @@ class GopherClient:
 
         Returns:
             Appropriate response based on content type
+
         """
         try:
             # Create Pituophis request
@@ -237,6 +241,7 @@ class GopherClient:
 
         Returns:
             Parsed menu result
+
         """
         try:
             # Parse the menu using Pituophis
@@ -275,6 +280,7 @@ class GopherClient:
 
         Returns:
             Text result
+
         """
         try:
             # Get text content from response
@@ -314,6 +320,7 @@ class GopherClient:
 
         Returns:
             Binary result with metadata only (no binary data for LLM)
+
         """
         try:
             # Get the binary size
@@ -356,6 +363,7 @@ class GopherClient:
 
         Returns:
             Cached response or None
+
         """
         if not self.cache_enabled or url not in self._cache:
             return None
@@ -375,6 +383,7 @@ class GopherClient:
         Args:
             url: Gopher URL
             response: Response to cache
+
         """
         if not self.cache_enabled:
             return

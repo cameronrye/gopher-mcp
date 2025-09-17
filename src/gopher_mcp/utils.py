@@ -17,6 +17,7 @@ def parse_gopher_url(url: str) -> GopherURL:
 
     Raises:
         ValueError: If URL is invalid
+
     """
     if not url.startswith("gopher://"):
         raise ValueError("URL must start with 'gopher://'")
@@ -69,6 +70,7 @@ def parse_menu_line(line: str) -> Optional[GopherMenuItem]:
 
     Returns:
         Parsed menu item or None if invalid
+
     """
     # Remove CRLF
     line = line.rstrip("\r\n")
@@ -113,6 +115,7 @@ def parse_gopher_menu(content: str) -> List[GopherMenuItem]:
 
     Returns:
         List of parsed menu items
+
     """
     items = []
 
@@ -135,6 +138,7 @@ def sanitize_selector(selector: str) -> str:
 
     Raises:
         ValueError: If selector contains invalid characters
+
     """
     # Check for forbidden characters per RFC 1436
     forbidden_chars = ["\t", "\r", "\n"]
@@ -168,6 +172,7 @@ def format_gopher_url(
 
     Returns:
         Formatted Gopher URL
+
     """
     # Sanitize inputs
     selector = sanitize_selector(selector)
@@ -195,6 +200,7 @@ def guess_mime_type(gopher_type: str, selector: str = "") -> str:
 
     Returns:
         Guessed MIME type
+
     """
     # Standard Gopher type mappings
     type_mappings = {
@@ -243,6 +249,7 @@ def validate_gopher_response(content: bytes, max_size: int) -> None:
 
     Raises:
         ValueError: If response is invalid
+
     """
     if len(content) > max_size:
         raise ValueError(f"Response too large: {len(content)} bytes (max {max_size})")

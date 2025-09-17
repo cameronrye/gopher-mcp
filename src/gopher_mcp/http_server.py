@@ -20,6 +20,7 @@ class HTTPServer:
         Args:
             host: Host to bind to
             port: Port to bind to
+
         """
         self.host = host
         self.port = port

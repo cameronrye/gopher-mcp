@@ -1,4 +1,9 @@
-"""MCP tool definitions for Gopher operations."""
+"""MCP tool definitions for Gopher operations.
+
+This module provides manual tool creation functions for users who want to
+create MCP tool definitions programmatically. The main server implementation
+in server.py uses FastMCP's decorator approach instead.
+"""
 
 from mcp.types import Tool
 
@@ -8,6 +13,7 @@ def create_gopher_fetch_tool() -> Tool:
 
     Returns:
         Tool definition for gopher.fetch
+
     """
     return Tool(
         name="gopher.fetch",

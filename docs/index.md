@@ -20,14 +20,16 @@ Gopher MCP provides a bridge between modern Large Language Models and the classi
 ### Installation
 
 ```bash
-# Install from PyPI (coming soon)
-pip install gopher-mcp
-
-# Or install from source
+# Install from source (recommended for now)
 git clone https://github.com/cameronrye/gopher-mcp.git
 cd gopher-mcp
-uv sync
+uv sync --all-extras
+
+# Or install directly from GitHub
+uv add git+https://github.com/cameronrye/gopher-mcp.git
 ```
+
+> **Note:** PyPI installation will be available once the package is published.
 
 ### Basic Usage
 

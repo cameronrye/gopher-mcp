@@ -59,6 +59,7 @@ async def gopher_fetch(url: str) -> Dict[str, Any]:
 
     Args:
         url: Full Gopher URL to fetch (e.g., gopher://gopher.floodgap.com/1/)
+
     """
     try:
         request = GopherFetchRequest(url=url)
