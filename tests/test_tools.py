@@ -1,6 +1,5 @@
 """Tests for gopher_mcp.tools module."""
 
-import pytest
 from mcp.types import Tool
 
 from gopher_mcp.tools import create_gopher_fetch_tool
