@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'  # Trigger on version tags like v1.0.0, v1.2.3, etc.
+      - "v*" # Trigger on version tags like v1.0.0, v1.2.3, etc.
 
 env:
   FORCE_COLOR: "1"
@@ -22,6 +22,16 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Verify release branch
+        run: |
+          BRANCH=$(git rev-parse --abbrev-ref HEAD)
+          if [[ "$BRANCH" != "main" ]]; then
+            echo "❌ Releases must be created from the main branch"
+            echo "Current branch: $BRANCH"
+            exit 1
+          fi
+          echo "✅ Releasing from main branch"
+
       - name: Get version from tag
         id: get-version
         run: |
@@ -29,24 +39,51 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
+      - name: Validate version format
+        run: |
+          VERSION=${{ steps.get-version.outputs.version }}
+          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9\-\.]+)?$ ]]; then
+            echo "❌ Invalid version format: $VERSION"
+            echo "Expected format: X.Y.Z or X.Y.Z-suffix"
+            exit 1
+          fi
+          echo "✅ Version format is valid"
+
       - name: Check if prerelease
         id: check-prerelease
         run: |
           VERSION=${{ steps.get-version.outputs.version }}
           if [[ $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "is-prerelease=false" >> $GITHUB_OUTPUT
+            echo "✅ Stable release: $VERSION"
           else
             echo "is-prerelease=true" >> $GITHUB_OUTPUT
+            echo "⚠️ Pre-release: $VERSION"
           fi
 
-      - name: Validate version format
+      - name: Validate version consistency
         run: |
           VERSION=${{ steps.get-version.outputs.version }}
-          if [[ ! $VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+([a-zA-Z0-9\-\.]+)?$ ]]; then
-            echo "Invalid version format: $VERSION"
-            echo "Expected format: X.Y.Z or X.Y.Z-suffix"
+          PYPROJECT_VERSION=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
+
+          if [[ "$VERSION" != "$PYPROJECT_VERSION" ]]; then
+            echo "❌ Version mismatch!"
+            echo "Tag version: $VERSION"
+            echo "pyproject.toml version: $PYPROJECT_VERSION"
+            echo "Please update pyproject.toml version to match the tag"
             exit 1
           fi
+          echo "✅ Version consistency validated"
+
+      - name: Validate changelog
+        run: |
+          VERSION=${{ steps.get-version.outputs.version }}
+          if ! grep -q "## \[${VERSION}\]" CHANGELOG.md; then
+            echo "❌ Changelog missing entry for version $VERSION"
+            echo "Please add a changelog entry for this version"
+            exit 1
+          fi
+          echo "✅ Changelog entry found for version $VERSION"
 
   test-and-build:
     name: Test and build
@@ -72,12 +109,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      - name: Update version in pyproject.toml
-        run: |
-          VERSION=${{ needs.validate-release.outputs.version }}
-          sed -i "s/^version = .*/version = \"$VERSION\"/" pyproject.toml
-          echo "Updated version to $VERSION"
-
       - name: Run full test suite
         run: uv run pytest --cov-report=xml --cov-report=term
 
@@ -100,6 +131,25 @@ jobs:
 
       - name: Check distribution packages
         run: uv run python -m twine check dist/*
+
+      - name: Test package installation
+        run: |
+          # Create a temporary virtual environment to test installation
+          python -m venv test_env
+          source test_env/bin/activate || test_env\Scripts\activate.bat
+
+          # Install the built package
+          pip install dist/*.whl
+
+          # Test basic import
+          python -c "import gopher_mcp; print('✅ Package imports successfully')"
+
+          # Test CLI command
+          gopher-mcp --help > /dev/null && echo "✅ CLI command works"
+
+          # Cleanup
+          deactivate
+          rm -rf test_env
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -130,16 +180,38 @@ jobs:
         id: release-notes
         run: |
           VERSION=${{ needs.validate-release.outputs.version }}
-          
+
           # Extract changelog section for this version
           if grep -q "## \[${VERSION}\]" CHANGELOG.md; then
-            NOTES=$(sed -n "/## \[${VERSION}\]/,/## \[/p" CHANGELOG.md | sed '$d' | tail -n +2)
+            # Extract content between this version and the next version header
+            NOTES=$(awk "/## \[${VERSION}\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md | sed '/^$/d' | head -n -1)
+
+            if [[ -z "$NOTES" ]]; then
+              NOTES="Release version ${VERSION}"
+            fi
           else
-            NOTES="Release version ${VERSION}"
+            NOTES="Release version ${VERSION}. No changelog entry found for this version."
           fi
-          
-          # Save to file for multiline output
+
+          # Create release notes file
           echo "$NOTES" > release_notes.txt
+          echo "" >> release_notes.txt
+          echo "---" >> release_notes.txt
+          echo "" >> release_notes.txt
+          echo "**Release Information:**" >> release_notes.txt
+          echo "- Version: ${VERSION}" >> release_notes.txt
+          echo "- Release Date: $(date -u +"%Y-%m-%d")" >> release_notes.txt
+          echo "- Commit: ${GITHUB_SHA:0:7}" >> release_notes.txt
+          echo "- Workflow: [${GITHUB_RUN_ID}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})" >> release_notes.txt
+          echo "" >> release_notes.txt
+          echo "**Installation:**" >> release_notes.txt
+          echo "\`\`\`bash" >> release_notes.txt
+          echo "pip install gopher-mcp==${VERSION}" >> release_notes.txt
+          echo "\`\`\`" >> release_notes.txt
+          echo "" >> release_notes.txt
+          echo "**Verification:**" >> release_notes.txt
+          echo "All packages are signed and can be verified using [Sigstore](https://www.sigstore.dev/)." >> release_notes.txt
+
           echo "Generated release notes for version $VERSION"
 
       - name: Create GitHub Release
@@ -162,7 +234,8 @@ jobs:
       name: pypi
       url: https://pypi.org/p/gopher-mcp
     permissions:
-      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+      id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
+      attestations: write # For artifact attestation
 
     steps:
       - name: Download build artifacts
@@ -171,7 +244,13 @@ jobs:
           name: release-dist
           path: dist/
 
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: "dist/*"
+
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           verbose: true
+          attestations: true

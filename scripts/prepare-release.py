@@ -148,6 +148,8 @@ class ReleasePreparation:
 
         steps = [
             ("🔍 Validating Configuration", self._validate_configuration),
+            ("📋 Validating Changelog", self._validate_changelog),
+            ("🔢 Checking Version Consistency", self._check_version_consistency),
         ]
 
         if not skip_tests:
@@ -191,6 +193,77 @@ class ReleasePreparation:
             return result.returncode == 0
         except Exception as e:
             self.errors.append(f"Configuration validation failed: {e}")
+            return False
+
+    def _validate_changelog(self) -> bool:
+        """Validate changelog has entry for current version."""
+        try:
+            changelog_path = self.project_root / "CHANGELOG.md"
+            if not changelog_path.exists():
+                self.errors.append("CHANGELOG.md not found")
+                return False
+
+            current_version = self._get_current_version()
+            content = changelog_path.read_text()
+
+            # Check if version entry exists
+            version_pattern = rf"## \[{re.escape(current_version)}\]"
+            if not re.search(version_pattern, content):
+                self.errors.append(
+                    f"No changelog entry found for version {current_version}"
+                )
+                return False
+
+            # Check if the entry has content
+            section_pattern = (
+                rf"## \[{re.escape(current_version)}\].*?\n(.*?)(?=\n## \[|\Z)"
+            )
+            match = re.search(section_pattern, content, re.DOTALL)
+            if match:
+                section_content = match.group(1).strip()
+                if not section_content or section_content == "- TBD":
+                    self.errors.append(
+                        f"Changelog entry for version {current_version} is empty or placeholder"
+                    )
+                    return False
+
+            print(f"✅ Changelog entry found for version {current_version}")
+            return True
+
+        except Exception as e:
+            self.errors.append(f"Changelog validation failed: {e}")
+            return False
+
+    def _check_version_consistency(self) -> bool:
+        """Check version consistency across files."""
+        try:
+            current_version = self._get_current_version()
+
+            # Check if version format is valid
+            if not self._validate_version_format(current_version):
+                self.errors.append(f"Invalid version format: {current_version}")
+                return False
+
+            # Check for any git tags that might conflict
+            try:
+                result = subprocess.run(
+                    ["git", "tag", "-l", f"v{current_version}"],
+                    cwd=self.project_root,
+                    capture_output=True,
+                    text=True,
+                )
+                if result.stdout.strip():
+                    self.warnings.append(f"Git tag v{current_version} already exists")
+
+            except subprocess.CalledProcessError:
+                # Git not available or not a git repo, skip tag check
+                pass
+
+            print(f"✅ Version {current_version} format is valid")
+            return True
+
+        except Exception as e:
+            self.errors.append(f"Version consistency check failed: {e}")
             return False
 
     def _run_tests(self) -> bool:

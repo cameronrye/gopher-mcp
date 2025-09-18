@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gopher-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources"
 readme = "README.md"
 license = "MIT"
@@ -87,7 +87,7 @@ include = ["/src", "/tests", "/docs", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 # Ruff configuration
 [tool.ruff]
-target-version = "py311"
+target-version = "0.2.0"
 line-length = 88
 src = ["src", "tests"]
 
@@ -132,7 +132,7 @@ line-ending = "auto"
 
 # MyPy configuration
 [tool.mypy]
-python_version = "3.11"
+python_version = "0.2.0"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -154,7 +154,7 @@ ignore_missing_imports = true
 
 # Pytest configuration
 [tool.pytest.ini_options]
-minversion = "7.0"
+minversion = "0.2.0"
 addopts = [
     "--strict-markers",
     "--strict-config",
