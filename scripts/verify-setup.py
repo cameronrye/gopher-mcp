@@ -135,7 +135,9 @@ class SetupVerifier:
         mkdocs_config = self.project_root / "mkdocs.yml"
         content = mkdocs_config.read_text()
         if "cameronrye.github.io/gopher-mcp" not in content:
-            self.warnings.append("MkDocs site_url may not be configured for GitHub Pages")
+            self.warnings.append(
+                "MkDocs site_url may not be configured for GitHub Pages"
+            )
 
     def _check_package_config(self) -> None:
         """Check package configuration."""
@@ -155,7 +157,9 @@ class SetupVerifier:
 
         # Check URLs
         if "cameronrye.github.io/gopher-mcp" not in content:
-            self.warnings.append("Documentation URL may not be updated for GitHub Pages")
+            self.warnings.append(
+                "Documentation URL may not be updated for GitHub Pages"
+            )
 
     def _check_dev_tools(self) -> None:
         """Check development tools configuration."""
@@ -180,7 +184,7 @@ def main():
     """Main entry point."""
     verifier = SetupVerifier()
     success = verifier.verify_setup()
-    
+
     if success:
         print("\n🎉 Setup verification complete! Ready for open source release.")
         print("\nNext steps:")
@@ -189,7 +193,7 @@ def main():
         print("3. Test the release process")
     else:
         print("\n❌ Setup verification failed. Please fix the issues above.")
-    
+
     sys.exit(0 if success else 1)
 
 

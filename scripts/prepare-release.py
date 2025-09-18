@@ -72,7 +72,9 @@ class ReleasePreparation:
             return
 
         # Find the unreleased section
-        unreleased_pattern = r"## \[Unreleased\].*?\n(.*?)(?=\n## \[|\n\[unreleased\]|\Z)"
+        unreleased_pattern = (
+            r"## \[Unreleased\].*?\n(.*?)(?=\n## \[|\n\[unreleased\]|\Z)"
+        )
         match = re.search(unreleased_pattern, content, re.DOTALL | re.IGNORECASE)
 
         if match:
@@ -80,6 +82,7 @@ class ReleasePreparation:
             if unreleased_content:
                 # Add new version section
                 import datetime
+
                 today = datetime.date.today().strftime("%Y-%m-%d")
                 new_section = f"\n## [{version}] - {today}\n\n{unreleased_content}\n"
 
@@ -88,7 +91,7 @@ class ReleasePreparation:
                     r"(## \[Unreleased\].*?\n).*?(?=\n## \[|\n\[unreleased\]|\Z)",
                     r"\1\n" + new_section,
                     content,
-                    flags=re.DOTALL | re.IGNORECASE
+                    flags=re.DOTALL | re.IGNORECASE,
                 )
 
                 changelog_path.write_text(content)
@@ -105,7 +108,9 @@ class ReleasePreparation:
         # Check if tag already exists
         result = subprocess.run(
             ["git", "tag", "-l", tag_name],
-            capture_output=True, text=True, cwd=self.project_root
+            capture_output=True,
+            text=True,
+            cwd=self.project_root,
         )
         if result.stdout.strip():
             print(f"❌ Tag {tag_name} already exists!")
@@ -124,10 +129,9 @@ class ReleasePreparation:
 
             # Ask if user wants to push
             response = input(f"Push tag {tag_name} to origin? (y/N): ")
-            if response.lower() == 'y':
+            if response.lower() == "y":
                 push_result = subprocess.run(
-                    ["git", "push", "origin", tag_name],
-                    cwd=self.project_root
+                    ["git", "push", "origin", tag_name], cwd=self.project_root
                 )
                 if push_result.returncode == 0:
                     print(f"✅ Pushed tag {tag_name} to origin")
@@ -147,17 +151,21 @@ class ReleasePreparation:
         ]
 
         if not skip_tests:
-            steps.extend([
-                ("🧪 Running Tests", self._run_tests),
-                ("📝 Checking Code Quality", self._check_code_quality),
-                ("🔐 Security Scan", self._security_scan),
-            ])
+            steps.extend(
+                [
+                    ("🧪 Running Tests", self._run_tests),
+                    ("📝 Checking Code Quality", self._check_code_quality),
+                    ("🔐 Security Scan", self._security_scan),
+                ]
+            )
 
-        steps.extend([
-            ("📚 Validating Documentation", self._validate_documentation),
-            ("🔧 Checking Dependencies", self._check_dependencies),
-            ("📦 Building Package", self._build_package),
-        ])
+        steps.extend(
+            [
+                ("📚 Validating Documentation", self._validate_documentation),
+                ("🔧 Checking Dependencies", self._check_dependencies),
+                ("📦 Building Package", self._build_package),
+            ]
+        )
 
         for step_name, step_func in steps:
             print(f"{step_name}...")
@@ -501,7 +509,7 @@ def main():
         print(f"New version: {args.version}")
 
         response = input("Update version? (y/N): ")
-        if response.lower() == 'y':
+        if response.lower() == "y":
             prep._update_version(args.version)
             prep._update_changelog(args.version)
 
@@ -511,7 +519,7 @@ def main():
     # Create git tag if requested and successful
     if success and args.version and not args.skip_tag:
         response = input(f"Create git tag v{args.version}? (y/N): ")
-        if response.lower() == 'y':
+        if response.lower() == "y":
             prep._create_git_tag(args.version, args.tag_message)
 
     sys.exit(0 if success else 1)
