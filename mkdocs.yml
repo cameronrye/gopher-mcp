@@ -51,6 +51,10 @@ nav:
   - Development:
       - Repository Setup: development/repository-setup.md
       - Open Source Release Checklist: development/open-source-release-checklist.md
+      - Gemini API Contracts: development/gemini_api_contracts.md
+      - Gemini Project Timeline: development/gemini_project_timeline.md
+      - Gemini Security Architecture: development/gemini_security_architecture.md
+  - Contributing: contributing.md
 
 plugins:
   - search
