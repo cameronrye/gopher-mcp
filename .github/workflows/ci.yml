@@ -54,6 +54,57 @@ jobs:
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
 
+  gemini-tests:
+    name: Gemini Protocol Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run Gemini-specific tests
+        run: |
+          uv run pytest tests/test_gemini*.py -v --tb=short
+          uv run pytest tests/test_security.py -v --tb=short
+          uv run pytest tests/test_performance.py -v --tb=short -m "not slow"
+
+      - name: Test Gemini client functionality
+        run: |
+          uv run python -c "
+          import asyncio
+          from src.gopher_mcp.server import get_gemini_client
+
+          async def test_gemini():
+              client = get_gemini_client()
+              print('Gemini client created successfully')
+              await client.close()
+
+          asyncio.run(test_gemini())
+          "
+
+      - name: Validate Gemini configuration
+        run: |
+          export GEMINI_TOFU_ENABLED=true
+          export GEMINI_CLIENT_CERTS_ENABLED=true
+          uv run python -c "
+          from src.gopher_mcp.server import get_gemini_client
+          client = get_gemini_client()
+          print('Gemini configuration validated')
+          "
+
   lint:
     name: Lint and type check
     runs-on: ubuntu-latest

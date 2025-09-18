@@ -92,11 +92,13 @@ For HTTP transport:
 ### Common Issues
 
 **Import Error**: Ensure Python 3.11+ is installed
+
 ```bash
 python --version
 ```
 
 **Permission Error**: Use virtual environment
+
 ```bash
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
@@ -107,6 +109,6 @@ pip install gopher-mcp
 
 ### Getting Help
 
-- Check the [FAQ](faq.md)
+- Check the [Troubleshooting Guide](gemini-troubleshooting.md)
 - Open an issue on [GitHub](https://github.com/cameronrye/gopher-mcp/issues)
-- Join our [Discord community](https://discord.gg/gopher-mcp)
+- Review the [API Reference](api-reference.md) for detailed usage information

@@ -1,4 +1,4 @@
-# Gopher MCP Server
+# Gopher & Gemini MCP Server
 
 [![CI](https://github.com/cameronrye/gopher-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cameronrye/gopher-mcp/actions/workflows/ci.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -6,25 +6,31 @@
 [![Code style: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
 
-A modern, cross-platform [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that enables AI assistants to browse and interact with [Gopher protocol](<https://en.wikipedia.org/wiki/Gopher_(protocol)>) resources safely and efficiently.
+A modern, cross-platform [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that enables AI assistants to
+browse and interact with both [Gopher protocol](<https://en.wikipedia.org/wiki/Gopher_(protocol)>) and
+[Gemini protocol](https://geminiprotocol.net/) resources safely and efficiently.
 
 ## 🌟 Overview
 
-The Gopher MCP Server bridges the vintage Gopher protocol with modern AI assistants, allowing LLMs like Claude to explore the unique content and communities that still thrive on Gopherspace. Built with FastMCP and modern Python practices, it provides a secure, efficient gateway to this historic internet protocol.
+The Gopher & Gemini MCP Server bridges vintage and modern alternative internet protocols with AI assistants, allowing LLMs like
+Claude to explore the unique content and communities that thrive on both Gopherspace and Geminispace. Built with FastMCP and
+modern Python practices, it provides secure, efficient gateways to these distinctive internet protocols.
 
 **Key Benefits:**
 
-- 🔍 **Discover vintage internet content** - Access unique resources and communities on Gopherspace
-- 🛡️ **Safe exploration** - Built-in security safeguards and content filtering
+- 🔍 **Discover alternative internet content** - Access unique resources on both Gopher and Gemini protocols
+- 🛡️ **Safe exploration** - Built-in security safeguards, TLS encryption, and content filtering
 - 🚀 **Modern implementation** - Uses FastMCP framework with async/await patterns
 - 🔧 **Developer-friendly** - Comprehensive testing, type hints, and documentation
+- 🔐 **Advanced security** - TOFU certificate validation and client certificate support for Gemini
 
 ## ✨ Features
 
-- 🔧 **Single Tool Interface**: `gopher_fetch` tool for all Gopher operations
-- 📋 **Comprehensive Support**: Handles menus (type 1), text files (type 0), search servers (type 7), and binary files
-- 🌐 **Authentic Protocol**: Uses the Pituophis library for genuine Gopher communication
-- 🛡️ **Safety First**: Built-in timeouts, size limits, and input sanitization
+- 🔧 **Dual Protocol Support**: `gopher_fetch` and `gemini_fetch` tools for comprehensive protocol coverage
+- 📋 **Comprehensive Gopher Support**: Handles menus (type 1), text files (type 0), search servers (type 7), and binary files
+- 🌐 **Full Gemini Implementation**: Native gemtext parsing, TLS security, and status code handling
+- 🔐 **Advanced Security**: TOFU certificate validation, client certificates, and secure TLS connections
+- 🛡️ **Safety First**: Built-in timeouts, size limits, input sanitization, and host allowlists
 - 🤖 **LLM-Optimized**: Returns structured JSON responses designed for AI consumption
 - 🖥️ **Cross-Platform**: Works seamlessly on Windows, macOS, and Linux
 - 🔬 **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
@@ -67,7 +73,8 @@ cd gopher-mcp
 uv sync --all-extras
 ```
 
-> **Note:** PyPI installation will be available once the package is published. For now, please use the GitHub installation methods above.
+> **Note:** PyPI installation will be available once the package is published. For now, please use the GitHub installation
+> methods above.
 
 ### 🔧 Claude Desktop Integration
 
@@ -97,7 +104,13 @@ Add to your `claude_desktop_config.json`:
   "mcpServers": {
     "gopher": {
       "command": "uv",
-      "args": ["--directory", "C:\\path\\to\\gopher-mcp", "run", "task", "serve"],
+      "args": [
+        "--directory",
+        "C:\\path\\to\\gopher-mcp",
+        "run",
+        "task",
+        "serve"
+      ],
       "env": {
         "MAX_RESPONSE_SIZE": "1048576",
         "TIMEOUT_SECONDS": "30"
@@ -151,7 +164,7 @@ uv run task <command>       # Direct taskipy usage
 
 ## 📖 Usage
 
-The server provides a single, powerful MCP tool for all Gopher operations:
+The server provides two powerful MCP tools for exploring alternative internet protocols:
 
 ### `gopher_fetch` Tool
 
@@ -172,7 +185,32 @@ Fetches Gopher menus, text files, or metadata by URL with comprehensive error ha
 - **ErrorResult**: For errors or unsupported content
   - Includes detailed error messages and troubleshooting hints
 
-### 🌐 Example Gopher URLs to Try
+### `gemini_fetch` Tool
+
+Fetches Gemini content with full TLS security, TOFU certificate validation, and native gemtext parsing.
+
+**Parameters:**
+
+- `url` (string, required): Full Gemini URL (e.g., `gemini://geminiprotocol.net/`)
+
+**Response Types:**
+
+- **GeminiGemtextResult**: For gemtext content (text/gemini)
+  - Parsed gemtext document with structured lines, links, and headings
+- **GeminiSuccessResult**: For other text and binary content
+  - Raw content with MIME type information
+- **GeminiInputResult**: For input requests (status 10-11)
+  - Prompts for user input with optional sensitive flag
+- **GeminiRedirectResult**: For redirects (status 30-31)
+  - New URL for temporary or permanent redirects
+- **GeminiErrorResult**: For errors (status 40-69)
+  - Detailed error information with status codes
+- **GeminiCertificateResult**: For certificate requests (status 60-69)
+  - Certificate requirement information
+
+### 🌐 Example URLs to Try
+
+#### Gopher Protocol
 
 ```bash
 # Classic Gopher menu
@@ -188,14 +226,39 @@ gopher://gopher.floodgap.com/7/v2/vs
 gopher://gopher.floodgap.com/0/gopher/welcome
 ```
 
+#### Gemini Protocol
+
+```bash
+# Gemini protocol homepage
+gemini://geminiprotocol.net/
+
+# Gemini software directory
+gemini://geminiprotocol.net/software/
+
+# Example personal gemlog
+gemini://warmedal.se/~antenna/
+
+# Gemini search aggregator
+gemini://kennedy.gemi.dev/
+```
+
 ### 🤖 Example AI Interactions
 
 Once configured, you can ask Claude:
+
+**Gopher Exploration:**
 
 - _"Browse the main Gopher menu at gopher.floodgap.com"_
 - _"Search for 'python' on the Veronica-2 search server"_
 - _"Show me the welcome text from Floodgap's Gopher server"_
 - _"What's available in the Gopher community directory?"_
+
+**Gemini Exploration:**
+
+- _"Fetch the Gemini protocol homepage"_
+- _"Show me the software directory on geminiprotocol.net"_
+- _"Browse the latest posts from a gemlog"_
+- _"What's the difference between Gopher and Gemini protocols?"_
 
 ## 🔧 Development
 
@@ -249,23 +312,45 @@ uv run pytest --watch
 
 ## ⚙️ Configuration
 
-The server can be configured through environment variables or initialization parameters:
+The server can be configured through environment variables for both protocols:
 
-| Variable            | Description                    | Default         | Example   |
-| ------------------- | ------------------------------ | --------------- | --------- |
-| `MAX_RESPONSE_SIZE` | Maximum response size in bytes | `1048576` (1MB) | `2097152` |
-| `TIMEOUT_SECONDS`   | Request timeout in seconds     | `30`            | `60`      |
-| `CACHE_ENABLED`     | Enable response caching        | `true`          | `false`   |
-| `CACHE_TTL_SECONDS` | Cache time-to-live in seconds  | `300`           | `600`     |
+### Gopher Configuration
+
+| Variable                   | Description                    | Default         | Example                |
+| -------------------------- | ------------------------------ | --------------- | ---------------------- |
+| `GOPHER_MAX_RESPONSE_SIZE` | Maximum response size in bytes | `1048576` (1MB) | `2097152`              |
+| `GOPHER_TIMEOUT_SECONDS`   | Request timeout in seconds     | `30`            | `60`                   |
+| `GOPHER_CACHE_ENABLED`     | Enable response caching        | `true`          | `false`                |
+| `GOPHER_CACHE_TTL_SECONDS` | Cache time-to-live in seconds  | `300`           | `600`                  |
+| `GOPHER_ALLOWED_HOSTS`     | Comma-separated allowed hosts  | `None` (all)    | `example.com,test.com` |
+
+### Gemini Configuration
+
+| Variable                      | Description                        | Default         | Example                |
+| ----------------------------- | ---------------------------------- | --------------- | ---------------------- |
+| `GEMINI_MAX_RESPONSE_SIZE`    | Maximum response size in bytes     | `1048576` (1MB) | `2097152`              |
+| `GEMINI_TIMEOUT_SECONDS`      | Request timeout in seconds         | `30`            | `60`                   |
+| `GEMINI_CACHE_ENABLED`        | Enable response caching            | `true`          | `false`                |
+| `GEMINI_CACHE_TTL_SECONDS`    | Cache time-to-live in seconds      | `300`           | `600`                  |
+| `GEMINI_ALLOWED_HOSTS`        | Comma-separated allowed hosts      | `None` (all)    | `example.org,test.org` |
+| `GEMINI_TOFU_ENABLED`         | Enable TOFU certificate validation | `true`          | `false`                |
+| `GEMINI_CLIENT_CERTS_ENABLED` | Enable client certificate support  | `true`          | `false`                |
 
 ### Example Configuration
 
 ```bash
-# Set environment variables
-export MAX_RESPONSE_SIZE=2097152
-export TIMEOUT_SECONDS=60
-export CACHE_ENABLED=true
-export CACHE_TTL_SECONDS=600
+# Gopher settings
+export GOPHER_MAX_RESPONSE_SIZE=2097152
+export GOPHER_TIMEOUT_SECONDS=60
+export GOPHER_CACHE_ENABLED=true
+export GOPHER_ALLOWED_HOSTS="gopher.floodgap.com,gopher.quux.org"
+
+# Gemini settings
+export GEMINI_MAX_RESPONSE_SIZE=2097152
+export GEMINI_TIMEOUT_SECONDS=60
+export GEMINI_TOFU_ENABLED=true
+export GEMINI_CLIENT_CERTS_ENABLED=true
+export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se"
 
 # Run with custom config
 uv run task serve

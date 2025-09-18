@@ -1,4 +1,4 @@
-"""MCP tool definitions for Gopher operations.
+"""MCP tool definitions for Gopher and Gemini operations.
 
 This module provides manual tool creation functions for users who want to
 create MCP tool definitions programmatically. The main server implementation
@@ -41,6 +41,46 @@ def create_gopher_fetch_tool() -> Tool:
                         "gopher://gopher.floodgap.com/1/",
                         "gopher://gopher.floodgap.com/0/about.txt",
                         "gopher://veronica.example.com/7/search%09python",
+                    ],
+                }
+            },
+            "additionalProperties": False,
+        },
+    )
+
+
+def create_gemini_fetch_tool() -> Tool:
+    """Create the gemini.fetch tool definition.
+
+    Returns:
+        Tool definition for gemini.fetch
+
+    """
+    return Tool(
+        name="gemini.fetch",
+        description=(
+            "Fetch Gemini content by URL. Supports the Gemini protocol with TLS, "
+            "TOFU certificate validation, client certificates, and gemtext parsing. "
+            "Returns structured JSON responses optimized for LLM consumption."
+        ),
+        inputSchema={
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "format": "uri",
+                    "pattern": "^gemini://",
+                    "description": (
+                        "Full Gemini URL to fetch. Examples: "
+                        "gemini://gemini.circumlunar.space/ (homepage), "
+                        "gemini://gemini.circumlunar.space/docs/specification.gmi (gemtext), "
+                        "gemini://example.org/search?query (search with input)"
+                    ),
+                    "examples": [
+                        "gemini://gemini.circumlunar.space/",
+                        "gemini://gemini.circumlunar.space/docs/specification.gmi",
+                        "gemini://warmedal.se/~antenna/",
                     ],
                 }
             },

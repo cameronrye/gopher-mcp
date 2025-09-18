@@ -76,7 +76,7 @@ Issues = "https://github.com/cameronrye/gopher-mcp/issues"
 Changelog = "https://github.com/cameronrye/gopher-mcp/blob/main/CHANGELOG.md"
 
 [project.scripts]
-gopher-mcp = "gopher_mcp.__main__:main"
+gopher-mcp = "gopher_mcp.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gopher_mcp"]
@@ -241,12 +241,11 @@ directory = "htmlcov"
 
 # Bandit security linting
 [tool.bandit]
-exclude_dirs = ["tests"]
+exclude_dirs = ["tests", "scripts"]
 skips = ["B101"]  # Skip assert_used test
 
 [dependency-groups]
 dev = [
-    "ruff>=0.13.0",
     "taskipy>=1.14.1",
 ]
 

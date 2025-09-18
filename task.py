@@ -49,7 +49,7 @@ class Colors:
             try:
                 import ctypes
 
-                kernel32 = ctypes.windll.kernel32
+                kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
                 kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
                 return True
             except Exception:
@@ -232,10 +232,12 @@ class TaskRunner:
         # Execute command
         if self.is_windows and not cmd.startswith("uv run"):
             # Use cmd for Windows-specific commands
-            result = subprocess.run(cmd, shell=True)
+            # shell=True is required for Windows batch files and complex commands  # nosec B602
+            result = subprocess.run(cmd, shell=True)  # nosec B602
         else:
             # Use shell for cross-platform commands
-            result = subprocess.run(cmd, shell=True)
+            # shell=True is required for pipes, redirects, and environment variables  # nosec B602
+            result = subprocess.run(cmd, shell=True)  # nosec B602
 
         return result.returncode
 
@@ -245,6 +247,7 @@ class TaskRunner:
             "Gopher MCP Development Commands", Colors.BOLD + Colors.CYAN
         )
         separator = self._colorize("=" * 31, Colors.CYAN)
+        print()
         print(title)
         print(separator)
         print()

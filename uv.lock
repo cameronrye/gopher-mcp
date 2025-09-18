@@ -503,7 +503,6 @@ test = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "ruff" },
     { name = "taskipy" },
 ]
 
@@ -539,10 +538,7 @@ requires-dist = [
 provides-extras = ["http", "dev", "docs", "test"]
 
 [package.metadata.requires-dev]
-dev = [
-    { name = "ruff", specifier = ">=0.13.0" },
-    { name = "taskipy", specifier = ">=1.14.1" },
-]
+dev = [{ name = "taskipy", specifier = ">=1.14.1" }]
 
 [[package]]
 name = "griffe"

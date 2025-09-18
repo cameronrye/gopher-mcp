@@ -5,7 +5,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from gopher_mcp.server import cleanup, get_gopher_client, gopher_fetch, mcp
+from gopher_mcp.server import (
+    cleanup,
+    get_gopher_client,
+    get_gemini_client,
+    gopher_fetch,
+    gemini_fetch,
+    mcp,
+)
 
 
 class TestGetGopherClient:
@@ -214,9 +221,9 @@ class TestEnvironmentVariables:
                 # Clear client to force recreation
                 gopher_mcp.server._gopher_client = None
                 client = get_gopher_client()
-                assert client.cache_enabled is expected, (
-                    f"Failed for env_value='{env_value}'"
-                )
+                assert (
+                    client.cache_enabled is expected
+                ), f"Failed for env_value='{env_value}'"
 
     def test_numeric_env_var_parsing(self):
         """Test parsing of numeric environment variables."""
@@ -245,3 +252,112 @@ class TestEnvironmentVariables:
             assert client.max_cache_entries == 5000
             assert client.max_selector_length == 4096
             assert client.max_search_length == 1024
+
+
+class TestGetGeminiClient:
+    """Test get_gemini_client function."""
+
+    def test_get_gemini_client_default_config(self):
+        """Test getting gemini client with default configuration."""
+        # Clear any existing client
+        import gopher_mcp.server
+
+        gopher_mcp.server._gemini_client = None
+
+        with patch.dict(os.environ, {}, clear=True):
+            client = get_gemini_client()
+
+            assert client is not None
+            assert client.max_response_size == 1048576  # 1MB default
+            assert client.timeout_seconds == 30.0
+            assert client.cache_enabled is True
+            assert client.cache_ttl_seconds == 300
+            assert client.max_cache_entries == 1000
+            assert client.allowed_hosts is None
+            assert client.tofu_enabled is True
+            assert client.client_certs_enabled is True
+
+    def test_get_gemini_client_custom_config(self):
+        """Test getting gemini client with custom configuration."""
+        # Clear any existing client
+        import gopher_mcp.server
+
+        gopher_mcp.server._gemini_client = None
+
+        env_vars = {
+            "GEMINI_MAX_RESPONSE_SIZE": "2097152",  # 2MB
+            "GEMINI_TIMEOUT_SECONDS": "60.0",
+            "GEMINI_CACHE_ENABLED": "false",
+            "GEMINI_CACHE_TTL_SECONDS": "600",
+            "GEMINI_MAX_CACHE_ENTRIES": "2000",
+            "GEMINI_ALLOWED_HOSTS": "example.org,test.org",
+            "GEMINI_TOFU_ENABLED": "false",
+            "GEMINI_CLIENT_CERTS_ENABLED": "false",
+        }
+
+        with patch.dict(os.environ, env_vars, clear=True):
+            client = get_gemini_client()
+
+            assert client.max_response_size == 2097152
+            assert client.timeout_seconds == 60.0
+            assert client.cache_enabled is False
+            assert client.cache_ttl_seconds == 600
+            assert client.max_cache_entries == 2000
+            assert client.allowed_hosts == {"example.org", "test.org"}
+            assert client.tofu_enabled is False
+            assert client.client_certs_enabled is False
+
+    def test_get_gemini_client_singleton(self):
+        """Test that get_gemini_client returns the same instance."""
+        # Clear any existing client
+        import gopher_mcp.server
+
+        gopher_mcp.server._gemini_client = None
+
+        client1 = get_gemini_client()
+        client2 = get_gemini_client()
+
+        assert client1 is client2
+
+
+class TestGeminiFetch:
+    """Test gemini_fetch function."""
+
+    @pytest.mark.asyncio
+    async def test_gemini_fetch_success(self):
+        """Test successful gemini fetch."""
+        mock_response = MagicMock()
+        mock_response.model_dump.return_value = {
+            "kind": "gemtext",
+            "document": {"lines": [], "links": []},
+            "raw_content": "# Test",
+            "charset": "utf-8",
+            "size": 6,
+            "request_info": {"url": "gemini://example.org/", "timestamp": 1234567890},
+        }
+
+        mock_client = AsyncMock()
+        mock_client.fetch.return_value = mock_response
+
+        with patch("gopher_mcp.server.get_gemini_client", return_value=mock_client):
+            result = await gemini_fetch("gemini://example.org/")
+
+            assert result["kind"] == "gemtext"
+            assert result["raw_content"] == "# Test"
+            mock_client.fetch.assert_called_once_with("gemini://example.org/")
+
+    @pytest.mark.asyncio
+    async def test_gemini_fetch_invalid_url(self):
+        """Test gemini fetch with invalid URL."""
+        with pytest.raises(Exception):  # Should raise validation error
+            await gemini_fetch("http://example.com/")
+
+    @pytest.mark.asyncio
+    async def test_gemini_fetch_client_error(self):
+        """Test gemini fetch with client error."""
+        mock_client = AsyncMock()
+        mock_client.fetch.side_effect = Exception("Connection failed")
+
+        with patch("gopher_mcp.server.get_gemini_client", return_value=mock_client):
+            with pytest.raises(Exception):
+                await gemini_fetch("gemini://example.org/")

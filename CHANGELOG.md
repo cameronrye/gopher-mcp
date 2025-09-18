@@ -9,41 +9,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Initial project structure and foundation
-- Modern Python development environment with uv, ruff, mypy
-- Comprehensive testing framework with pytest
-- Pre-commit hooks for code quality
-- GitHub Actions CI/CD pipeline
-- MkDocs documentation site
-- Basic MCP server implementation
-- Gopher protocol client foundation
-- Pydantic models for data validation
-- Structured logging with structlog
-- Caching system for Gopher responses
-- Security safeguards and input validation
+- TBD
 
 ### Changed
 
-- N/A (initial release)
-
-### Deprecated
-
-- N/A (initial release)
-
-### Removed
-
-- N/A (initial release)
+- TBD
 
 ### Fixed
 
-- N/A (initial release)
+- TBD
+
+## [0.2.0] - 2025-01-17
+
+### Added
+
+#### Gemini Protocol Support (NEW)
+
+- Complete Gemini protocol v0.16.1 implementation
+- `gemini_fetch` MCP tool for Gemini protocol access
+- TLS 1.2+ client with mandatory SNI support
+- TOFU (Trust-on-First-Use) certificate validation system
+- Client certificate generation and management
+- Gemtext parser with structured output for AI consumption
+- Dual-protocol MCP server supporting both Gopher and Gemini
+- Protocol-isolated caching systems
+- Comprehensive security features and host allowlists
+
+#### Security Features
+
+- TOFU certificate fingerprint storage and validation
+- Automatic client certificate generation per hostname/path scope
+- TLS security configuration with minimum version enforcement
+- Certificate validation error handling and recovery
+- Host allowlists for both protocols
+- Enhanced input validation and sanitization
+- Security policy enforcement for connections
+
+#### Documentation
+
+- Comprehensive Gemini support documentation
+- API reference for both protocols
+- AI assistant usage guide
+- Advanced features documentation
+- Configuration reference with all environment variables
+- Troubleshooting guide and FAQ
+- Integration examples and best practices
+- Migration guide for existing users
+
+#### Testing and Quality Assurance
+
+- Comprehensive test suite for Gemini protocol
+- Security and penetration testing
+- Performance and load testing
+- Integration tests for dual-protocol operation
+- Test coverage >95% for all new features
+
+### Changed
+
+- Updated package metadata to reflect dual-protocol support
+- Enhanced error handling and logging across both protocols
+- Improved configuration validation and defaults
+- Updated dependencies to include cryptography for certificate management
 
 ### Security
 
-- Input validation for Gopher URLs and selectors
-- Response size limits to prevent DoS attacks
-- Timeout handling for network requests
-- Secure defaults for all configuration options
+- TLS 1.2+ enforcement for all Gemini connections
+- Certificate fingerprint validation with TOFU
+- Secure client certificate generation and storage
+- Enhanced input validation for both protocols
+- Connection timeout and size limit enforcement
 
 ## [0.1.0] - 2025-01-XX
 
@@ -63,5 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cameronrye/gopher-mcp/releases/tag/v0.1.0

@@ -2,7 +2,8 @@
 
 ## 🔒 Security Overview
 
-The Gopher MCP Server is designed with security as a primary concern. This document outlines our security practices, how to report vulnerabilities, and the measures we take to protect users.
+The Gopher MCP Server is designed with security as a primary concern. This document outlines our security practices, how to
+report vulnerabilities, and the measures we take to protect users.
 
 ## 🛡️ Security Measures
 

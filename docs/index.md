@@ -78,18 +78,22 @@ graph TB
 ## Documentation
 
 - [Installation Guide](installation.md)
-- [Quick Start Tutorial](quickstart.md)
-- [Configuration Options](configuration.md)
-- [API Reference](api/index.md)
-- [Development Guide](development.md)
+- [API Reference](api-reference.md)
+- [Advanced Features](advanced-features.md)
+- [AI Assistant Guide](ai-assistant-guide.md)
+- [Gemini Protocol Support](gemini-support.md)
+- [Gemini Configuration](gemini-configuration.md)
+- [Gemini Troubleshooting](gemini-troubleshooting.md)
+- [Migration Guide](migration-guide.md)
+- [Task Runner](task-runner.md)
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guide](contributing.md) for details.
+We welcome contributions! Please see our [Contributing Guide](../CONTRIBUTING.md) for details.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](license.md) file for details.
+This project is licensed under the MIT License - see the [LICENSE](../LICENSE) file for details.
 
 ## Acknowledgments
 
