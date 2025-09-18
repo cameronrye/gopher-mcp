@@ -4,11 +4,9 @@ Setup verification script for open source release.
 Checks that all required files and configurations are in place.
 """
 
-import json
-import subprocess
 import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List
 
 
 class SetupVerifier:
