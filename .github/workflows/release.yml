@@ -24,13 +24,32 @@ jobs:
 
       - name: Verify release branch
         run: |
-          BRANCH=$(git rev-parse --abbrev-ref HEAD)
-          if [[ "$BRANCH" != "main" ]]; then
-            echo "❌ Releases must be created from the main branch"
-            echo "Current branch: $BRANCH"
-            exit 1
+          # When checking out a tag, HEAD is detached, so we need to check
+          # if the tag was created from the main branch
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            # Get the commit hash of the tag
+            TAG_COMMIT=$(git rev-parse HEAD)
+            # Get the commit hash of the main branch
+            MAIN_COMMIT=$(git rev-parse origin/main)
+            # Check if the tag commit is reachable from main
+            if git merge-base --is-ancestor "$TAG_COMMIT" "$MAIN_COMMIT" || [[ "$TAG_COMMIT" == "$MAIN_COMMIT" ]]; then
+              echo "✅ Tag was created from main branch (commit: $TAG_COMMIT)"
+            else
+              echo "❌ Tag was not created from main branch"
+              echo "Tag commit: $TAG_COMMIT"
+              echo "Main commit: $MAIN_COMMIT"
+              exit 1
+            fi
+          else
+            # For non-tag triggers, check the current branch
+            BRANCH=$(git rev-parse --abbrev-ref HEAD)
+            if [[ "$BRANCH" != "main" ]]; then
+              echo "❌ Releases must be created from the main branch"
+              echo "Current branch: $BRANCH"
+              exit 1
+            fi
+            echo "✅ Releasing from main branch"
           fi
-          echo "✅ Releasing from main branch"
 
       - name: Get version from tag
         id: get-version
