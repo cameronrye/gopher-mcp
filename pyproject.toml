@@ -152,7 +152,7 @@ minversion = "7.0"
 addopts = [
     "--strict-markers",
     "--strict-config",
-    "--cov=gopher_mcp",
+    "--cov=src/gopher_mcp",
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",

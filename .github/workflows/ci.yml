@@ -77,9 +77,7 @@ jobs:
 
       - name: Run Gemini-specific tests
         run: |
-          uv run pytest tests/test_gemini*.py -v --tb=short
-          uv run pytest tests/test_security.py -v --tb=short
-          uv run pytest tests/test_performance.py -v --tb=short -m "not slow"
+          uv run pytest tests/test_gemini_client.py tests/test_gemini_models.py tests/test_gemini_status.py tests/test_gemini_tls.py tests/test_gemini_utils.py tests/test_security.py tests/test_performance.py -v --tb=short -m "not slow"
 
       - name: Test Gemini client functionality
         run: |
