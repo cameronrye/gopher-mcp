@@ -1,6 +1,5 @@
 """Additional security tests to improve coverage."""
 
-
 from gopher_mcp.security import TLSSecurityManager, SecurityLevel, TLSSecurityConfig
 
 
