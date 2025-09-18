@@ -12,8 +12,9 @@ authors = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]
 maintainers = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]
 keywords = ["mcp", "gopher", "protocol", "llm", "model-context-protocol"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -23,6 +24,10 @@ classifiers = [
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Networking",
+    "Topic :: Communications",
+    "Topic :: Internet :: WWW/HTTP :: Browsers",
+    "Framework :: AsyncIO",
+    "Typing :: Typed",
 ]
 requires-python = ">=3.11"
 dependencies = [
@@ -65,7 +70,7 @@ test = [
 
 [project.urls]
 Homepage = "https://github.com/cameronrye/gopher-mcp"
-Documentation = "https://gopher-mcp.readthedocs.io"
+Documentation = "https://cameronrye.github.io/gopher-mcp"
 Repository = "https://github.com/cameronrye/gopher-mcp"
 Issues = "https://github.com/cameronrye/gopher-mcp/issues"
 Changelog = "https://github.com/cameronrye/gopher-mcp/blob/main/CHANGELOG.md"

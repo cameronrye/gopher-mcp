@@ -1,6 +1,6 @@
 site_name: Gopher MCP
 site_description: A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources
-site_url: https://gopher-mcp.readthedocs.io
+site_url: https://cameronrye.github.io/gopher-mcp
 repo_url: https://github.com/cameronrye/gopher-mcp
 repo_name: cameronrye/gopher-mcp
 edit_uri: edit/main/docs/
@@ -48,6 +48,9 @@ nav:
   - Guides:
       - Migration Guide: migration-guide.md
       - Task Runner: task-runner.md
+  - Development:
+      - Repository Setup: development/repository-setup.md
+      - Open Source Release Checklist: development/open-source-release-checklist.md
 
 plugins:
   - search

@@ -1,0 +1,132 @@
+name: PR Checks
+
+# This workflow runs on pull requests from forks and doesn't require secrets
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  FORCE_COLOR: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  # Security check for external PRs
+  security-check:
+    name: Security Check
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Check PR author
+        run: |
+          echo "PR from external contributor: ${{ github.event.pull_request.user.login }}"
+          echo "Please ensure this PR has been reviewed for security before approving workflows."
+
+  # Basic validation that doesn't require secrets
+  validate:
+    name: Validate PR
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run basic linting
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: Run type checking
+        run: uv run mypy src
+
+      - name: Run tests (without coverage upload)
+        run: uv run pytest --tb=short
+
+      - name: Build documentation
+        run: uv run mkdocs build --strict
+
+      - name: Build package
+        run: uv build
+
+      - name: Check package
+        run: uv run python -m twine check dist/*
+
+  # Comment on PR with results
+  comment:
+    name: Comment on PR
+    runs-on: ubuntu-latest
+    needs: [validate]
+    if: always() && github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Comment on PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(comment => 
+              comment.user.type === 'Bot' && 
+              comment.body.includes('External PR Validation')
+            );
+            
+            const success = '${{ needs.validate.result }}' === 'success';
+            const body = `## 🤖 External PR Validation
+            
+            ${success ? '✅' : '❌'} **Validation Result**: ${success ? 'Passed' : 'Failed'}
+            
+            This PR is from an external contributor. The basic validation checks have ${success ? 'passed' : 'failed'}.
+            
+            ${success ? 
+              '✅ All basic checks passed! A maintainer will review and approve the full CI workflow.' : 
+              '❌ Some checks failed. Please review the workflow logs and fix any issues.'
+            }
+            
+            **Checks performed:**
+            - Code formatting and linting
+            - Type checking
+            - Basic test execution
+            - Documentation build
+            - Package build validation
+            
+            _This comment is automatically updated on each push._`;
+            
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }

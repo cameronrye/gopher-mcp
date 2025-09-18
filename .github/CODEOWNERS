@@ -1,0 +1,27 @@
+# Global owners - these users will be requested for review on all PRs
+* @cameronrye
+
+# Documentation
+/docs/ @cameronrye
+*.md @cameronrye
+
+# CI/CD and workflows
+/.github/ @cameronrye
+
+# Core source code
+/src/ @cameronrye
+
+# Tests
+/tests/ @cameronrye
+
+# Configuration files
+pyproject.toml @cameronrye
+mkdocs.yml @cameronrye
+uv.lock @cameronrye
+
+# Scripts
+/scripts/ @cameronrye
+
+# Security and license files
+SECURITY.md @cameronrye
+LICENSE @cameronrye

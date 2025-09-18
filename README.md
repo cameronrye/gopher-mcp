@@ -1,10 +1,14 @@
 # Gopher & Gemini MCP Server
 
 [![CI](https://github.com/cameronrye/gopher-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cameronrye/gopher-mcp/actions/workflows/ci.yml)
+[![Documentation](https://github.com/cameronrye/gopher-mcp/actions/workflows/docs.yml/badge.svg)](https://github.com/cameronrye/gopher-mcp/actions/workflows/docs.yml)
+[![PyPI version](https://badge.fury.io/py/gopher-mcp.svg)](https://badge.fury.io/py/gopher-mcp)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![codecov](https://codecov.io/gh/cameronrye/gopher-mcp/branch/main/graph/badge.svg)](https://codecov.io/gh/cameronrye/gopher-mcp)
 [![Code style: ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Checked with mypy](https://www.mypy-lang.org/static/mypy_badge.svg)](https://mypy-lang.org/)
+[![Downloads](https://pepy.tech/badge/gopher-mcp)](https://pepy.tech/project/gopher-mcp)
 
 A modern, cross-platform [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that enables AI assistants to
 browse and interact with both [Gopher protocol](<https://en.wikipedia.org/wiki/Gopher_(protocol)>) and
@@ -36,6 +40,15 @@ modern Python practices, it provides secure, efficient gateways to these distinc
 - 🔬 **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
 - ⚡ **High Performance**: Async/await patterns with intelligent caching
 
+## 📚 Documentation
+
+Complete documentation is available at **[cameronrye.github.io/gopher-mcp](https://cameronrye.github.io/gopher-mcp)**
+
+- 📖 [Installation Guide](https://cameronrye.github.io/gopher-mcp/installation/)
+- 🔧 [API Reference](https://cameronrye.github.io/gopher-mcp/api-reference/)
+- 🚀 [Advanced Features](https://cameronrye.github.io/gopher-mcp/advanced-features/)
+- 🤖 [AI Assistant Guide](https://cameronrye.github.io/gopher-mcp/ai-assistant-guide/)
+
 ## 🚀 Quick Start
 
 ### 📋 Prerequisites
@@ -61,7 +74,17 @@ scripts\dev-setup.bat   # Windows
 uv run task serve
 ```
 
-#### Option 2: Direct Installation
+#### Option 2: PyPI Installation
+
+```bash
+# Install from PyPI (recommended for end users)
+pip install gopher-mcp
+
+# Or with uv
+uv add gopher-mcp
+```
+
+#### Option 3: Development Installation
 
 ```bash
 # Install directly from GitHub
@@ -72,8 +95,6 @@ git clone https://github.com/cameronrye/gopher-mcp.git
 cd gopher-mcp
 uv sync --all-extras
 ```
-
-> **Note:** PyPI installation will be available once the package is published. For now, please use the GitHub installation
 > methods above.
 
 ### 🔧 Claude Desktop Integration

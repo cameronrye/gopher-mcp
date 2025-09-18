@@ -1,0 +1,51 @@
+/* Custom styles for Gopher MCP documentation */
+
+/* Improve code block styling */
+.highlight {
+    border-radius: 4px;
+    margin: 1em 0;
+}
+
+/* Better spacing for admonitions */
+.admonition {
+    margin: 1.5em 0;
+}
+
+/* Custom styling for badges */
+.md-typeset .badges {
+    text-align: center;
+    margin: 1em 0;
+}
+
+.md-typeset .badges img {
+    margin: 0 2px;
+}
+
+/* Improve table styling */
+.md-typeset table:not([class]) {
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+/* Custom colors for the project */
+:root {
+    --md-primary-fg-color: #1976d2;
+    --md-accent-fg-color: #2196f3;
+}
+
+/* Improve navigation styling */
+.md-nav__item .md-nav__link--active {
+    font-weight: 600;
+}
+
+/* Better code inline styling */
+.md-typeset code {
+    background-color: rgba(0, 0, 0, 0.05);
+    border-radius: 3px;
+    padding: 0.1em 0.3em;
+}
+
+/* Dark mode adjustments */
+[data-md-color-scheme="slate"] .md-typeset code {
+    background-color: rgba(255, 255, 255, 0.1);
+}

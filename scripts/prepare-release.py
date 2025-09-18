@@ -8,12 +8,16 @@ This script performs pre-release checks and preparations:
 - Checks code quality
 - Validates documentation
 - Prepares release artifacts
+- Manages version updates
+- Creates git tags
 """
 
+import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 
 class ReleasePreparation:
@@ -24,7 +28,115 @@ class ReleasePreparation:
         self.errors: List[str] = []
         self.warnings: List[str] = []
 
-    def prepare_release(self) -> bool:
+    def _get_current_version(self) -> str:
+        """Get the current version from pyproject.toml."""
+        pyproject_path = self.project_root / "pyproject.toml"
+        if not pyproject_path.exists():
+            raise FileNotFoundError("pyproject.toml not found!")
+
+        content = pyproject_path.read_text()
+        match = re.search(r'version = "([^"]+)"', content)
+        if not match:
+            raise ValueError("Version not found in pyproject.toml!")
+
+        return match.group(1)
+
+    def _validate_version_format(self, version: str) -> bool:
+        """Validate version format (semantic versioning)."""
+        pattern = r"^(\d+)\.(\d+)\.(\d+)(?:-([\w\.-]+))?(?:\+([\w\.-]+))?$"
+        return bool(re.match(pattern, version))
+
+    def _update_version(self, new_version: str) -> None:
+        """Update version in pyproject.toml."""
+        pyproject_path = self.project_root / "pyproject.toml"
+        content = pyproject_path.read_text()
+
+        # Update version
+        content = re.sub(r'version = "[^"]+"', f'version = "{new_version}"', content)
+
+        pyproject_path.write_text(content)
+        print(f"✅ Updated version to {new_version} in pyproject.toml")
+
+    def _update_changelog(self, version: str) -> None:
+        """Update CHANGELOG.md with new version."""
+        changelog_path = self.project_root / "CHANGELOG.md"
+        if not changelog_path.exists():
+            self.warnings.append("CHANGELOG.md not found!")
+            return
+
+        content = changelog_path.read_text()
+
+        # Check if version already exists
+        if f"## [{version}]" in content:
+            print(f"ℹ️ Version {version} already exists in CHANGELOG.md")
+            return
+
+        # Find the unreleased section
+        unreleased_pattern = r"## \[Unreleased\].*?\n(.*?)(?=\n## \[|\n\[unreleased\]|\Z)"
+        match = re.search(unreleased_pattern, content, re.DOTALL | re.IGNORECASE)
+
+        if match:
+            unreleased_content = match.group(1).strip()
+            if unreleased_content:
+                # Add new version section
+                import datetime
+                today = datetime.date.today().strftime("%Y-%m-%d")
+                new_section = f"\n## [{version}] - {today}\n\n{unreleased_content}\n"
+
+                # Replace unreleased section
+                content = re.sub(
+                    r"(## \[Unreleased\].*?\n).*?(?=\n## \[|\n\[unreleased\]|\Z)",
+                    r"\1\n" + new_section,
+                    content,
+                    flags=re.DOTALL | re.IGNORECASE
+                )
+
+                changelog_path.write_text(content)
+                print(f"✅ Updated CHANGELOG.md with version {version}")
+            else:
+                self.warnings.append("No unreleased changes found in CHANGELOG.md")
+        else:
+            self.warnings.append("Could not find unreleased section in CHANGELOG.md")
+
+    def _create_git_tag(self, version: str, message: Optional[str] = None) -> None:
+        """Create and push git tag."""
+        tag_name = f"v{version}"
+
+        # Check if tag already exists
+        result = subprocess.run(
+            ["git", "tag", "-l", tag_name],
+            capture_output=True, text=True, cwd=self.project_root
+        )
+        if result.stdout.strip():
+            print(f"❌ Tag {tag_name} already exists!")
+            return
+
+        # Create tag
+        cmd = ["git", "tag", "-a", tag_name]
+        if message:
+            cmd.extend(["-m", message])
+        else:
+            cmd.extend(["-m", f"Release {version}"])
+
+        result = subprocess.run(cmd, cwd=self.project_root)
+        if result.returncode == 0:
+            print(f"✅ Created tag {tag_name}")
+
+            # Ask if user wants to push
+            response = input(f"Push tag {tag_name} to origin? (y/N): ")
+            if response.lower() == 'y':
+                push_result = subprocess.run(
+                    ["git", "push", "origin", tag_name],
+                    cwd=self.project_root
+                )
+                if push_result.returncode == 0:
+                    print(f"✅ Pushed tag {tag_name} to origin")
+                else:
+                    print(f"❌ Failed to push tag {tag_name}")
+        else:
+            print(f"❌ Failed to create tag {tag_name}")
+
+    def prepare_release(self, skip_tests: bool = False) -> bool:
         """Run all release preparation steps."""
         print("🚀 Preparing Gopher & Gemini MCP Server Release")
         print("=" * 60)
@@ -32,13 +144,20 @@ class ReleasePreparation:
 
         steps = [
             ("🔍 Validating Configuration", self._validate_configuration),
-            ("🧪 Running Tests", self._run_tests),
-            ("📝 Checking Code Quality", self._check_code_quality),
+        ]
+
+        if not skip_tests:
+            steps.extend([
+                ("🧪 Running Tests", self._run_tests),
+                ("📝 Checking Code Quality", self._check_code_quality),
+                ("🔐 Security Scan", self._security_scan),
+            ])
+
+        steps.extend([
             ("📚 Validating Documentation", self._validate_documentation),
             ("🔧 Checking Dependencies", self._check_dependencies),
             ("📦 Building Package", self._build_package),
-            ("🔐 Security Scan", self._security_scan),
-        ]
+        ])
 
         for step_name, step_func in steps:
             print(f"{step_name}...")
@@ -360,8 +479,41 @@ class ReleasePreparation:
 
 def main():
     """Main entry point."""
+    parser = argparse.ArgumentParser(description="Prepare a new release")
+    parser.add_argument("--version", help="New version number (e.g., 1.0.0)")
+    parser.add_argument("--skip-tests", action="store_true", help="Skip running tests")
+    parser.add_argument("--skip-tag", action="store_true", help="Skip creating git tag")
+    parser.add_argument("--tag-message", "-m", help="Tag message")
+
+    args = parser.parse_args()
+
     prep = ReleasePreparation()
-    success = prep.prepare_release()
+
+    # Handle version update if specified
+    if args.version:
+        if not prep._validate_version_format(args.version):
+            print(f"❌ Invalid version format: {args.version}")
+            print("Expected format: X.Y.Z or X.Y.Z-suffix")
+            sys.exit(1)
+
+        current_version = prep._get_current_version()
+        print(f"Current version: {current_version}")
+        print(f"New version: {args.version}")
+
+        response = input("Update version? (y/N): ")
+        if response.lower() == 'y':
+            prep._update_version(args.version)
+            prep._update_changelog(args.version)
+
+    # Run release preparation
+    success = prep.prepare_release(skip_tests=args.skip_tests)
+
+    # Create git tag if requested and successful
+    if success and args.version and not args.skip_tag:
+        response = input(f"Create git tag v{args.version}? (y/N): ")
+        if response.lower() == 'y':
+            prep._create_git_tag(args.version, args.tag_message)
+
     sys.exit(0 if success else 1)
 
 
