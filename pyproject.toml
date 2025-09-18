@@ -35,6 +35,7 @@ dependencies = [
     "pydantic>=2.5.0",
     "structlog>=23.2.0",
     "anyio>=4.0.0",
+    "cryptography>=3.0.0",
 ]
 
 [project.optional-dependencies]
@@ -241,7 +242,7 @@ directory = "htmlcov"
 
 # Bandit security linting
 [tool.bandit]
-exclude_dirs = ["tests", "scripts"]
+exclude_dirs = ["tests"]
 skips = ["B101"]  # Skip assert_used test
 
 [dependency-groups]
