@@ -1,6 +1,8 @@
 """Tests for gopher_mcp.server module."""
 
 import os
+import tempfile
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -264,18 +266,27 @@ class TestGetGeminiClient:
 
         gopher_mcp.server._gemini_client = None
 
-        with patch.dict(os.environ, {}, clear=True):
-            client = get_gemini_client()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("gopher_mcp.tofu.get_home_directory") as mock_tofu_home,
+                patch("gopher_mcp.client_certs.get_home_directory") as mock_certs_home,
+            ):
+                # Mock home directory for both TOFU and client certs
+                mock_tofu_home.return_value = Path(temp_dir)
+                mock_certs_home.return_value = Path(temp_dir)
 
-            assert client is not None
-            assert client.max_response_size == 1048576  # 1MB default
-            assert client.timeout_seconds == 30.0
-            assert client.cache_enabled is True
-            assert client.cache_ttl_seconds == 300
-            assert client.max_cache_entries == 1000
-            assert client.allowed_hosts is None
-            assert client.tofu_enabled is True
-            assert client.client_certs_enabled is True
+                client = get_gemini_client()
+
+                assert client is not None
+                assert client.max_response_size == 1048576  # 1MB default
+                assert client.timeout_seconds == 30.0
+                assert client.cache_enabled is True
+                assert client.cache_ttl_seconds == 300
+                assert client.max_cache_entries == 1000
+                assert client.allowed_hosts is None
+                assert client.tofu_enabled is True
+                assert client.client_certs_enabled is True
 
     def test_get_gemini_client_custom_config(self):
         """Test getting gemini client with custom configuration."""

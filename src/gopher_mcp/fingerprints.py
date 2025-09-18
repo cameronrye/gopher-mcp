@@ -11,6 +11,8 @@ from dataclasses import dataclass
 
 import structlog
 
+from .utils import atomic_write_json, get_home_directory
+
 logger = structlog.get_logger(__name__)
 
 
@@ -208,7 +210,9 @@ class FingerprintStore:
             storage_path: Path to storage file
         """
         if storage_path is None:
-            home_dir = Path.home()
+            home_dir = get_home_directory()
+            if home_dir is None:
+                raise ValueError("Could not determine home directory")
             gemini_dir = home_dir / ".gemini"
             gemini_dir.mkdir(exist_ok=True)
             storage_path = str(gemini_dir / "fingerprints.json")
@@ -241,15 +245,8 @@ class FingerprintStore:
     def _save_fingerprints(self) -> None:
         """Save fingerprints to storage."""
         try:
-            # Ensure directory exists
-            Path(self.storage_path).parent.mkdir(parents=True, exist_ok=True)
-
-            # Write to temporary file first, then rename for atomicity
-            temp_path = self.storage_path + ".tmp"
-            with open(temp_path, "w") as f:
-                json.dump(self._fingerprints, f, indent=2)
-
-            Path(temp_path).rename(self.storage_path)
+            # Use atomic write function
+            atomic_write_json(self.storage_path, self._fingerprints)
 
             logger.debug("Fingerprints saved", count=len(self._fingerprints))
         except Exception as e:

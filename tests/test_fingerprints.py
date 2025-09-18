@@ -325,14 +325,18 @@ class TestFingerprintStore:
 
     def test_initialization_default_path(self):
         """Test store initialization with default path."""
-        with patch("pathlib.Path.home") as mock_home, patch(
-            "pathlib.Path.mkdir"
-        ) as mock_mkdir, patch.object(FingerprintStore, "_load_fingerprints"):
+        with (
+            patch("gopher_mcp.fingerprints.get_home_directory") as mock_home,
+            patch("pathlib.Path.mkdir") as mock_mkdir,
+            patch.object(FingerprintStore, "_load_fingerprints"),
+        ):
             mock_home.return_value = Path("/home/user")
 
             store = FingerprintStore()
 
-            assert store.storage_path == "/home/user/.gemini/fingerprints.json"
+            # Use Path to normalize the path for platform compatibility
+            expected_path = str(Path("/home/user/.gemini/fingerprints.json"))
+            assert store.storage_path == expected_path
             mock_mkdir.assert_called_once_with(exist_ok=True)
 
     def test_initialization_custom_path(self):
@@ -425,8 +429,13 @@ class TestFingerprintStore:
         with patch.object(FingerprintStore, "_load_fingerprints"):
             store = FingerprintStore("/invalid/path/fingerprints.json")
 
-            with pytest.raises(Exception):
-                store._save_fingerprints()
+            # Mock atomic_write_json to raise an error
+            with patch(
+                "gopher_mcp.fingerprints.atomic_write_json",
+                side_effect=OSError("Permission denied"),
+            ):
+                with pytest.raises(Exception):
+                    store._save_fingerprints()
 
     def test_store_fingerprint(self):
         """Test storing a fingerprint."""

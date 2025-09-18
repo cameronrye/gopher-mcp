@@ -29,25 +29,45 @@ class TestClientCertificateManager:
 
     def test_initialization_default_path(self):
         """Test manager initialization with default path."""
-        with patch("pathlib.Path.home") as mock_home, patch(
-            "pathlib.Path.mkdir"
-        ) as mock_mkdir, patch.object(ClientCertificateManager, "_load_registry"):
+        with (
+            patch("gopher_mcp.client_certs.get_home_directory") as mock_home,
+            patch("pathlib.Path.mkdir") as mock_mkdir,
+            patch.object(ClientCertificateManager, "_load_registry"),
+        ):
             mock_home.return_value = Path("/home/user")
 
             manager = ClientCertificateManager()
 
-            assert str(manager.storage_path) == "/home/user/.gemini/certs"
+            # Use os.path.normpath to handle platform differences
+            expected_path = str(Path("/home/user/.gemini/certs"))
+            assert str(manager.storage_path) == expected_path
             mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
+
+    def test_initialization_no_home_directory(self):
+        """Test manager initialization when home directory cannot be determined."""
+        with (
+            patch("gopher_mcp.client_certs.get_home_directory") as mock_home,
+            patch.object(ClientCertificateManager, "_load_registry"),
+        ):
+            mock_home.return_value = None
+
+            with pytest.raises(
+                ClientCertificateError, match="Could not determine home directory"
+            ):
+                ClientCertificateManager()
 
     def test_initialization_custom_path(self):
         """Test manager initialization with custom path."""
-        with patch("pathlib.Path.mkdir") as mock_mkdir, patch.object(
-            ClientCertificateManager, "_load_registry"
+        with (
+            patch("pathlib.Path.mkdir") as mock_mkdir,
+            patch.object(ClientCertificateManager, "_load_registry"),
         ):
             custom_path = "/custom/cert/path"
             manager = ClientCertificateManager(custom_path)
 
-            assert str(manager.storage_path) == custom_path
+            # Use Path to normalize the path for platform compatibility
+            expected_path = str(Path(custom_path))
+            assert str(manager.storage_path) == expected_path
             mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
 
     def test_get_cert_key(self):
@@ -144,8 +164,11 @@ class TestClientCertificateManager:
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = ClientCertificateManager(temp_dir)
 
-            # Mock open to raise an error
-            with patch("builtins.open", side_effect=OSError("Permission denied")):
+            # Mock atomic_write_json to raise an error
+            with patch(
+                "gopher_mcp.client_certs.atomic_write_json",
+                side_effect=OSError("Permission denied"),
+            ):
                 with pytest.raises(Exception):
                     manager._save_registry()
 

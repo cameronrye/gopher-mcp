@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 import structlog
 
 from .models import GeminiCertificateInfo
+from .utils import atomic_write_json, get_home_directory
 
 logger = structlog.get_logger(__name__)
 
@@ -35,7 +36,9 @@ class ClientCertificateManager:
             storage_path: Path to certificate storage directory (default: ~/.gemini/certs/)
         """
         if storage_path is None:
-            home_dir = Path.home()
+            home_dir = get_home_directory()
+            if home_dir is None:
+                raise ClientCertificateError("Could not determine home directory")
             storage_path = str(home_dir / ".gemini" / "certs")
 
         self.storage_path = Path(storage_path)
@@ -77,12 +80,8 @@ class ClientCertificateManager:
             for key, cert in self._certificates.items():
                 data[key] = cert.model_dump()
 
-            # Write to temporary file first, then rename for atomicity
-            temp_path = self.registry_path.with_suffix(".tmp")
-            with open(temp_path, "w") as f:
-                json.dump(data, f, indent=2)
-
-            temp_path.rename(self.registry_path)
+            # Use atomic write function
+            atomic_write_json(str(self.registry_path), data)
 
             logger.debug("Certificate registry saved", count=len(self._certificates))
         except Exception as e:

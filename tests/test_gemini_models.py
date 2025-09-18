@@ -460,3 +460,264 @@ class TestSecurityModels:
         assert entry.value == response
         assert not entry.is_expired(1640995300.0)  # Within TTL
         assert entry.is_expired(1640995600.0)  # After TTL
+
+
+class TestGemtextDocumentProperties:
+    """Test GemtextDocument property methods."""
+
+    def test_content_summary_property(self):
+        """Test content_summary property method."""
+        from gopher_mcp.models import (
+            GemtextHeading,
+            GemtextList,
+            GemtextQuote,
+            GemtextPreformat,
+        )
+
+        lines = [
+            GemtextLine(type=GemtextLineType.TEXT, content="Regular text"),
+            GemtextLine(
+                type=GemtextLineType.HEADING_1,
+                content="# Heading 1",
+                heading=GemtextHeading(
+                    level=1, text="Heading 1", raw_content="# Heading 1"
+                ),
+            ),
+            GemtextLine(
+                type=GemtextLineType.LINK,
+                content="=> /test Link text",
+                link=GemtextLink(url="/test", text="Link text"),
+            ),
+            GemtextLine(
+                type=GemtextLineType.LIST_ITEM,
+                content="* List item",
+                list_item=GemtextList(text="List item", raw_content="* List item"),
+            ),
+            GemtextLine(
+                type=GemtextLineType.QUOTE,
+                content="> Quote text",
+                quote=GemtextQuote(text="Quote text", raw_content="> Quote text"),
+            ),
+            GemtextLine(
+                type=GemtextLineType.PREFORMAT,
+                content="```",
+                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
+            ),
+            GemtextLine(
+                type=GemtextLineType.PREFORMAT,
+                content="code",
+                preformat=GemtextPreformat(
+                    content="code", is_toggle=False, alt_text=""
+                ),
+            ),
+            GemtextLine(
+                type=GemtextLineType.PREFORMAT,
+                content="```",
+                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
+            ),
+        ]
+
+        document = GemtextDocument(lines=lines)
+        summary = document.content_summary
+
+        assert summary["text_lines"] == 1
+        assert summary["headings"] == 1
+        assert summary["links"] == 1
+        assert summary["list_items"] == 1
+        assert summary["quotes"] == 1
+        assert summary["preformat_blocks"] == 1
+
+    def test_heading_hierarchy_property(self):
+        """Test heading_hierarchy property method."""
+        from gopher_mcp.models import GemtextHeading
+
+        lines = [
+            GemtextLine(type=GemtextLineType.TEXT, content="Text"),
+            GemtextLine(
+                type=GemtextLineType.HEADING_1,
+                content="# Main Heading",
+                heading=GemtextHeading(
+                    level=1, text="Main Heading", raw_content="# Main Heading"
+                ),
+            ),
+            GemtextLine(
+                type=GemtextLineType.HEADING_2,
+                content="## Sub Heading",
+                heading=GemtextHeading(
+                    level=2, text="Sub Heading", raw_content="## Sub Heading"
+                ),
+            ),
+        ]
+
+        document = GemtextDocument(lines=lines)
+        hierarchy = document.heading_hierarchy
+
+        assert len(hierarchy) == 2
+        assert hierarchy[0]["line_number"] == 2
+        assert hierarchy[0]["level"] == 1
+        assert hierarchy[0]["text"] == "Main Heading"
+        assert hierarchy[1]["line_number"] == 3
+        assert hierarchy[1]["level"] == 2
+        assert hierarchy[1]["text"] == "Sub Heading"
+
+    def test_text_content_property(self):
+        """Test text_content property method."""
+        from gopher_mcp.models import (
+            GemtextHeading,
+            GemtextList,
+            GemtextQuote,
+            GemtextPreformat,
+        )
+
+        lines = [
+            GemtextLine(type=GemtextLineType.TEXT, content="Regular text"),
+            GemtextLine(
+                type=GemtextLineType.HEADING_1,
+                content="# Heading",
+                heading=GemtextHeading(
+                    level=1, text="Heading", raw_content="# Heading"
+                ),
+            ),
+            GemtextLine(
+                type=GemtextLineType.LIST_ITEM,
+                content="* List item",
+                list_item=GemtextList(text="List item", raw_content="* List item"),
+            ),
+            GemtextLine(
+                type=GemtextLineType.QUOTE,
+                content="> Quote",
+                quote=GemtextQuote(text="Quote", raw_content="> Quote"),
+            ),
+            GemtextLine(
+                type=GemtextLineType.PREFORMAT,
+                content="```",
+                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
+            ),
+            GemtextLine(
+                type=GemtextLineType.PREFORMAT,
+                content="code content",
+                preformat=GemtextPreformat(
+                    content="code content", is_toggle=False, alt_text=""
+                ),
+            ),
+            GemtextLine(
+                type=GemtextLineType.PREFORMAT,
+                content="```",
+                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
+            ),
+        ]
+
+        document = GemtextDocument(lines=lines)
+        text_content = document.text_content
+
+        expected_lines = [
+            "Regular text",
+            "Heading",
+            "List item",
+            "Quote",
+            "code content",
+        ]
+        assert text_content == "\n".join(expected_lines)
+
+    def test_line_count_property(self):
+        """Test line_count property method."""
+        lines = [
+            GemtextLine(type=GemtextLineType.TEXT, content="Line 1"),
+            GemtextLine(type=GemtextLineType.TEXT, content="Line 2"),
+            GemtextLine(type=GemtextLineType.TEXT, content="Line 3"),
+        ]
+
+        document = GemtextDocument(lines=lines)
+        assert document.line_count == 3
+
+
+class TestGeminiGemtextResultProperties:
+    """Test GeminiGemtextResult property methods."""
+
+    def test_summary_property(self):
+        """Test summary property method."""
+        link = GemtextLink(url="/test", text="Link")
+        lines = [
+            GemtextLine(type=GemtextLineType.TEXT, content="Text"),
+            GemtextLine(type=GemtextLineType.LINK, content="=> /test Link", link=link),
+        ]
+        document = GemtextDocument(lines=lines, links=[link])
+
+        result = GeminiGemtextResult(
+            document=document,
+            rawContent="Text\n=> /test Link",
+            size=20,
+            charset="utf-8",
+            lang="en",
+        )
+
+        summary = result.summary
+        assert summary["content_type"] == "gemtext"
+        assert summary["line_count"] == 2
+        assert summary["link_count"] == 1
+        assert summary["charset"] == "utf-8"
+        assert summary["language"] == "en"
+        assert summary["size_bytes"] == 20
+
+    def test_plain_text_property(self):
+        """Test plain_text property method."""
+        lines = [
+            GemtextLine(type=GemtextLineType.TEXT, content="Plain text content"),
+        ]
+        document = GemtextDocument(lines=lines)
+
+        result = GeminiGemtextResult(
+            document=document, rawContent="Plain text content", size=18
+        )
+
+        assert result.plain_text == "Plain text content"
+
+    def test_structured_content_property(self):
+        """Test structured_content property method."""
+        from gopher_mcp.models import GemtextHeading
+
+        link1 = GemtextLink(url="/internal", text="Internal link")
+        link2 = GemtextLink(url="https://example.com", text="External link")
+
+        lines = [
+            GemtextLine(
+                type=GemtextLineType.HEADING_1,
+                content="# Title",
+                heading=GemtextHeading(level=1, text="Title", raw_content="# Title"),
+            ),
+            GemtextLine(
+                type=GemtextLineType.LINK,
+                content="=> /internal Internal link",
+                link=link1,
+            ),
+            GemtextLine(
+                type=GemtextLineType.LINK,
+                content="=> https://example.com External link",
+                link=link2,
+            ),
+        ]
+        document = GemtextDocument(lines=lines, links=[link1, link2])
+
+        result = GeminiGemtextResult(
+            document=document,
+            rawContent="# Title\n=> /internal Internal link\n=> https://example.com External link",
+            size=70,
+        )
+
+        structured = result.structured_content
+        assert "summary" in structured
+        assert "headings" in structured
+        assert "links" in structured
+        assert "content_blocks" in structured
+
+        # Check link types
+        links = structured["links"]
+        assert len(links) == 2
+        assert links[0]["type"] == "internal"
+        assert links[1]["type"] == "external"
+
+        # Check content blocks structure
+        blocks = structured["content_blocks"]
+        assert len(blocks) == 3
+        assert blocks[0]["structured_data"]["heading"]["level"] == 1
+        assert blocks[1]["structured_data"]["link"]["url"] == "/internal"

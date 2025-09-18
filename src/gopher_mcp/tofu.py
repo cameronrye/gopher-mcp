@@ -3,13 +3,13 @@
 import json
 import os
 import time
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 
 import structlog
 
 from .models import TOFUEntry
+from .utils import atomic_write_json, get_home_directory
 
 logger = structlog.get_logger(__name__)
 
@@ -32,7 +32,9 @@ class TOFUManager:
             storage_path: Path to TOFU storage file (default: ~/.gemini/tofu.json)
         """
         if storage_path is None:
-            home_dir = Path.home()
+            home_dir = get_home_directory()
+            if home_dir is None:
+                raise ValueError("Could not determine home directory")
             gemini_dir = home_dir / ".gemini"
             gemini_dir.mkdir(exist_ok=True)
             storage_path = str(gemini_dir / "tofu.json")
@@ -67,20 +69,13 @@ class TOFUManager:
     def _save_entries(self) -> None:
         """Save TOFU entries to storage."""
         try:
-            # Ensure directory exists
-            os.makedirs(os.path.dirname(self.storage_path), exist_ok=True)
-
             # Convert entries to dict for JSON serialization
             data = {}
             for key, entry in self._entries.items():
                 data[key] = entry.model_dump()
 
-            # Write to temporary file first, then rename for atomicity
-            temp_path = self.storage_path + ".tmp"
-            with open(temp_path, "w") as f:
-                json.dump(data, f, indent=2)
-
-            os.rename(temp_path, self.storage_path)
+            # Use atomic write function
+            atomic_write_json(self.storage_path, data)
 
             logger.debug("TOFU entries saved", count=len(self._entries))
         except Exception as e:

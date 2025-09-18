@@ -1,5 +1,6 @@
 """Tests for Gemini client implementation."""
 
+import time
 from unittest.mock import Mock, patch
 
 import pytest
@@ -13,6 +14,7 @@ from src.gopher_mcp.models import (
     GeminiErrorResult,
     GeminiMimeType,
 )
+from src.gopher_mcp.tofu import TOFUValidationError
 
 
 class TestGeminiClientInit:
@@ -386,3 +388,169 @@ class TestGeminiClientCaching:
         await client.close()
 
         assert len(client._cache) == 0
+
+
+class TestGeminiClientCacheExpiry:
+    """Test cache expiry functionality."""
+
+    def test_cache_expiry_and_cleanup(self):
+        """Test that expired cache entries are cleaned up."""
+        client = GeminiClient(cache_ttl_seconds=1)
+
+        response = GeminiSuccessResult(
+            content="test",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=4,
+            requestInfo={},
+        )
+
+        # Cache a response
+        client._cache_response("test_url", response)
+        assert len(client._cache) == 1
+
+        # Mock time to simulate expiry
+        with patch("time.time", return_value=time.time() + 2):
+            # This should trigger cache cleanup
+            cached = client._get_cached_response("test_url")
+            assert cached is None
+            assert len(client._cache) == 0
+
+    def test_disabled_caching_early_return(self):
+        """Test that disabled caching returns early."""
+        client = GeminiClient(cache_enabled=False)
+
+        response = GeminiSuccessResult(
+            content="test",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=4,
+            requestInfo={},
+        )
+
+        # This should return early and not cache anything
+        client._cache_response("test_url", response)
+        assert len(client._cache) == 0
+
+
+class TestGeminiClientManagerErrors:
+    """Test error cases when managers are not enabled."""
+
+    def test_tofu_methods_when_disabled(self):
+        """Test TOFU methods raise errors when TOFU is disabled."""
+        client = GeminiClient(tofu_enabled=False)
+
+        with pytest.raises(ValueError, match="TOFU is not enabled"):
+            client.update_tofu_certificate("example.com", 1965, "fingerprint")
+
+        with pytest.raises(ValueError, match="TOFU is not enabled"):
+            client.remove_tofu_certificate("example.com", 1965)
+
+        with pytest.raises(ValueError, match="TOFU is not enabled"):
+            client.list_tofu_certificates()
+
+    def test_client_cert_methods_when_disabled(self):
+        """Test client certificate methods raise errors when disabled."""
+        client = GeminiClient(client_certs_enabled=False)
+
+        with pytest.raises(ValueError, match="Client certificates are not enabled"):
+            client.generate_client_certificate("example.com")
+
+        with pytest.raises(ValueError, match="Client certificates are not enabled"):
+            client.get_client_certificate_for_scope("example.com")
+
+        with pytest.raises(ValueError, match="Client certificates are not enabled"):
+            client.list_client_certificates()
+
+        with pytest.raises(ValueError, match="Client certificates are not enabled"):
+            client.remove_client_certificate("example.com")
+
+
+class TestGeminiClientAdvancedFeatures:
+    """Test advanced client features."""
+
+    @pytest.mark.asyncio
+    async def test_fetch_with_non_standard_port(self):
+        """Test fetching with non-standard port in URL."""
+        client = GeminiClient()
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_response = GeminiSuccessResult(
+                content="test",
+                mimeType=GeminiMimeType(type="text", subtype="plain"),
+                size=4,
+                requestInfo={},
+            )
+            mock_fetch.return_value = mock_response
+
+            # This should trigger the non-standard port handling (line 269)
+            result = await client.fetch("gemini://example.com:7070/test")
+            assert result == mock_response
+
+    @pytest.mark.asyncio
+    async def test_fetch_with_client_certificate(self):
+        """Test fetching with client certificate."""
+        client = GeminiClient(client_certs_enabled=True)
+
+        with patch.object(
+            client.client_cert_manager, "get_certificate_for_scope"
+        ) as mock_get_cert:
+            mock_get_cert.return_value = ("/path/to/cert.pem", "/path/to/key.pem")
+
+            with patch.object(client.tls_client, "connect") as mock_connect:
+                mock_connect.return_value = (Mock(), {"cert_fingerprint": "test_fp"})
+
+                with patch.object(client.tls_client, "send_data") as _mock_send:
+                    with patch.object(
+                        client.tls_client, "receive_data"
+                    ) as mock_receive:
+                        mock_receive.return_value = b"20 text/plain\r\ntest content"
+
+                        with patch.object(client.tls_client, "close") as _mock_close:
+                            _result = await client.fetch("gemini://example.com/test")
+
+                            # Verify client certificate was used
+                            mock_get_cert.assert_called_once_with(
+                                "example.com", 1965, "/test"
+                            )
+
+    @pytest.mark.asyncio
+    async def test_fetch_with_tofu_warning(self):
+        """Test fetching with TOFU warning."""
+        client = GeminiClient(tofu_enabled=True)
+
+        with patch.object(client.tofu_manager, "validate_certificate") as mock_validate:
+            mock_validate.return_value = (True, "Certificate changed")
+
+            with patch.object(client.tls_client, "connect") as mock_connect:
+                mock_connect.return_value = (Mock(), {"cert_fingerprint": "test_fp"})
+
+                with patch.object(client.tls_client, "send_data") as _mock_send:
+                    with patch.object(
+                        client.tls_client, "receive_data"
+                    ) as mock_receive:
+                        mock_receive.return_value = b"20 text/plain\r\ntest content"
+
+                        with patch.object(client.tls_client, "close") as _mock_close:
+                            _result = await client.fetch("gemini://example.com/test")
+
+                            # Verify TOFU warning was handled
+                            mock_validate.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_fetch_with_tofu_validation_error(self):
+        """Test fetching with TOFU validation error."""
+        client = GeminiClient(tofu_enabled=True)
+
+        with patch.object(client.tofu_manager, "validate_certificate") as mock_validate:
+            mock_validate.side_effect = TOFUValidationError(
+                "Certificate validation failed"
+            )
+
+            with patch.object(client.tls_client, "connect") as mock_connect:
+                mock_connect.return_value = (Mock(), {"cert_fingerprint": "test_fp"})
+
+                with patch.object(client.tls_client, "close") as _mock_close:
+                    result = await client.fetch("gemini://example.com/test")
+
+                    # Should return error result
+                    assert isinstance(result, GeminiErrorResult)
+                    assert "Certificate validation failed" in result.error["message"]

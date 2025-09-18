@@ -2,7 +2,7 @@
 
 from mcp.types import Tool
 
-from gopher_mcp.tools import create_gopher_fetch_tool
+from gopher_mcp.tools import create_gopher_fetch_tool, create_gemini_fetch_tool
 
 
 class TestCreateGopherFetchTool:
@@ -122,3 +122,64 @@ class TestCreateGopherFetchTool:
                 assert example in description or any(
                     part in description for part in example.split("/")
                 )
+
+
+class TestCreateGeminiFetchTool:
+    """Test the create_gemini_fetch_tool function."""
+
+    def test_create_gemini_fetch_tool_returns_tool(self):
+        """Test that create_gemini_fetch_tool returns a Tool instance."""
+        tool = create_gemini_fetch_tool()
+
+        assert isinstance(tool, Tool)
+
+    def test_create_gemini_fetch_tool_name(self):
+        """Test that the tool has the correct name."""
+        tool = create_gemini_fetch_tool()
+
+        assert tool.name == "gemini.fetch"
+
+    def test_create_gemini_fetch_tool_description(self):
+        """Test that the tool has a proper description."""
+        tool = create_gemini_fetch_tool()
+
+        assert tool.description is not None
+        assert len(tool.description) > 0
+        assert "Fetch Gemini content by URL" in tool.description
+        assert "TLS" in tool.description
+        assert "TOFU certificate validation" in tool.description
+        assert "gemtext parsing" in tool.description
+
+    def test_create_gemini_fetch_tool_input_schema(self):
+        """Test that the tool has the correct input schema."""
+        tool = create_gemini_fetch_tool()
+
+        assert tool.inputSchema is not None
+        assert tool.inputSchema["type"] == "object"
+        assert "url" in tool.inputSchema["required"]
+        assert "url" in tool.inputSchema["properties"]
+
+        url_property = tool.inputSchema["properties"]["url"]
+        assert url_property["type"] == "string"
+        assert url_property["format"] == "uri"
+        assert url_property["pattern"] == "^gemini://"
+
+    def test_create_gemini_fetch_tool_examples_are_valid(self):
+        """Test that all examples are valid Gemini URLs."""
+        tool = create_gemini_fetch_tool()
+
+        examples = tool.inputSchema["properties"]["url"]["examples"]
+
+        for example in examples:
+            assert example.startswith("gemini://")
+            assert "://" in example
+            # Basic URL structure validation
+            parts = example.split("://", 1)
+            assert len(parts) == 2
+            assert parts[0] == "gemini"
+
+    def test_create_gemini_fetch_tool_no_additional_properties(self):
+        """Test that the input schema doesn't allow additional properties."""
+        tool = create_gemini_fetch_tool()
+
+        assert tool.inputSchema["additionalProperties"] is False

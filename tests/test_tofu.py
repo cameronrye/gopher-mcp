@@ -43,14 +43,18 @@ class TestTOFUManager:
 
     def test_initialization_default_path(self):
         """Test manager initialization with default path."""
-        with patch("pathlib.Path.home") as mock_home, patch(
-            "pathlib.Path.mkdir"
-        ) as mock_mkdir, patch.object(TOFUManager, "_load_entries"):
+        with (
+            patch("gopher_mcp.tofu.get_home_directory") as mock_home,
+            patch("pathlib.Path.mkdir") as mock_mkdir,
+            patch.object(TOFUManager, "_load_entries"),
+        ):
             mock_home.return_value = Path("/home/user")
 
             manager = TOFUManager()
 
-            assert manager.storage_path == "/home/user/.gemini/tofu.json"
+            # Use Path to normalize the path for platform compatibility
+            expected_path = str(Path("/home/user/.gemini/tofu.json"))
+            assert manager.storage_path == expected_path
             mock_mkdir.assert_called_once_with(exist_ok=True)
 
     def test_initialization_custom_path(self):
@@ -149,8 +153,13 @@ class TestTOFUManager:
         with patch.object(TOFUManager, "_load_entries"):
             manager = TOFUManager("/invalid/path/tofu.json")
 
-            with pytest.raises(Exception):
-                manager._save_entries()
+            # Mock atomic_write_json to raise an error
+            with patch(
+                "gopher_mcp.tofu.atomic_write_json",
+                side_effect=OSError("Permission denied"),
+            ):
+                with pytest.raises(Exception):
+                    manager._save_entries()
 
     def test_validate_certificate_first_time(self):
         """Test validating certificate for first time (TOFU)."""
@@ -525,3 +534,35 @@ class TestTOFUManager:
 
             assert count == 0
             assert "valid.com:1965" in manager._entries
+
+    def test_get_key_method(self):
+        """Test the _get_key method."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+
+            # Test key generation
+            key = manager._get_key("example.com", 1965)
+            assert key == "example.com:1965"
+
+            key2 = manager._get_key("test.org", 443)
+            assert key2 == "test.org:443"
+
+    def test_manager_with_invalid_home_directory(self):
+        """Test manager initialization when home directory cannot be determined."""
+        with patch("gopher_mcp.tofu.get_home_directory", return_value=None):
+            with pytest.raises(ValueError, match="Could not determine home directory"):
+                TOFUManager()
+
+    def test_load_entries_with_corrupted_file(self):
+        """Test loading entries from a corrupted JSON file."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+
+            # Create corrupted JSON file
+            with open(storage_path, "w") as f:
+                f.write("invalid json content")
+
+            # Should handle corrupted file gracefully
+            manager = TOFUManager(storage_path)
+            assert len(manager._entries) == 0

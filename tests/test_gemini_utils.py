@@ -305,3 +305,162 @@ class TestGeminiURLRoundTrip:
             assert reparsed.port == parsed.port
             assert reparsed.path == parsed.path
             assert reparsed.query == parsed.query
+
+
+class TestGeminiUtilityFunctions:
+    """Test additional utility functions for better coverage."""
+
+    def test_atomic_write_json(self):
+        """Test atomic JSON writing utility."""
+        import tempfile
+        import json
+        from pathlib import Path
+        from gopher_mcp.utils import atomic_write_json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            file_path = Path(temp_dir) / "test.json"
+            test_data = {"test": "data", "number": 42}
+
+            # Write data atomically
+            atomic_write_json(str(file_path), test_data)
+
+            # Verify file exists and contains correct data
+            assert file_path.exists()
+            with open(file_path, "r") as f:
+                loaded_data = json.load(f)
+            assert loaded_data == test_data
+
+    def test_atomic_write_json_nested_directory(self):
+        """Test atomic JSON writing with nested directory creation."""
+        import tempfile
+        import json
+        from pathlib import Path
+        from gopher_mcp.utils import atomic_write_json
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nested_path = Path(temp_dir) / "nested" / "dir" / "test.json"
+            test_data = {"nested": True}
+
+            # Write data atomically (should create directories)
+            atomic_write_json(str(nested_path), test_data)
+
+            # Verify file exists and contains correct data
+            assert nested_path.exists()
+            with open(nested_path, "r") as f:
+                loaded_data = json.load(f)
+            assert loaded_data == test_data
+
+    def test_get_home_directory(self):
+        """Test home directory utility function."""
+        from gopher_mcp.utils import get_home_directory
+
+        home_dir = get_home_directory()
+        assert home_dir is not None
+        assert home_dir.exists()
+        assert home_dir.is_dir()
+
+    def test_get_home_directory_fallback(self):
+        """Test home directory fallback handling."""
+        import os
+        from unittest.mock import patch
+        from gopher_mcp.utils import get_home_directory
+
+        # Test fallback to environment variables
+        with patch("pathlib.Path.home", side_effect=Exception("No home")):
+            with patch.dict(os.environ, {"HOME": "/tmp"}, clear=False):
+                home_dir = get_home_directory()
+                assert home_dir is not None
+                assert str(home_dir) == "/tmp"
+
+    def test_guess_mime_type(self):
+        """Test MIME type guessing functionality."""
+        from gopher_mcp.utils import guess_mime_type
+
+        # Test various gopher types
+        assert guess_mime_type("0") == "text/plain"
+        assert guess_mime_type("1") == "text/gopher-menu"
+        assert guess_mime_type("g") == "image/gif"
+        assert guess_mime_type("I") == "image/jpeg"
+        assert guess_mime_type("9") == "application/octet-stream"
+
+    def test_detect_binary_mime_type(self):
+        """Test binary MIME type detection."""
+        from gopher_mcp.utils import detect_binary_mime_type
+
+        # Test PNG detection
+        png_header = b"\x89PNG\r\n\x1a\n" + b"x" * 8
+        assert detect_binary_mime_type(png_header) == "image/png"
+
+        # Test JPEG detection
+        jpeg_header = b"\xff\xd8\xff" + b"x" * 13
+        assert detect_binary_mime_type(jpeg_header) == "image/jpeg"
+
+        # Test PDF detection
+        pdf_header = b"%PDF-1.4" + b"x" * 8
+        assert detect_binary_mime_type(pdf_header) == "application/pdf"
+
+        # Test empty content
+        assert detect_binary_mime_type(b"") == "application/octet-stream"
+
+    def test_validate_gemini_mime_type(self):
+        """Test Gemini MIME type validation."""
+        from gopher_mcp.utils import validate_gemini_mime_type
+        from gopher_mcp.models import GeminiMimeType
+
+        # Test valid MIME type
+        valid_mime = GeminiMimeType(type="text", subtype="plain", charset="utf-8")
+        assert validate_gemini_mime_type(valid_mime) is True
+
+        # Test invalid MIME type (empty type)
+        invalid_mime = GeminiMimeType(type="", subtype="plain", charset="utf-8")
+        assert validate_gemini_mime_type(invalid_mime) is False
+
+    def test_parse_gemtext_functionality(self):
+        """Test gemtext parsing functionality."""
+        from gopher_mcp.utils import parse_gemtext
+
+        # Test basic gemtext parsing
+        content = "# Heading\nRegular text\n=> /link Link text"
+        document = parse_gemtext(content)
+
+        assert len(document.lines) == 3
+        assert document.lines[0].type == "heading1"
+        assert document.lines[1].type == "text"
+        assert document.lines[2].type == "link"
+
+    def test_format_gopher_url_with_search(self):
+        """Test Gopher URL formatting with search parameter."""
+        from gopher_mcp.utils import format_gopher_url
+
+        # Test with search parameter for type 7 (search)
+        url = format_gopher_url(
+            host="example.com",
+            port=70,
+            gopher_type="7",
+            selector="/search",
+            search="test query",
+        )
+
+        assert url == "gopher://example.com/7/search%09test query"
+
+    def test_format_gopher_url_non_standard_port(self):
+        """Test Gopher URL formatting with non-standard port."""
+        from gopher_mcp.utils import format_gopher_url
+
+        url = format_gopher_url(
+            host="example.com", port=7070, gopher_type="1", selector="/menu"
+        )
+
+        assert url == "gopher://example.com:7070/1/menu"
+
+    def test_guess_mime_type_with_selector(self):
+        """Test MIME type guessing with selector hints."""
+        from gopher_mcp.utils import guess_mime_type
+
+        # Test with file extension hints in selector
+        mime_type = guess_mime_type("0", "/documents/readme.txt")
+        assert mime_type == "text/plain"
+
+        # Test with image extension
+        mime_type = guess_mime_type("9", "/images/photo.jpg")
+        assert mime_type == "image/jpeg"

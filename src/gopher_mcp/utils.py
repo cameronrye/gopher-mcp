@@ -1,5 +1,9 @@
 """Utility functions for Gopher protocol operations."""
 
+import json
+import os
+import tempfile
+from pathlib import Path
 from typing import List, Optional, Dict, Any, Union
 from urllib.parse import unquote, urlparse
 
@@ -18,6 +22,62 @@ from .models import (
     GeminiErrorResult,
     GeminiCertificateResult,
 )
+
+
+def atomic_write_json(file_path: str, data: Any) -> None:
+    """Atomically write JSON data to a file.
+
+    This function writes to a temporary file first, then renames it to the target
+    path. On Windows, it handles the case where the target file already exists.
+
+    Args:
+        file_path: Target file path
+        data: Data to write as JSON
+
+    Raises:
+        Exception: If the write operation fails
+    """
+    # Ensure directory exists
+    Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Create temporary file in the same directory as the target
+    temp_dir = Path(file_path).parent
+    with tempfile.NamedTemporaryFile(
+        mode="w", dir=temp_dir, delete=False, suffix=".tmp"
+    ) as temp_file:
+        json.dump(data, temp_file, indent=2)
+        temp_path = temp_file.name
+
+    try:
+        # On Windows, we need to remove the target file first if it exists
+        if os.name == "nt" and Path(file_path).exists():
+            Path(file_path).unlink()
+
+        # Rename temporary file to target
+        Path(temp_path).rename(file_path)
+    except Exception:
+        # Clean up temporary file if rename fails
+        try:
+            Path(temp_path).unlink()
+        except Exception:  # nosec B110
+            pass  # Ignore cleanup failures to preserve original error
+        raise
+
+
+def get_home_directory() -> Optional[Path]:
+    """Get the user's home directory with fallback handling.
+
+    Returns:
+        Path to home directory or None if it cannot be determined
+    """
+    try:
+        return Path.home()
+    except Exception:
+        # Fallback to environment variables
+        home = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        if home:
+            return Path(home)
+        return None
 
 
 def parse_gopher_url(url: str) -> GopherURL:

@@ -415,3 +415,54 @@ class TestCreateTLSClient:
         assert client.config.client_cert_path == "/cert.pem"
         assert client.config.client_key_path == "/key.pem"
         assert client.config.verify_mode == ssl.CERT_REQUIRED
+
+
+class TestGeminiTLSAdditionalCoverage:
+    """Test additional TLS functionality for better coverage."""
+
+    def test_ssl_context_creation_with_invalid_cert_path(self):
+        """Test SSL context creation with invalid certificate path."""
+        config = TLSConfig(
+            client_cert_path="/nonexistent/cert.pem",
+            client_key_path="/nonexistent/key.pem",
+        )
+        client = GeminiTLSClient(config)
+
+        # This should handle the file not found error gracefully
+        with pytest.raises(Exception):
+            client._create_ssl_context()
+
+    @pytest.mark.asyncio
+    async def test_connection_cleanup_on_error(self):
+        """Test that connections are properly cleaned up on errors."""
+        client = GeminiTLSClient()
+
+        # Mock socket creation to fail
+        with patch("socket.socket") as mock_socket:
+            mock_socket.side_effect = OSError("Connection failed")
+
+            with pytest.raises(TLSConnectionError):
+                await client.connect("nonexistent.example.com", 1965)
+
+    @pytest.mark.asyncio
+    async def test_receive_data_with_large_response(self):
+        """Test receiving large response data."""
+        client = GeminiTLSClient()
+
+        # Mock SSL socket
+        mock_sock = Mock()
+        large_data = b"x" * 2048  # Larger than typical buffer
+        mock_sock.recv.side_effect = [large_data[:1024], large_data[1024:], b""]
+
+        result = await client.receive_data(mock_sock, max_size=2048)
+        assert result == large_data
+
+    def test_tls_config_edge_cases(self):
+        """Test TLS config edge cases for better coverage."""
+        # Test with minimum valid timeout
+        config = TLSConfig(timeout_seconds=0.1)
+        assert config.timeout_seconds == 0.1
+
+        # Test with very high timeout
+        config = TLSConfig(timeout_seconds=3600.0)
+        assert config.timeout_seconds == 3600.0
