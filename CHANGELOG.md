@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TBD
 
-## [0.2.0] - 2025-01-18
+## [0.2.1] - 2025-01-18
 
 ### Added
 
@@ -97,6 +97,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.1.0...v0.2.0
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.1.0...v0.2.1
 [0.1.0]: https://github.com/cameronrye/gopher-mcp/releases/tag/v0.1.0
