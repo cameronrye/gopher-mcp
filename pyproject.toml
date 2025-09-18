@@ -8,12 +8,8 @@ version = "0.1.0"
 description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources"
 readme = "README.md"
 license = "MIT"
-authors = [
-    { name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }
-]
-maintainers = [
-    { name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }
-]
+authors = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]
+maintainers = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]
 keywords = ["mcp", "gopher", "protocol", "llm", "model-context-protocol"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -39,9 +35,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-http = [
-    "aiohttp>=3.9.0",
-]
+http = ["aiohttp>=3.9.0"]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
@@ -83,14 +77,7 @@ gopher-mcp = "gopher_mcp.server:main"
 packages = ["src/gopher_mcp"]
 
 [tool.hatch.build.targets.sdist]
-include = [
-    "/src",
-    "/tests",
-    "/docs",
-    "/README.md",
-    "/LICENSE",
-    "/CHANGELOG.md",
-]
+include = ["/src", "/tests", "/docs", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 # Ruff configuration
 [tool.ruff]
@@ -116,13 +103,17 @@ select = [
     "RUF", # ruff-specific rules
 ]
 ignore = [
-    "E501",   # line too long, handled by formatter
+    "E501",    # line too long, handled by formatter
     "PLR0913", # too many arguments
     "PLR0915", # too many statements
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*" = ["PLR2004", "S101", "ARG"]  # Allow magic values and assert in tests
+"tests/**/*" = [
+    "PLR2004",
+    "S101",
+    "ARG",
+] # Allow magic values and assert in tests
 
 [tool.ruff.lint.isort]
 known-first-party = ["gopher_mcp"]
@@ -152,10 +143,7 @@ strict_equality = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = [
-    "pituophis.*",
-    "mcp.*",
-]
+module = ["pituophis.*", "mcp.*"]
 ignore_missing_imports = true
 
 # Pytest configuration
@@ -180,13 +168,9 @@ markers = [
 
 # Coverage configuration
 [tool.coverage.run]
-source = ["src"]
+source = ["src/gopher_mcp"]
 branch = true
-omit = [
-    "*/tests/*",
-    "*/test_*",
-    "*/__main__.py",
-]
+omit = ["*/tests/*", "*/test_*", "*/__main__.py"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -243,11 +227,9 @@ directory = "htmlcov"
 # Bandit security linting
 [tool.bandit]
 exclude_dirs = ["tests"]
-skips = ["B101"]  # Skip assert_used test
+skips = ["B101"]         # Skip assert_used test
 
 [dependency-groups]
-dev = [
-    "taskipy>=1.14.1",
-]
+dev = ["taskipy>=1.14.1"]
 
 # Additional tool configurations can be added here as needed

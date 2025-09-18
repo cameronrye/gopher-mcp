@@ -223,9 +223,9 @@ class TestEnvironmentVariables:
                 # Clear client to force recreation
                 gopher_mcp.server._gopher_client = None
                 client = get_gopher_client()
-                assert client.cache_enabled is expected, (
-                    f"Failed for env_value='{env_value}'"
-                )
+                assert (
+                    client.cache_enabled is expected
+                ), f"Failed for env_value='{env_value}'"
 
     def test_numeric_env_var_parsing(self):
         """Test parsing of numeric environment variables."""

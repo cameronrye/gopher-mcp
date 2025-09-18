@@ -3,10 +3,10 @@
 import pytest
 from pydantic import ValidationError
 
-from gopher_mcp.models import GeminiURL, GeminiFetchRequest
+from gopher_mcp.models import GeminiFetchRequest, GeminiURL
 from gopher_mcp.utils import (
-    parse_gemini_url,
     format_gemini_url,
+    parse_gemini_url,
     validate_gemini_url_components,
 )
 
@@ -312,9 +312,10 @@ class TestGeminiUtilityFunctions:
 
     def test_atomic_write_json(self):
         """Test atomic JSON writing utility."""
-        import tempfile
         import json
+        import tempfile
         from pathlib import Path
+
         from gopher_mcp.utils import atomic_write_json
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -332,9 +333,10 @@ class TestGeminiUtilityFunctions:
 
     def test_atomic_write_json_nested_directory(self):
         """Test atomic JSON writing with nested directory creation."""
-        import tempfile
         import json
+        import tempfile
         from pathlib import Path
+
         from gopher_mcp.utils import atomic_write_json
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -362,7 +364,9 @@ class TestGeminiUtilityFunctions:
     def test_get_home_directory_fallback(self):
         """Test home directory fallback handling."""
         import os
+        from pathlib import Path
         from unittest.mock import patch
+
         from gopher_mcp.utils import get_home_directory
 
         # Test fallback to environment variables
@@ -370,7 +374,7 @@ class TestGeminiUtilityFunctions:
             with patch.dict(os.environ, {"HOME": "/tmp"}, clear=False):
                 home_dir = get_home_directory()
                 assert home_dir is not None
-                assert str(home_dir) == "/tmp"
+                assert home_dir == Path("/tmp")
 
     def test_guess_mime_type(self):
         """Test MIME type guessing functionality."""
@@ -404,8 +408,8 @@ class TestGeminiUtilityFunctions:
 
     def test_validate_gemini_mime_type(self):
         """Test Gemini MIME type validation."""
-        from gopher_mcp.utils import validate_gemini_mime_type
         from gopher_mcp.models import GeminiMimeType
+        from gopher_mcp.utils import validate_gemini_mime_type
 
         # Test valid MIME type
         valid_mime = GeminiMimeType(type="text", subtype="plain", charset="utf-8")
