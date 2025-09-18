@@ -87,7 +87,7 @@ include = ["/src", "/tests", "/docs", "/README.md", "/LICENSE", "/CHANGELOG.md"]
 
 # Ruff configuration
 [tool.ruff]
-target-version = "0.2.0"
+target-version = "py311"
 line-length = 88
 src = ["src", "tests"]
 
@@ -132,7 +132,7 @@ line-ending = "auto"
 
 # MyPy configuration
 [tool.mypy]
-python_version = "0.2.0"
+python_version = "3.11"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
@@ -154,7 +154,7 @@ ignore_missing_imports = true
 
 # Pytest configuration
 [tool.pytest.ini_options]
-minversion = "0.2.0"
+minversion = "7.0"
 addopts = [
     "--strict-markers",
     "--strict-config",
