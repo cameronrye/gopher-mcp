@@ -13,7 +13,7 @@ Configure the following settings for the `main` branch:
 - ✅ Require branches to be up to date before merging
 - Required checks:
   - `test` (Test Python 3.11 on ubuntu-latest)
-  - `test` (Test Python 3.12 on ubuntu-latest) 
+  - `test` (Test Python 3.12 on ubuntu-latest)
   - `test` (Test Python 3.13 on ubuntu-latest)
   - `lint` (Lint and type check)
   - `security` (Security checks)
