@@ -2,7 +2,7 @@
 
 Thank you for your interest in contributing to the Gopher MCP Server! This document provides guidelines and information for contributors.
 
-## 🚀 Quick Start for Contributors
+## Quick Start for Contributors
 
 1. **Fork** the repository on GitHub
 2. **Clone** your fork locally:
@@ -24,7 +24,7 @@ Thank you for your interest in contributing to the Gopher MCP Server! This docum
    git checkout -b feature/your-feature-name
    ```
 
-## 🛠️ Development Environment
+## Development Environment
 
 ### Prerequisites
 
@@ -67,7 +67,7 @@ uv run task quality
 | `make <command>`        | Unix/macOS (delegates to task.py) |
 | `uv run task <command>` | Direct taskipy usage (fallback)   |
 
-## 📝 Code Standards
+## Code Standards
 
 ### Code Quality
 
@@ -98,7 +98,7 @@ uv run task install-hooks
 pre-commit run --all-files
 ```
 
-## 🧪 Testing
+## Testing
 
 ### Test Structure
 
@@ -153,7 +153,7 @@ async def test_gopher_fetch_menu():
     pass
 ```
 
-## 📚 Documentation
+## Documentation
 
 ### Documentation Standards
 
@@ -196,7 +196,7 @@ uv run task docs-serve
 uv run task docs-build
 ```
 
-## 🔒 Security Considerations
+## Security Considerations
 
 ### Security Guidelines
 
@@ -212,7 +212,7 @@ uv run task docs-build
 - Use `bandit` for security linting (runs automatically)
 - Use `safety` for dependency vulnerability checking
 
-## 🐛 Bug Reports
+## Bug Reports
 
 ### Before Submitting a Bug Report
 
@@ -246,7 +246,7 @@ What you expected to happen.
 Any other context about the problem.
 ```
 
-## 💡 Feature Requests
+## Feature Requests
 
 ### Feature Request Guidelines
 
@@ -255,7 +255,7 @@ Any other context about the problem.
 - **Backward compatibility** - Consider impact on existing users
 - **Security implications** - Consider any security aspects
 
-## 📋 Pull Request Process
+## Pull Request Process
 
 ### Before Submitting a Pull Request
 
@@ -299,7 +299,7 @@ Brief description of changes.
 3. **Testing** on multiple platforms if needed
 4. **Documentation review** for user-facing changes
 
-## 🏷️ Release Process
+## Release Process
 
 ### Versioning
 
@@ -317,7 +317,7 @@ We follow [Semantic Versioning](https://semver.org/):
 4. Tag release after merge
 5. Publish to PyPI (automated)
 
-## 🤝 Community Guidelines
+## Community Guidelines
 
 ### Code of Conduct
 
@@ -332,10 +332,12 @@ We follow [Semantic Versioning](https://semver.org/):
 - **GitHub Discussions** - General questions and ideas
 - **Pull Requests** - Code contributions and reviews
 
-## 📞 Getting Help
+## Getting Help
 
 - **Documentation**: [Project Docs](https://cameronrye.github.io/gopher-mcp/)
 - **Issues**: [GitHub Issues](https://github.com/cameronrye/gopher-mcp/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/cameronrye/gopher-mcp/discussions)
 
-Thank you for contributing to the Gopher MCP Server! 🎉
+---
+
+Made with ❤️ by [Cameron Rye](https://rye.dev/)

@@ -16,6 +16,72 @@ Fetches content from Gopher protocol servers.
 |-----------|------|----------|-------------|
 | `url` | string | Yes | Full Gopher URL (e.g., `gopher://gopher.floodgap.com/1/`) |
 
+#### Examples
+
+##### Fetching a Gopher Menu
+
+```python
+from gopher_mcp.server import gopher_fetch
+
+# Fetch a directory listing
+result = await gopher_fetch("gopher://gopher.floodgap.com/1/")
+
+if result["kind"] == "menu":
+    print(f"Found {len(result['items'])} menu items")
+    for item in result["items"]:
+        print(f"  {item['display_text']} ({item['type']})")
+```
+
+##### Fetching a Text File
+
+```python
+# Fetch a text document
+result = await gopher_fetch("gopher://gopher.floodgap.com/0/gopher/tech/history.txt")
+
+if result["kind"] == "text":
+    print(f"Content ({result['size']} bytes):")
+    print(result["content"])
+```
+
+##### Performing a Gopher Search
+
+```python
+# Search using a Gopher search server (type 7)
+result = await gopher_fetch("gopher://gopher.floodgap.com/7/v2/vs?search+query")
+
+if result["kind"] == "menu":
+    print(f"Search returned {len(result['items'])} results")
+```
+
+##### Handling Binary Content
+
+```python
+# Fetch binary file metadata
+result = await gopher_fetch("gopher://gopher.floodgap.com/9/file.zip")
+
+if result["kind"] == "binary":
+    print(f"Binary file: {result['description']}")
+    print(f"Type: {result['item_type']}")
+    if result.get("size"):
+        print(f"Size: {result['size']} bytes")
+```
+
+##### Error Handling
+
+```python
+# Handle errors gracefully
+result = await gopher_fetch("gopher://invalid.example.com/1/")
+
+if result["kind"] == "error":
+    print(f"Error: {result['error']}")
+    if result.get("details"):
+        print(f"Details: {result['details']}")
+    if result.get("suggestions"):
+        print("Suggestions:")
+        for suggestion in result["suggestions"]:
+            print(f"  - {suggestion}")
+```
+
 #### Response Types
 
 ##### MenuResult
@@ -94,6 +160,111 @@ Fetches content from Gemini protocol servers with full TLS security.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `url` | string | Yes | Full Gemini URL (e.g., `gemini://geminiprotocol.net/`) |
+
+#### Examples
+
+##### Fetching Gemtext Content
+
+```python
+from gopher_mcp.server import gemini_fetch
+
+# Fetch a gemtext page
+result = await gemini_fetch("gemini://geminiprotocol.net/")
+
+if result["kind"] == "gemtext":
+    print(f"Document has {len(result['document']['lines'])} lines")
+    print(f"Found {len(result['document']['links'])} links")
+    print(f"Found {len(result['document']['headings'])} headings")
+
+    # Print all headings
+    for heading in result["document"]["headings"]:
+        print(f"{'#' * heading['level']} {heading['text']}")
+```
+
+##### Fetching Plain Text
+
+```python
+# Fetch plain text content
+result = await gemini_fetch("gemini://example.com/document.txt")
+
+if result["kind"] == "success":
+    print(f"MIME type: {result['mime_type']['full_type']}")
+    if result["mime_type"]["is_text"]:
+        print(f"Content:\n{result['content']}")
+```
+
+##### Handling Redirects
+
+```python
+# Handle redirect responses
+result = await gemini_fetch("gemini://example.com/old-page")
+
+if result["kind"] == "redirect":
+    print(f"Redirected to: {result['url']}")
+    print(f"Permanent: {result['permanent']}")
+
+    # Follow the redirect
+    new_result = await gemini_fetch(result["url"])
+```
+
+##### Handling Input Requests
+
+```python
+# Handle input requests
+result = await gemini_fetch("gemini://example.com/search")
+
+if result["kind"] == "input":
+    print(f"Server requests input: {result['prompt']}")
+    print(f"Sensitive: {result['sensitive']}")
+
+    # Provide input by appending to URL
+    user_input = "search query"
+    new_url = f"{result['request_info']['url']}?{user_input}"
+    new_result = await gemini_fetch(new_url)
+```
+
+##### Handling Certificate Requests
+
+```python
+# Handle client certificate requests
+result = await gemini_fetch("gemini://example.com/private")
+
+if result["kind"] == "certificate":
+    print(f"Certificate required: {result['message']}")
+    print(f"Status code: {result['status']}")
+    # Client certificates are automatically managed by the server
+```
+
+##### Error Handling
+
+```python
+# Handle various error types
+result = await gemini_fetch("gemini://example.com/notfound")
+
+if result["kind"] == "error":
+    print(f"Error {result['status']}: {result['message']}")
+
+    if result["is_temporary"]:
+        print("This is a temporary error - retry may succeed")
+    elif result["is_server_error"]:
+        print("Server error - contact server administrator")
+    elif result["is_client_error"]:
+        print("Client error - check your request")
+```
+
+##### Working with Links
+
+```python
+# Extract and process all links from a gemtext page
+result = await gemini_fetch("gemini://example.com/links")
+
+if result["kind"] == "gemtext":
+    for link in result["document"]["links"]:
+        print(f"Link: {link['url']}")
+        if link.get("text"):
+            print(f"  Text: {link['text']}")
+        print(f"  Line: {link['line_number']}")
+```
 
 #### Response Types
 
@@ -322,23 +493,176 @@ Gemini uses two-digit status codes:
 
 ### Gopher Errors
 
-Common Gopher errors include:
+Common Gopher errors and how to handle them:
 
-- **Connection timeout**: Server not responding
-- **Invalid URL**: Malformed Gopher URL
-- **Unsupported type**: Unknown item type
-- **Server error**: Server returned error response
-- **Content too large**: Response exceeds size limit
+#### Connection Timeout
+
+**Error**: `"Connection timeout: Server not responding"`
+
+**Cause**: Server is unreachable or slow to respond
+
+**Solution**:
+```python
+# Increase timeout in configuration
+# GOPHER_TIMEOUT_SECONDS=60
+
+result = await gopher_fetch("gopher://slow-server.example.com/1/")
+if result["kind"] == "error" and "timeout" in result["error"].lower():
+    print("Server is slow or unreachable - try again later")
+```
+
+#### Invalid URL
+
+**Error**: `"Invalid Gopher URL format"`
+
+**Cause**: Malformed URL structure
+
+**Solution**:
+```python
+# Ensure URL follows gopher://host[:port]/type/selector format
+valid_url = "gopher://gopher.floodgap.com/1/"
+invalid_url = "gopher://gopher.floodgap.com"  # Missing type and selector
+
+result = await gopher_fetch(valid_url)
+```
+
+#### Unsupported Type
+
+**Error**: `"Unsupported Gopher item type: X"`
+
+**Cause**: Server returned unknown or unsupported item type
+
+**Solution**:
+```python
+result = await gopher_fetch("gopher://example.com/X/unknown")
+if result["kind"] == "error" and "unsupported" in result["error"].lower():
+    print("This content type is not supported")
+    if result.get("suggestions"):
+        print("Try:", result["suggestions"])
+```
+
+#### Content Too Large
+
+**Error**: `"Response exceeds maximum size limit"`
+
+**Cause**: Response size exceeds configured maximum
+
+**Solution**:
+```python
+# Increase size limit in configuration
+# GOPHER_MAX_RESPONSE_SIZE=2097152
+
+result = await gopher_fetch("gopher://example.com/0/large-file.txt")
+if result["kind"] == "error" and "size" in result["error"].lower():
+    print("File is too large - increase GOPHER_MAX_RESPONSE_SIZE")
+```
 
 ### Gemini Errors
 
-Common Gemini errors include:
+Common Gemini errors and how to handle them:
 
-- **TLS handshake failure**: Certificate or TLS issues
-- **TOFU validation failure**: Certificate fingerprint mismatch
-- **Invalid status code**: Malformed server response
-- **Content too large**: Response exceeds size limit
-- **Host not allowed**: Server not in allowlist
+#### TLS Handshake Failure
+
+**Error**: `"TLS connection failed: Handshake error"`
+
+**Cause**: Certificate or TLS configuration issues
+
+**Solution**:
+```python
+result = await gemini_fetch("gemini://tls-error.example.com/")
+if result["kind"] == "error" and "tls" in result["error"]["message"].lower():
+    print("TLS connection failed - server may have invalid certificate")
+    print("Check server TLS configuration")
+```
+
+#### TOFU Validation Failure
+
+**Error**: `"TOFU validation failed: Certificate fingerprint mismatch"`
+
+**Cause**: Server certificate changed since first visit
+
+**Solution**:
+```python
+# Certificate changed - manual intervention required
+# 1. Verify the change is legitimate
+# 2. Remove old certificate from TOFU storage
+# 3. Retry the request
+
+# TOFU storage location: ~/.gemini/tofu.json
+result = await gemini_fetch("gemini://changed-cert.example.com/")
+if result["kind"] == "error" and "tofu" in result["error"]["message"].lower():
+    print("Certificate changed - verify this is expected")
+    print("Remove old entry from TOFU storage if legitimate")
+```
+
+#### Invalid Status Code
+
+**Error**: `"Invalid Gemini status code: XX"`
+
+**Cause**: Server returned malformed or invalid status code
+
+**Solution**:
+```python
+result = await gemini_fetch("gemini://broken-server.example.com/")
+if result["kind"] == "error" and "status" in result["error"]["message"].lower():
+    print("Server returned invalid response - contact server admin")
+```
+
+#### Content Too Large
+
+**Error**: `"Response exceeds maximum size limit"`
+
+**Cause**: Response size exceeds configured maximum
+
+**Solution**:
+```python
+# Increase size limit in configuration
+# GEMINI_MAX_RESPONSE_SIZE=2097152
+
+result = await gemini_fetch("gemini://example.com/large-document")
+if result["kind"] == "error" and "size" in result["error"]["message"].lower():
+    print("Content too large - increase GEMINI_MAX_RESPONSE_SIZE")
+```
+
+#### Host Not Allowed
+
+**Error**: `"Host not in allowed hosts list"`
+
+**Cause**: Server not in configured allowlist
+
+**Solution**:
+```python
+# Add host to allowlist in configuration
+# GEMINI_ALLOWED_HOSTS=geminiprotocol.net,example.com
+
+result = await gemini_fetch("gemini://blocked.example.com/")
+if result["kind"] == "error" and "allowed" in result["error"]["message"].lower():
+    print("Host not allowed - add to GEMINI_ALLOWED_HOSTS")
+```
+
+### Error Response Structure
+
+All error responses include:
+
+```python
+{
+    "kind": "error",
+    "error": {
+        "message": "Human-readable error message",
+        "type": "ErrorType",  # Exception class name
+        "details": "Additional technical details"
+    },
+    "suggestions": [  # Optional troubleshooting suggestions
+        "Try increasing timeout",
+        "Check server availability"
+    ],
+    "request_info": {
+        "url": "original://request/url",
+        "timestamp": 1234567890,
+        "protocol": "gopher" or "gemini"
+    }
+}
+```
 
 ## Rate Limiting
 

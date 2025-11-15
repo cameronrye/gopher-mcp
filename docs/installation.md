@@ -75,17 +75,17 @@ Add to your Claude Desktop configuration:
 
 #### Other MCP Clients
 
-For HTTP transport:
+For HTTP transport, first start the server:
 
-```json
-{
-  "mcpServers": {
-    "gopher": {
-      "url": "http://localhost:8000/mcp"
-    }
-  }
-}
+```bash
+# Start with streamable HTTP transport
+gopher-mcp --transport streamable-http
+
+# Or with SSE transport
+gopher-mcp --transport sse
 ```
+
+Then configure your MCP client to connect to the HTTP endpoint (default port varies by transport).
 
 ## Troubleshooting
 

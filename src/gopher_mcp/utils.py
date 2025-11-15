@@ -21,6 +21,13 @@ from .models import (
     GeminiRedirectResult,
     GeminiErrorResult,
     GeminiCertificateResult,
+    GemtextLineType,
+    GemtextLink,
+    GemtextHeading,
+    GemtextList,
+    GemtextQuote,
+    GemtextPreformat,
+    GemtextLine,
 )
 
 
@@ -573,6 +580,170 @@ def _parse_gemtext_link_line(line: str) -> Optional[Dict[str, Optional[str]]]:
     return {"url": url, "text": text}
 
 
+def _create_gemtext_line(
+    line_type: "GemtextLineType",
+    content: str,
+    link: Optional["GemtextLink"] = None,
+    heading: Optional["GemtextHeading"] = None,
+    list_item: Optional["GemtextList"] = None,
+    quote: Optional["GemtextQuote"] = None,
+    preformat: Optional["GemtextPreformat"] = None,
+    level: Optional[int] = None,
+    alt_text: Optional[str] = None,
+) -> "GemtextLine":
+    """Create a GemtextLine object with the given parameters.
+
+    Args:
+        line_type: Type of the line
+        content: Raw line content
+        link: Link object if this is a link line
+        heading: Heading object if this is a heading line
+        list_item: List object if this is a list item line
+        quote: Quote object if this is a quote line
+        preformat: Preformat object if this is a preformat line
+        level: Heading level if this is a heading line
+        alt_text: Alt text for preformat blocks
+
+    Returns:
+        GemtextLine object
+    """
+    from .models import GemtextLine
+
+    return GemtextLine(
+        type=line_type,
+        content=content,
+        link=link,
+        level=level,
+        alt_text=alt_text,
+        heading=heading,
+        list_item=list_item,
+        quote=quote,
+        preformat=preformat,
+    )
+
+
+def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
+    """Parse a heading line.
+
+    Args:
+        line_content: Raw line content
+
+    Returns:
+        GemtextLine object if this is a heading, None otherwise
+    """
+    from .models import GemtextHeading, GemtextLineType
+
+    if line_content.startswith("###"):
+        heading_text = line_content[3:].strip()
+        heading_obj = GemtextHeading(
+            level=3, text=heading_text, raw_content=line_content
+        )
+        return _create_gemtext_line(
+            GemtextLineType.HEADING_3, line_content, heading=heading_obj, level=3
+        )
+    elif line_content.startswith("##"):
+        heading_text = line_content[2:].strip()
+        heading_obj = GemtextHeading(
+            level=2, text=heading_text, raw_content=line_content
+        )
+        return _create_gemtext_line(
+            GemtextLineType.HEADING_2, line_content, heading=heading_obj, level=2
+        )
+    elif line_content.startswith("#"):
+        heading_text = line_content[1:].strip()
+        heading_obj = GemtextHeading(
+            level=1, text=heading_text, raw_content=line_content
+        )
+        return _create_gemtext_line(
+            GemtextLineType.HEADING_1, line_content, heading=heading_obj, level=1
+        )
+
+    return None
+
+
+def _parse_link(
+    line_content: str
+) -> Optional[tuple["GemtextLine", Optional["GemtextLink"]]]:
+    """Parse a link line.
+
+    Args:
+        line_content: Raw line content
+
+    Returns:
+        Tuple of (GemtextLine, GemtextLink) if this is a valid link, (GemtextLine as text, None) if invalid link syntax, None if not a link
+    """
+    from .models import GemtextLink, GemtextLineType
+
+    if not line_content.startswith("=>"):
+        return None
+
+    link_data = _parse_gemtext_link_line(line_content)
+    if link_data and link_data["url"]:
+        link_obj = GemtextLink(url=link_data["url"], text=link_data["text"])
+        line = _create_gemtext_line(GemtextLineType.LINK, line_content, link=link_obj)
+        return (line, link_obj)
+    else:
+        # Invalid link line, treat as text
+        line = _create_gemtext_line(GemtextLineType.TEXT, line_content)
+        return (line, None)
+
+
+def _parse_list_item(line_content: str) -> Optional["GemtextLine"]:
+    """Parse a list item line.
+
+    Args:
+        line_content: Raw line content
+
+    Returns:
+        GemtextLine object if this is a list item, None otherwise
+    """
+    from .models import GemtextList, GemtextLineType
+
+    if line_content.startswith("* "):
+        list_text = line_content[2:].strip()
+        list_obj = GemtextList(text=list_text, raw_content=line_content)
+        return _create_gemtext_line(
+            GemtextLineType.LIST_ITEM, line_content, list_item=list_obj
+        )
+
+    return None
+
+
+def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
+    """Parse a quote line.
+
+    Args:
+        line_content: Raw line content
+
+    Returns:
+        GemtextLine object if this is a quote, None otherwise
+    """
+    from .models import GemtextQuote, GemtextLineType
+
+    if line_content.startswith(">"):
+        quote_text = line_content[1:].strip()
+        quote_obj = GemtextQuote(text=quote_text, raw_content=line_content)
+        return _create_gemtext_line(
+            GemtextLineType.QUOTE, line_content, quote=quote_obj
+        )
+
+    return None
+
+
+def _parse_text(line_content: str) -> "GemtextLine":
+    """Parse a text line.
+
+    Args:
+        line_content: Raw line content
+
+    Returns:
+        GemtextLine object for text
+    """
+    from .models import GemtextLineType
+
+    return _create_gemtext_line(GemtextLineType.TEXT, line_content)
+
+
 def parse_gemtext(content: str) -> "GemtextDocument":
     """Parse gemtext content into structured format.
 
@@ -586,12 +757,7 @@ def parse_gemtext(content: str) -> "GemtextDocument":
     # Import here to avoid circular imports
     from .models import (
         GemtextDocument,
-        GemtextLine,
         GemtextLineType,
-        GemtextLink,
-        GemtextHeading,
-        GemtextList,
-        GemtextQuote,
         GemtextPreformat,
     )
 
@@ -621,16 +787,11 @@ def parse_gemtext(content: str) -> "GemtextDocument":
                     metadata={},
                 )
                 lines.append(
-                    GemtextLine(
-                        type=GemtextLineType.PREFORMAT,
-                        content=line_content,
-                        link=None,
-                        level=None,
-                        alt_text=current_alt_text,
-                        heading=None,
-                        list_item=None,
-                        quote=None,
+                    _create_gemtext_line(
+                        GemtextLineType.PREFORMAT,
+                        line_content,
                         preformat=preformat_obj,
+                        alt_text=current_alt_text,
                     )
                 )
                 continue
@@ -645,16 +806,11 @@ def parse_gemtext(content: str) -> "GemtextDocument":
                     metadata=metadata,
                 )
                 lines.append(
-                    GemtextLine(
-                        type=GemtextLineType.PREFORMAT,
-                        content=line_content,
-                        link=None,
-                        level=None,
-                        alt_text=current_alt_text,
-                        heading=None,
-                        list_item=None,
-                        quote=None,
+                    _create_gemtext_line(
+                        GemtextLineType.PREFORMAT,
+                        line_content,
                         preformat=preformat_obj,
+                        alt_text=current_alt_text,
                     )
                 )
                 continue
@@ -675,177 +831,35 @@ def parse_gemtext(content: str) -> "GemtextDocument":
                 metadata=metadata,
             )
             lines.append(
-                GemtextLine(
-                    type=GemtextLineType.PREFORMAT,
-                    content=line_content,
-                    link=None,
-                    level=None,
-                    alt_text=current_alt_text,
-                    heading=None,
-                    list_item=None,
-                    quote=None,
+                _create_gemtext_line(
+                    GemtextLineType.PREFORMAT,
+                    line_content,
                     preformat=preformat_obj,
+                    alt_text=current_alt_text,
                 )
             )
 
         elif line_content.startswith("=>"):
             # Link line
-            link_data = _parse_gemtext_link_line(line_content)
-            if link_data and link_data["url"]:
-                link_obj = GemtextLink(url=link_data["url"], text=link_data["text"])
-                links.append(link_obj)
-                lines.append(
-                    GemtextLine(
-                        type=GemtextLineType.LINK,
-                        content=line_content,
-                        link=link_obj,
-                        level=None,
-                        alt_text=None,
-                        heading=None,
-                        list_item=None,
-                        quote=None,
-                        preformat=None,
-                    )
-                )
-            else:
-                # Invalid link line, treat as text
-                lines.append(
-                    GemtextLine(
-                        type=GemtextLineType.TEXT,
-                        content=line_content,
-                        link=None,
-                        level=None,
-                        alt_text=None,
-                        heading=None,
-                        list_item=None,
-                        quote=None,
-                        preformat=None,
-                    )
-                )
+            result = _parse_link(line_content)
+            if result:
+                line, link_obj = result
+                lines.append(line)
+                if link_obj:
+                    links.append(link_obj)
 
-        elif line_content.startswith("###"):
-            # Heading level 3
-            heading_text = line_content[3:].strip()
-            heading_obj = GemtextHeading(
-                level=3,
-                text=heading_text,
-                raw_content=line_content,
-            )
-            lines.append(
-                GemtextLine(
-                    type=GemtextLineType.HEADING_3,
-                    content=line_content,
-                    link=None,
-                    level=3,
-                    alt_text=None,
-                    heading=heading_obj,
-                    list_item=None,
-                    quote=None,
-                    preformat=None,
-                )
-            )
+        elif (heading_line := _parse_heading(line_content)) is not None:
+            lines.append(heading_line)
 
-        elif line_content.startswith("##"):
-            # Heading level 2
-            heading_text = line_content[2:].strip()
-            heading_obj = GemtextHeading(
-                level=2,
-                text=heading_text,
-                raw_content=line_content,
-            )
-            lines.append(
-                GemtextLine(
-                    type=GemtextLineType.HEADING_2,
-                    content=line_content,
-                    link=None,
-                    level=2,
-                    alt_text=None,
-                    heading=heading_obj,
-                    list_item=None,
-                    quote=None,
-                    preformat=None,
-                )
-            )
+        elif (list_line := _parse_list_item(line_content)) is not None:
+            lines.append(list_line)
 
-        elif line_content.startswith("#"):
-            # Heading level 1
-            heading_text = line_content[1:].strip()
-            heading_obj = GemtextHeading(
-                level=1,
-                text=heading_text,
-                raw_content=line_content,
-            )
-            lines.append(
-                GemtextLine(
-                    type=GemtextLineType.HEADING_1,
-                    content=line_content,
-                    link=None,
-                    level=1,
-                    alt_text=None,
-                    heading=heading_obj,
-                    list_item=None,
-                    quote=None,
-                    preformat=None,
-                )
-            )
-
-        elif line_content.startswith("* "):
-            # List item (must have space after asterisk)
-            list_text = line_content[2:].strip()
-            list_obj = GemtextList(
-                text=list_text,
-                raw_content=line_content,
-            )
-            lines.append(
-                GemtextLine(
-                    type=GemtextLineType.LIST_ITEM,
-                    content=line_content,
-                    link=None,
-                    level=None,
-                    alt_text=None,
-                    heading=None,
-                    list_item=list_obj,
-                    quote=None,
-                    preformat=None,
-                )
-            )
-
-        elif line_content.startswith(">"):
-            # Quote line
-            quote_text = line_content[1:].strip()
-            quote_obj = GemtextQuote(
-                text=quote_text,
-                raw_content=line_content,
-            )
-            lines.append(
-                GemtextLine(
-                    type=GemtextLineType.QUOTE,
-                    content=line_content,
-                    link=None,
-                    level=None,
-                    alt_text=None,
-                    heading=None,
-                    list_item=None,
-                    quote=quote_obj,
-                    preformat=None,
-                )
-            )
+        elif (quote_line := _parse_quote(line_content)) is not None:
+            lines.append(quote_line)
 
         else:
             # Default: text line
-            lines.append(
-                GemtextLine(
-                    type=GemtextLineType.TEXT,
-                    content=line_content,
-                    link=None,
-                    level=None,
-                    alt_text=None,
-                    heading=None,
-                    list_item=None,
-                    quote=None,
-                    preformat=None,
-                )
-            )
+            lines.append(_parse_text(line_content))
 
     return GemtextDocument(lines=lines, links=links)
 

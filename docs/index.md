@@ -8,12 +8,12 @@ Gopher MCP provides a bridge between modern Large Language Models and the classi
 
 ## Key Features
 
-- **🔒 Safe & Secure**: Built-in safeguards including timeouts, size limits, and input validation
-- **⚡ High Performance**: Async implementation with intelligent caching
-- **🛠️ Developer Friendly**: Comprehensive type hints, extensive testing, and excellent documentation
-- **🌐 Cross Platform**: Works on Linux, macOS, and Windows
-- **📊 Structured Output**: Returns LLM-optimized JSON responses for all Gopher content types
-- **🔍 Full Protocol Support**: Handles menus, text, binary files, and search functionality
+- **Safe & Secure**: Built-in safeguards including timeouts, size limits, and input validation
+- **High Performance**: Async implementation with intelligent caching
+- **Developer Friendly**: Comprehensive type hints, extensive testing, and excellent documentation
+- **Cross Platform**: Works on Linux, macOS, and Windows
+- **Structured Output**: Returns LLM-optimized JSON responses for all Gopher content types
+- **Full Protocol Support**: Handles menus, text, binary files, and search functionality
 
 ## Quick Start
 
@@ -37,8 +37,11 @@ uv add git+https://github.com/cameronrye/gopher-mcp.git
 # Run with stdio transport (for Claude Desktop)
 gopher-mcp
 
-# Run with HTTP transport
-gopher-mcp --http --host localhost --port 8000
+# Run with streamable HTTP transport
+gopher-mcp --transport streamable-http
+
+# Run with SSE transport
+gopher-mcp --transport sse
 ```
 
 ### Example Tool Usage

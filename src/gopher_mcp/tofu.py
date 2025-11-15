@@ -4,7 +4,7 @@ import json
 import os
 import time
 from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime
+from datetime import datetime, timezone
 
 import structlog
 
@@ -118,9 +118,11 @@ class TOFUManager:
             if cert_info and "notAfter" in cert_info:
                 try:
                     # Parse certificate expiry
-                    expires = datetime.strptime(
-                        cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z"
-                    ).timestamp()
+                    expires = (
+                        datetime.strptime(cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                        .replace(tzinfo=timezone.utc)
+                        .timestamp()
+                    )
                 except ValueError:
                     logger.warning(
                         "Failed to parse certificate expiry",
@@ -228,9 +230,11 @@ class TOFUManager:
         expires = None
         if cert_info and "notAfter" in cert_info:
             try:
-                expires = datetime.strptime(
-                    cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z"
-                ).timestamp()
+                expires = (
+                    datetime.strptime(cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                    .replace(tzinfo=timezone.utc)
+                    .timestamp()
+                )
             except ValueError:
                 pass
 

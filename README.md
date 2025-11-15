@@ -14,7 +14,7 @@ A modern, cross-platform [Model Context Protocol (MCP)](https://modelcontextprot
 browse and interact with both [Gopher protocol](<https://en.wikipedia.org/wiki/Gopher_(protocol)>) and
 [Gemini protocol](https://geminiprotocol.net/) resources safely and efficiently.
 
-## 🌟 Overview
+## Overview
 
 The Gopher & Gemini MCP Server bridges vintage and modern alternative internet protocols with AI assistants, allowing LLMs like
 Claude to explore the unique content and communities that thrive on both Gopherspace and Geminispace. Built with FastMCP and
@@ -22,41 +22,41 @@ modern Python practices, it provides secure, efficient gateways to these distinc
 
 **Key Benefits:**
 
-- 🔍 **Discover alternative internet content** - Access unique resources on both Gopher and Gemini protocols
-- 🛡️ **Safe exploration** - Built-in security safeguards, TLS encryption, and content filtering
-- 🚀 **Modern implementation** - Uses FastMCP framework with async/await patterns
-- 🔧 **Developer-friendly** - Comprehensive testing, type hints, and documentation
-- 🔐 **Advanced security** - TOFU certificate validation and client certificate support for Gemini
+- **Discover alternative internet content** - Access unique resources on both Gopher and Gemini protocols
+- **Safe exploration** - Built-in security safeguards, TLS encryption, and content filtering
+- **Modern implementation** - Uses FastMCP framework with async/await patterns
+- **Developer-friendly** - Comprehensive testing, type hints, and documentation
+- **Advanced security** - TOFU certificate validation and client certificate support for Gemini
 
-## ✨ Features
+## Features
 
-- 🔧 **Dual Protocol Support**: `gopher_fetch` and `gemini_fetch` tools for comprehensive protocol coverage
-- 📋 **Comprehensive Gopher Support**: Handles menus (type 1), text files (type 0), search servers (type 7), and binary files
-- 🌐 **Full Gemini Implementation**: Native gemtext parsing, TLS security, and status code handling
-- 🔐 **Advanced Security**: TOFU certificate validation, client certificates, and secure TLS connections
-- 🛡️ **Safety First**: Built-in timeouts, size limits, input sanitization, and host allowlists
-- 🤖 **LLM-Optimized**: Returns structured JSON responses designed for AI consumption
-- 🖥️ **Cross-Platform**: Works seamlessly on Windows, macOS, and Linux
-- 🔬 **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
-- ⚡ **High Performance**: Async/await patterns with intelligent caching
+- **Dual Protocol Support**: `gopher_fetch` and `gemini_fetch` tools for comprehensive protocol coverage
+- **Comprehensive Gopher Support**: Handles menus (type 1), text files (type 0), search servers (type 7), and binary files
+- **Full Gemini Implementation**: Native gemtext parsing, TLS security, and status code handling
+- **Advanced Security**: TOFU certificate validation, client certificates, and secure TLS connections
+- **Safety First**: Built-in timeouts, size limits, input sanitization, and host allowlists
+- **LLM-Optimized**: Returns structured JSON responses designed for AI consumption
+- **Cross-Platform**: Works seamlessly on Windows, macOS, and Linux
+- **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
+- **High Performance**: Async/await patterns with intelligent caching
 
-## 📚 Documentation
+## Documentation
 
 Complete documentation is available at **[cameronrye.github.io/gopher-mcp](https://cameronrye.github.io/gopher-mcp)**
 
-- 📖 [Installation Guide](https://cameronrye.github.io/gopher-mcp/installation/)
-- 🔧 [API Reference](https://cameronrye.github.io/gopher-mcp/api-reference/)
-- 🚀 [Advanced Features](https://cameronrye.github.io/gopher-mcp/advanced-features/)
-- 🤖 [AI Assistant Guide](https://cameronrye.github.io/gopher-mcp/ai-assistant-guide/)
+- [Installation Guide](https://cameronrye.github.io/gopher-mcp/installation/)
+- [API Reference](https://cameronrye.github.io/gopher-mcp/api-reference/)
+- [Advanced Features](https://cameronrye.github.io/gopher-mcp/advanced-features/)
+- [AI Assistant Guide](https://cameronrye.github.io/gopher-mcp/ai-assistant-guide/)
 
-## 🚀 Quick Start
+## Quick Start
 
-### 📋 Prerequisites
+### Prerequisites
 
 - **Python 3.11+** - [Download here](https://www.python.org/downloads/)
 - **uv package manager** - [Install uv](https://docs.astral.sh/uv/getting-started/installation/)
 
-### 📦 Installation
+### Installation
 
 #### Option 1: Development Installation (Recommended)
 
@@ -95,9 +95,8 @@ git clone https://github.com/cameronrye/gopher-mcp.git
 cd gopher-mcp
 uv sync --all-extras
 ```
-> methods above.
 
-### 🔧 Claude Desktop Integration
+### Claude Desktop Integration
 
 Add to your `claude_desktop_config.json`:
 
@@ -141,7 +140,7 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-## 🛠️ Cross-Platform Development
+## Cross-Platform Development
 
 This project includes a **unified Python-based task management system** that works across all platforms:
 
@@ -183,7 +182,7 @@ uv run task <command>       # Direct taskipy usage
 | `clean`            | Clean build artifacts          |
 | `ci`               | Run CI pipeline locally        |
 
-## 📖 Usage
+## Usage
 
 The server provides two powerful MCP tools for exploring alternative internet protocols:
 
@@ -229,7 +228,7 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 - **GeminiCertificateResult**: For certificate requests (status 60-69)
   - Certificate requirement information
 
-### 🌐 Example URLs to Try
+### Example URLs to Try
 
 #### Gopher Protocol
 
@@ -263,7 +262,7 @@ gemini://warmedal.se/~antenna/
 gemini://kennedy.gemi.dev/
 ```
 
-### 🤖 Example AI Interactions
+### Example AI Interactions
 
 Once configured, you can ask Claude:
 
@@ -281,9 +280,9 @@ Once configured, you can ask Claude:
 - _"Browse the latest posts from a gemlog"_
 - _"What's the difference between Gopher and Gemini protocols?"_
 
-## 🔧 Development
+## Development
 
-### 📁 Project Structure
+### Project Structure
 
 ```text
 gopher-mcp/
@@ -306,7 +305,7 @@ gopher-mcp/
 └── pyproject.toml           # Modern Python project config
 ```
 
-### 🔄 Development Workflow
+### Development Workflow
 
 1. **Setup**: `uv run task dev-setup` - Install dependencies and pre-commit hooks
 2. **Code**: Make your changes with full IDE support (type hints, linting)
@@ -314,7 +313,7 @@ gopher-mcp/
 4. **Test**: `uv run task test-cov` - Run tests with coverage reporting
 5. **Commit**: Pre-commit hooks ensure code quality automatically
 
-### 🧪 Testing
+### Testing
 
 ```bash
 # Run all tests
@@ -331,7 +330,7 @@ uv run task test-integration
 uv run pytest --watch
 ```
 
-## ⚙️ Configuration
+## Configuration
 
 The server can be configured through environment variables for both protocols:
 
@@ -377,7 +376,7 @@ export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se"
 uv run task serve
 ```
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
 
@@ -395,42 +394,42 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 
 ### Development Standards
 
-- ✅ **Type hints** for all functions and methods
-- ✅ **Comprehensive tests** with >90% coverage
-- ✅ **Documentation** for all public APIs
-- ✅ **Security** considerations for all network operations
-- ✅ **Cross-platform** compatibility (Windows, macOS, Linux)
+- **Type hints** for all functions and methods
+- **Comprehensive tests** with >90% coverage
+- **Documentation** for all public APIs
+- **Security** considerations for all network operations
+- **Cross-platform** compatibility (Windows, macOS, Linux)
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **[Model Context Protocol](https://modelcontextprotocol.io/)** by Anthropic - The foundation that makes this integration possible
 - **[FastMCP](https://github.com/jlowin/fastmcp)** - High-level Python framework for building MCP servers
 - **[Pituophis](https://github.com/dotcomboom/pituophis)** - Excellent Python Gopher client library
 - **The Gopher Protocol Community** - Keeping the spirit of the early internet alive
 
-## 🔗 Related Projects
+## Related Projects
 
 - [Model Context Protocol Servers](https://github.com/modelcontextprotocol/servers) - Official MCP server implementations
 - [Awesome MCP Servers](https://github.com/punkpeye/awesome-mcp-servers) - Curated list of MCP servers
 - [Claude Desktop](https://claude.ai/download) - AI assistant that supports MCP
 
-## 📞 Support
+## Support
 
-- 🐛 **Bug Reports**: [GitHub Issues](https://github.com/cameronrye/gopher-mcp/issues)
-- 💡 **Feature Requests**: [GitHub Discussions](https://github.com/cameronrye/gopher-mcp/discussions)
-- 📖 **Documentation**: [Project Docs](https://cameronrye.github.io/gopher-mcp/)
-- 💬 **Community**: [MCP Discord](https://discord.gg/modelcontextprotocol)
+- **Bug Reports**: [GitHub Issues](https://github.com/cameronrye/gopher-mcp/issues)
+- **Feature Requests**: [GitHub Discussions](https://github.com/cameronrye/gopher-mcp/discussions)
+- **Documentation**: [Project Docs](https://cameronrye.github.io/gopher-mcp/)
+- **Community**: [MCP Discord](https://discord.gg/modelcontextprotocol)
 
 ---
 
 <div align="center">
 
-**Made with ❤️ for the intersection of vintage internet protocols and modern AI**
+Made with ❤️ by [Cameron Rye](https://rye.dev/)
 
-[⭐ Star this project](https://github.com/cameronrye/gopher-mcp) if you find it useful!
+[Star this project](https://github.com/cameronrye/gopher-mcp) if you find it useful!
 
 </div>

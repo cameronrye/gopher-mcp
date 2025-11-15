@@ -9,26 +9,36 @@ import pytest
 
 from gopher_mcp.server import (
     cleanup,
-    get_gopher_client,
-    get_gemini_client,
+    get_client_manager,
+    ClientManager,
     gopher_fetch,
     gemini_fetch,
     mcp,
 )
+from gopher_mcp.config import reset_config
+
+
+def clear_client_manager():
+    """Helper to clear both module-level and class-level client manager instances."""
+    import gopher_mcp.server
+
+    gopher_mcp.server._client_manager = None
+    ClientManager._instance = None
+    # Also reset the config so it picks up new environment variables
+    reset_config()
 
 
 class TestGetGopherClient:
-    """Test get_gopher_client function."""
+    """Test get_gopher_client function via ClientManager."""
 
-    def test_get_gopher_client_default_config(self):
+    @pytest.mark.asyncio
+    async def test_get_gopher_client_default_config(self):
         """Test getting gopher client with default configuration."""
-        # Clear any existing client
-        import gopher_mcp.server
-
-        gopher_mcp.server._gopher_client = None
+        clear_client_manager()
 
         with patch.dict(os.environ, {}, clear=True):
-            client = get_gopher_client()
+            manager = await get_client_manager()
+            client = await manager.get_gopher_client()
 
             assert client is not None
             assert client.max_response_size == 1048576  # 1MB default
@@ -40,12 +50,10 @@ class TestGetGopherClient:
             assert client.max_selector_length == 1024
             assert client.max_search_length == 256
 
-    def test_get_gopher_client_custom_config(self):
+    @pytest.mark.asyncio
+    async def test_get_gopher_client_custom_config(self):
         """Test getting gopher client with custom configuration."""
-        # Clear any existing client
-        import gopher_mcp.server
-
-        gopher_mcp.server._gopher_client = None
+        clear_client_manager()
 
         env_vars = {
             "GOPHER_MAX_RESPONSE_SIZE": "2097152",  # 2MB
@@ -59,7 +67,8 @@ class TestGetGopherClient:
         }
 
         with patch.dict(os.environ, env_vars, clear=True):
-            client = get_gopher_client()
+            manager = await get_client_manager()
+            client = await manager.get_gopher_client()
 
             assert client.max_response_size == 2097152
             assert client.timeout_seconds == 60.0
@@ -70,31 +79,29 @@ class TestGetGopherClient:
             assert client.max_selector_length == 2048
             assert client.max_search_length == 512
 
-    def test_get_gopher_client_singleton(self):
+    @pytest.mark.asyncio
+    async def test_get_gopher_client_singleton(self):
         """Test that get_gopher_client returns the same instance."""
-        # Clear any existing client
-        import gopher_mcp.server
+        clear_client_manager()
 
-        gopher_mcp.server._gopher_client = None
-
-        client1 = get_gopher_client()
-        client2 = get_gopher_client()
+        manager = await get_client_manager()
+        client1 = await manager.get_gopher_client()
+        client2 = await manager.get_gopher_client()
 
         assert client1 is client2
 
-    def test_get_gopher_client_allowed_hosts_parsing(self):
+    @pytest.mark.asyncio
+    async def test_get_gopher_client_allowed_hosts_parsing(self):
         """Test parsing of allowed hosts from environment."""
-        # Clear any existing client
-        import gopher_mcp.server
-
-        gopher_mcp.server._gopher_client = None
+        clear_client_manager()
 
         with patch.dict(
             os.environ,
             {"GOPHER_ALLOWED_HOSTS": "  host1.com , host2.com  , host3.com  "},
             clear=True,
         ):
-            client = get_gopher_client()
+            manager = await get_client_manager()
+            client = await manager.get_gopher_client()
 
             assert client.allowed_hosts == {"host1.com", "host2.com", "host3.com"}
 
@@ -115,7 +122,10 @@ class TestGopherFetch:
         }
         mock_client.fetch.return_value = mock_response
 
-        with patch("gopher_mcp.server.get_gopher_client", return_value=mock_client):
+        mock_manager = AsyncMock()
+        mock_manager.get_gopher_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
             result = await gopher_fetch("gopher://example.com/0/test.txt")
 
             assert result["kind"] == "text"
@@ -139,7 +149,10 @@ class TestGopherFetch:
         mock_client = AsyncMock()
         mock_client.fetch.side_effect = Exception("Connection failed")
 
-        with patch("gopher_mcp.server.get_gopher_client", return_value=mock_client):
+        mock_manager = AsyncMock()
+        mock_manager.get_gopher_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
             with pytest.raises(Exception) as exc_info:
                 await gopher_fetch("gopher://example.com/0/test.txt")
 
@@ -151,30 +164,35 @@ class TestCleanup:
 
     @pytest.mark.asyncio
     async def test_cleanup_with_client(self):
-        """Test cleanup when client exists."""
-        # Set up a mock client
+        """Test cleanup when client manager exists."""
+        # Set up a mock client manager
         import gopher_mcp.server
 
-        mock_client = AsyncMock()
-        gopher_mcp.server._gopher_client = mock_client
+        mock_manager = AsyncMock()
+        mock_gopher_client = AsyncMock()
+        mock_gemini_client = AsyncMock()
+        mock_manager._gopher_client = mock_gopher_client
+        mock_manager._gemini_client = mock_gemini_client
+        gopher_mcp.server._client_manager = mock_manager
 
         await cleanup()
 
-        mock_client.close.assert_called_once()
-        assert gopher_mcp.server._gopher_client is None
+        # Verify cleanup was called on the manager
+        mock_manager.cleanup.assert_called_once()
+        assert gopher_mcp.server._client_manager is None
 
     @pytest.mark.asyncio
     async def test_cleanup_without_client(self):
-        """Test cleanup when no client exists."""
-        # Clear any existing client
+        """Test cleanup when no client manager exists."""
+        # Clear any existing client manager
         import gopher_mcp.server
 
-        gopher_mcp.server._gopher_client = None
+        gopher_mcp.server._client_manager = None
 
         # Should not raise any errors
         await cleanup()
 
-        assert gopher_mcp.server._gopher_client is None
+        assert gopher_mcp.server._client_manager is None
 
 
 class TestMCPServer:
@@ -197,42 +215,44 @@ class TestMCPServer:
 class TestEnvironmentVariables:
     """Test environment variable handling."""
 
-    def test_boolean_env_var_parsing(self):
-        """Test parsing of boolean environment variables."""
-        # Clear any existing client
-        import gopher_mcp.server
+    @pytest.mark.asyncio
+    async def test_boolean_env_var_parsing(self):
+        """Test parsing of boolean environment variables.
 
-        gopher_mcp.server._gopher_client = None
-
+        Pydantic accepts: true, yes, 1, on as True
+        Pydantic accepts: false, no, 0, off as False
+        """
         test_cases = [
             ("true", True),
             ("True", True),
             ("TRUE", True),
+            ("yes", True),  # Pydantic accepts yes as True
+            ("1", True),  # Pydantic accepts 1 as True
+            ("on", True),  # Pydantic accepts on as True
             ("false", False),
             ("False", False),
             ("FALSE", False),
-            ("yes", False),  # Only "true" (case-insensitive) should be True
-            ("1", False),
-            ("", False),
+            ("no", False),  # Pydantic accepts no as False
+            ("0", False),  # Pydantic accepts 0 as False
+            ("off", False),  # Pydantic accepts off as False
         ]
 
         for env_value, expected in test_cases:
             with patch.dict(
                 os.environ, {"GOPHER_CACHE_ENABLED": env_value}, clear=True
             ):
-                # Clear client to force recreation
-                gopher_mcp.server._gopher_client = None
-                client = get_gopher_client()
-                assert client.cache_enabled is expected, (
-                    f"Failed for env_value='{env_value}'"
-                )
+                # Clear client manager to force recreation
+                clear_client_manager()
+                manager = await get_client_manager()
+                client = await manager.get_gopher_client()
+                assert (
+                    client.cache_enabled is expected
+                ), f"Failed for env_value='{env_value}'"
 
-    def test_numeric_env_var_parsing(self):
+    @pytest.mark.asyncio
+    async def test_numeric_env_var_parsing(self):
         """Test parsing of numeric environment variables."""
-        # Clear any existing client
-        import gopher_mcp.server
-
-        gopher_mcp.server._gopher_client = None
+        clear_client_manager()
 
         with patch.dict(
             os.environ,
@@ -246,7 +266,8 @@ class TestEnvironmentVariables:
             },
             clear=True,
         ):
-            client = get_gopher_client()
+            manager = await get_client_manager()
+            client = await manager.get_gopher_client()
 
             assert client.max_response_size == 123456
             assert client.timeout_seconds == 45.5
@@ -257,14 +278,12 @@ class TestEnvironmentVariables:
 
 
 class TestGetGeminiClient:
-    """Test get_gemini_client function."""
+    """Test get_gemini_client function via ClientManager."""
 
-    def test_get_gemini_client_default_config(self):
+    @pytest.mark.asyncio
+    async def test_get_gemini_client_default_config(self):
         """Test getting gemini client with default configuration."""
-        # Clear any existing client
-        import gopher_mcp.server
-
-        gopher_mcp.server._gemini_client = None
+        clear_client_manager()
 
         with tempfile.TemporaryDirectory() as temp_dir:
             with (
@@ -276,7 +295,8 @@ class TestGetGeminiClient:
                 mock_tofu_home.return_value = Path(temp_dir)
                 mock_certs_home.return_value = Path(temp_dir)
 
-                client = get_gemini_client()
+                manager = await get_client_manager()
+                client = await manager.get_gemini_client()
 
                 assert client is not None
                 assert client.max_response_size == 1048576  # 1MB default
@@ -288,12 +308,10 @@ class TestGetGeminiClient:
                 assert client.tofu_enabled is True
                 assert client.client_certs_enabled is True
 
-    def test_get_gemini_client_custom_config(self):
+    @pytest.mark.asyncio
+    async def test_get_gemini_client_custom_config(self):
         """Test getting gemini client with custom configuration."""
-        # Clear any existing client
-        import gopher_mcp.server
-
-        gopher_mcp.server._gemini_client = None
+        clear_client_manager()
 
         env_vars = {
             "GEMINI_MAX_RESPONSE_SIZE": "2097152",  # 2MB
@@ -307,7 +325,8 @@ class TestGetGeminiClient:
         }
 
         with patch.dict(os.environ, env_vars, clear=True):
-            client = get_gemini_client()
+            manager = await get_client_manager()
+            client = await manager.get_gemini_client()
 
             assert client.max_response_size == 2097152
             assert client.timeout_seconds == 60.0
@@ -318,15 +337,14 @@ class TestGetGeminiClient:
             assert client.tofu_enabled is False
             assert client.client_certs_enabled is False
 
-    def test_get_gemini_client_singleton(self):
+    @pytest.mark.asyncio
+    async def test_get_gemini_client_singleton(self):
         """Test that get_gemini_client returns the same instance."""
-        # Clear any existing client
-        import gopher_mcp.server
+        clear_client_manager()
 
-        gopher_mcp.server._gemini_client = None
-
-        client1 = get_gemini_client()
-        client2 = get_gemini_client()
+        manager = await get_client_manager()
+        client1 = await manager.get_gemini_client()
+        client2 = await manager.get_gemini_client()
 
         assert client1 is client2
 
@@ -350,7 +368,10 @@ class TestGeminiFetch:
         mock_client = AsyncMock()
         mock_client.fetch.return_value = mock_response
 
-        with patch("gopher_mcp.server.get_gemini_client", return_value=mock_client):
+        mock_manager = AsyncMock()
+        mock_manager.get_gemini_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
             result = await gemini_fetch("gemini://example.org/")
 
             assert result["kind"] == "gemtext"
@@ -369,6 +390,9 @@ class TestGeminiFetch:
         mock_client = AsyncMock()
         mock_client.fetch.side_effect = Exception("Connection failed")
 
-        with patch("gopher_mcp.server.get_gemini_client", return_value=mock_client):
+        mock_manager = AsyncMock()
+        mock_manager.get_gemini_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
             with pytest.raises(Exception):
                 await gemini_fetch("gemini://example.org/")

@@ -6,7 +6,7 @@ import time
 import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes, serialization
@@ -149,8 +149,10 @@ class ClientCertificateManager:
                 .issuer_name(issuer)
                 .public_key(private_key.public_key())
                 .serial_number(x509.random_serial_number())
-                .not_valid_before(datetime.utcnow())
-                .not_valid_after(datetime.utcnow() + timedelta(days=validity_days))
+                .not_valid_before(datetime.now(timezone.utc))
+                .not_valid_after(
+                    datetime.now(timezone.utc) + timedelta(days=validity_days)
+                )
                 .add_extension(
                     x509.SubjectAlternativeName(
                         [
@@ -364,7 +366,7 @@ class ClientCertificateManager:
         Returns:
             Number of certificates removed
         """
-        current_time = datetime.utcnow()
+        current_time = datetime.now(timezone.utc)
         expired_keys = []
 
         for key, cert_info in self._certificates.items():
@@ -372,6 +374,9 @@ class ClientCertificateManager:
                 not_after = datetime.fromisoformat(
                     cert_info.not_after.replace("Z", "+00:00")
                 )
+                # Ensure timezone-aware comparison
+                if not_after.tzinfo is None:
+                    not_after = not_after.replace(tzinfo=timezone.utc)
                 if not_after < current_time:
                     expired_keys.append(key)
             except ValueError:
