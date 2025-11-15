@@ -86,10 +86,11 @@ jobs:
         run: |
           uv run python -c "
           import asyncio
-          from src.gopher_mcp.server import get_gemini_client
+          from src.gopher_mcp.server import get_client_manager
 
           async def test_gemini():
-              client = get_gemini_client()
+              manager = await get_client_manager()
+              client = await manager.get_gemini_client()
               print('Gemini client created successfully')
               await client.close()
 
@@ -101,9 +102,16 @@ jobs:
           export GEMINI_TOFU_ENABLED=true
           export GEMINI_CLIENT_CERTS_ENABLED=true
           uv run python -c "
-          from src.gopher_mcp.server import get_gemini_client
-          client = get_gemini_client()
-          print('Gemini configuration validated')
+          import asyncio
+          from src.gopher_mcp.server import get_client_manager
+
+          async def test_config():
+              manager = await get_client_manager()
+              client = await manager.get_gemini_client()
+              print('Gemini configuration validated')
+              await client.close()
+
+          asyncio.run(test_config())
           "
 
   lint:
