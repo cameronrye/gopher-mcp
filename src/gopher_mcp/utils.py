@@ -662,7 +662,7 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
 
 
 def _parse_link(
-    line_content: str
+    line_content: str,
 ) -> Optional[tuple["GemtextLine", Optional["GemtextLink"]]]:
     """Parse a link line.
 
