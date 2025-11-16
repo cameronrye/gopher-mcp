@@ -774,7 +774,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=4.1.0" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.11.0" },
     { name = "pytest-mock", marker = "extra == 'test'", specifier = ">=3.11.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.6" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.14.5" },
     { name = "safety", marker = "extra == 'dev'", specifier = ">=2.3.0,<3.0.0" },
     { name = "structlog", specifier = ">=23.2.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.0" },

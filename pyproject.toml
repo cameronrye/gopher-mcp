@@ -48,7 +48,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.11.0",
     "mypy>=1.7.0",
-    "ruff>=0.1.6",
+    "ruff>=0.14.5",
     "pre-commit>=3.5.0",
     "bandit>=1.7.5",
     "safety>=2.3.0,<3.0.0",
@@ -155,7 +155,7 @@ ignore_missing_imports = true
 
 # Pytest configuration
 [tool.pytest.ini_options]
-minversion = "7.0"
+minversion = "7.4"
 addopts = [
     "--strict-markers",
     "--strict-config",
