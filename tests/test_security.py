@@ -283,6 +283,303 @@ class TestSecurityPolicyEnforcement:
         allowed, violations = manager.validate_connection("example.com", 1965)
         # Note: This test would need actual rate limiting implementation
 
+    def test_host_pattern_blocking(self):
+        """Test host pattern blocking."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+
+        config = SecurityPolicyConfig(
+            host_patterns_blocked=[r".*\.malicious\.com", r"spam.*"]
+        )
+        manager = SecurityPolicyEnforcer(config)
+
+        # Hosts matching blocked patterns should fail
+        allowed, violations = manager.validate_connection("sub.malicious.com", 1965)
+        assert not allowed
+        assert len(violations) > 0
+
+        allowed, violations = manager.validate_connection("spam-site.org", 1965)
+        assert not allowed
+        assert len(violations) > 0
+
+        # Non-matching hosts should pass
+        allowed, violations = manager.validate_connection("example.com", 1965)
+        assert allowed
+        assert len(violations) == 0
+
+    def test_host_pattern_allowing(self):
+        """Test host pattern allowing."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+
+        config = SecurityPolicyConfig(
+            host_patterns_allowed=[r".*\.example\.com", r"trusted\..*"]
+        )
+        manager = SecurityPolicyEnforcer(config)
+
+        # Hosts matching allowed patterns should pass
+        allowed, violations = manager.validate_connection("sub.example.com", 1965)
+        assert allowed
+        assert len(violations) == 0
+
+        allowed, violations = manager.validate_connection("trusted.org", 1965)
+        assert allowed
+        assert len(violations) == 0
+
+        # Non-matching hosts should fail
+        allowed, violations = manager.validate_connection("random.com", 1965)
+        assert not allowed
+        assert len(violations) > 0
+
+    def test_certificate_scope_enforcement(self):
+        """Test certificate scope enforcement."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+            PolicyAction,
+        )
+        from src.gopher_mcp.models import GeminiCertificateInfo
+
+        config = SecurityPolicyConfig(
+            certificate_scope_enforcement=True,
+            certificate_violation_action=PolicyAction.BLOCK,
+        )
+        manager = SecurityPolicyEnforcer(config)
+
+        # Certificate with matching host should pass
+        cert_info = GeminiCertificateInfo(
+            fingerprint="sha256:abc123",
+            subject="CN=example.com",
+            issuer="CN=example.com",
+            not_before="2024-01-01T00:00:00Z",
+            not_after="2025-01-01T00:00:00Z",
+            host="example.com",
+            port=1965,
+            path="/",
+        )
+
+        allowed, violations = manager.validate_connection(
+            "example.com", 1965, "/", cert_info
+        )
+        assert allowed
+        assert len(violations) == 0
+
+        # Certificate with mismatched host should fail
+        allowed, violations = manager.validate_connection(
+            "different.com", 1965, "/", cert_info
+        )
+        assert not allowed
+        assert len(violations) > 0
+
+        # Certificate with mismatched port should fail
+        allowed, violations = manager.validate_connection(
+            "example.com", 1966, "/", cert_info
+        )
+        assert not allowed
+        assert len(violations) > 0
+
+        # Certificate with path /admin should not allow access to /other
+        cert_info_admin = GeminiCertificateInfo(
+            fingerprint="sha256:def456",
+            subject="CN=example.com",
+            issuer="CN=example.com",
+            not_before="2024-01-01T00:00:00Z",
+            not_after="2025-01-01T00:00:00Z",
+            host="example.com",
+            port=1965,
+            path="/admin",
+        )
+        allowed, violations = manager.validate_connection(
+            "example.com", 1965, "/other", cert_info_admin
+        )
+        assert not allowed
+        assert len(violations) > 0
+
+    def test_certificate_reuse_prevention(self):
+        """Test certificate reuse prevention."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+            PolicyAction,
+        )
+        from src.gopher_mcp.models import GeminiCertificateInfo
+
+        config = SecurityPolicyConfig(
+            allow_certificate_reuse=False,
+            certificate_violation_action=PolicyAction.BLOCK,
+        )
+        manager = SecurityPolicyEnforcer(config)
+
+        cert_info = GeminiCertificateInfo(
+            fingerprint="sha256:abc123",
+            subject="CN=example.com",
+            issuer="CN=example.com",
+            not_before="2024-01-01T00:00:00Z",
+            not_after="2025-01-01T00:00:00Z",
+            host="example.com",
+            port=1965,
+            path="/",
+        )
+
+        # First use should be allowed
+        manager.record_certificate_usage(cert_info, "example.com", 1965, "/")
+        allowed, violations = manager.validate_connection(
+            "example.com", 1965, "/", cert_info
+        )
+        assert allowed
+
+        # Reuse on different host should fail
+        allowed, violations = manager.validate_connection(
+            "different.com", 1965, "/", cert_info
+        )
+        assert not allowed
+        assert len(violations) > 0
+
+    def test_connection_recording(self):
+        """Test connection recording."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+
+        config = SecurityPolicyConfig()
+        manager = SecurityPolicyEnforcer(config)
+
+        # Record connections
+        manager.record_connection("example.com", 1965, "/")
+        manager.record_connection("example.com", 1965, "/test")
+        manager.record_connection("other.com", 1965, "/")
+
+        # Check statistics
+        stats = manager.get_policy_statistics()
+        assert "active_connections" in stats
+        assert "example.com:1965" in stats["active_connections"]
+        assert stats["active_connections"]["example.com:1965"] == 2
+        assert stats["active_connections"]["other.com:1965"] == 1
+
+    def test_cleanup_expired_records(self):
+        """Test cleanup of expired records."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+        import time
+
+        config = SecurityPolicyConfig()
+        manager = SecurityPolicyEnforcer(config)
+
+        # Record connections
+        manager.record_connection("example.com", 1965, "/")
+
+        # Manually add old connection times
+        old_time = time.time() - 7200  # 2 hours ago
+        manager._connection_times["example.com:1965"].append(old_time)
+
+        # Cleanup should remove old records
+        manager.cleanup_expired_records()
+
+        # Old times should be removed
+        assert old_time not in manager._connection_times.get("example.com:1965", [])
+
+    def test_policy_statistics(self):
+        """Test policy statistics."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+        from src.gopher_mcp.models import GeminiCertificateInfo
+
+        config = SecurityPolicyConfig()
+        manager = SecurityPolicyEnforcer(config)
+
+        # Record some activity
+        manager.record_connection("example.com", 1965, "/")
+
+        cert_info = GeminiCertificateInfo(
+            fingerprint="sha256:abc123",
+            subject="CN=example.com",
+            issuer="CN=example.com",
+            not_before="2024-01-01T00:00:00Z",
+            not_after="2025-01-01T00:00:00Z",
+            host="example.com",
+            port=1965,
+            path="/",
+        )
+        manager.record_certificate_usage(cert_info, "example.com", 1965, "/")
+
+        stats = manager.get_policy_statistics()
+
+        assert "active_connections" in stats
+        assert "tracked_hosts" in stats
+        assert "tracked_certificates" in stats
+        assert "total_certificate_usages" in stats
+        assert "config" in stats
+
+        assert stats["tracked_hosts"] >= 1
+        assert stats["tracked_certificates"] >= 1
+        assert stats["total_certificate_usages"] >= 1
+
+    def test_connection_limit_enforcement(self):
+        """Test connection limit enforcement."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+
+        config = SecurityPolicyConfig(max_connections_per_host=2)
+        manager = SecurityPolicyEnforcer(config)
+
+        # First two connections should be allowed
+        manager.record_connection("example.com", 1965)
+        allowed, violations = manager.validate_connection("example.com", 1965)
+        assert allowed
+
+        manager.record_connection("example.com", 1965)
+        allowed, violations = manager.validate_connection("example.com", 1965)
+        assert allowed
+
+        # Third connection should trigger limit warning
+        manager.record_connection("example.com", 1965)
+        allowed, violations = manager.validate_connection("example.com", 1965)
+        assert len(violations) > 0
+
+    def test_policy_violation_logging(self):
+        """Test policy violation logging."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+
+        config = SecurityPolicyConfig(
+            blocked_hosts={"malicious.com"}, log_policy_violations=True
+        )
+        manager = SecurityPolicyEnforcer(config)
+
+        # This should trigger a violation and log it
+        allowed, violations = manager.validate_connection("malicious.com", 1965)
+        assert not allowed
+        assert len(violations) > 0
+
+    def test_allowed_connection_logging(self):
+        """Test allowed connection logging."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+
+        config = SecurityPolicyConfig(log_allowed_connections=True)
+        manager = SecurityPolicyEnforcer(config)
+
+        # This should be allowed and logged
+        allowed, violations = manager.validate_connection("example.com", 1965)
+        assert allowed
+
+    def test_security_policy_config_validation(self):
+        """Test security policy config validation."""
+        from src.gopher_mcp.security_policy import (
+            SecurityPolicyConfig,
+        )
+
+        # Overlapping allowed and blocked hosts should raise error
+        with pytest.raises(ValueError):
+            SecurityPolicyConfig(
+                allowed_hosts={"example.com"}, blocked_hosts={"example.com"}
+            )
+
 
 class TestCertificateSecurityValidation:
     """Test certificate security validation."""

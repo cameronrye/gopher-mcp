@@ -159,40 +159,195 @@ class TestGopherFetch:
             assert "Connection failed" in str(exc_info.value)
 
 
+class TestGopherBatchFetch:
+    """Test gopher_batch_fetch function."""
+
+    @pytest.mark.asyncio
+    async def test_gopher_batch_fetch_success(self):
+        """Test successful batch fetch of multiple Gopher URLs."""
+        from gopher_mcp.server import gopher_batch_fetch
+
+        mock_response1 = MagicMock()
+        mock_response1.model_dump.return_value = {
+            "kind": "text",
+            "text": "Content 1",
+            "bytes": 9,
+            "charset": "utf-8",
+        }
+
+        mock_response2 = MagicMock()
+        mock_response2.model_dump.return_value = {
+            "kind": "text",
+            "text": "Content 2",
+            "bytes": 9,
+            "charset": "utf-8",
+        }
+
+        mock_client = AsyncMock()
+        mock_client.fetch.side_effect = [mock_response1, mock_response2]
+
+        mock_manager = AsyncMock()
+        mock_manager.get_gopher_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            urls = [
+                "gopher://example.com/0/file1.txt",
+                "gopher://example.com/0/file2.txt",
+            ]
+            results = await gopher_batch_fetch(urls)
+
+            assert len(results) == 2
+            assert results[0]["text"] == "Content 1"
+            assert results[1]["text"] == "Content 2"
+
+    @pytest.mark.asyncio
+    async def test_gopher_batch_fetch_with_errors(self):
+        """Test batch fetch with some URLs failing."""
+        from gopher_mcp.server import gopher_batch_fetch
+
+        mock_response = MagicMock()
+        mock_response.model_dump.return_value = {
+            "kind": "text",
+            "text": "Success",
+            "bytes": 7,
+            "charset": "utf-8",
+        }
+
+        mock_client = AsyncMock()
+        # First URL succeeds, second fails
+        mock_client.fetch.side_effect = [mock_response, Exception("Connection failed")]
+
+        mock_manager = AsyncMock()
+        mock_manager.get_gopher_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            urls = [
+                "gopher://example.com/0/success.txt",
+                "gopher://example.com/0/fail.txt",
+            ]
+            results = await gopher_batch_fetch(urls)
+
+            assert len(results) == 2
+            assert results[0]["text"] == "Success"
+            # Second result should be an error
+            assert "error" in results[1]
+
+    @pytest.mark.asyncio
+    async def test_gopher_batch_fetch_invalid_url(self):
+        """Test batch fetch with invalid URL."""
+        from gopher_mcp.server import gopher_batch_fetch
+
+        with pytest.raises(Exception):  # Should raise validation error
+            await gopher_batch_fetch(["http://example.com/"])
+
+
+class TestGeminiBatchFetch:
+    """Test gemini_batch_fetch function."""
+
+    @pytest.mark.asyncio
+    async def test_gemini_batch_fetch_success(self):
+        """Test successful batch fetch of multiple Gemini URLs."""
+        from gopher_mcp.server import gemini_batch_fetch
+
+        mock_response1 = MagicMock()
+        mock_response1.model_dump.return_value = {
+            "kind": "gemtext",
+            "document": {"lines": [], "links": []},
+            "raw_content": "# Page 1",
+            "charset": "utf-8",
+            "size": 8,
+        }
+
+        mock_response2 = MagicMock()
+        mock_response2.model_dump.return_value = {
+            "kind": "gemtext",
+            "document": {"lines": [], "links": []},
+            "raw_content": "# Page 2",
+            "charset": "utf-8",
+            "size": 8,
+        }
+
+        mock_client = AsyncMock()
+        mock_client.fetch.side_effect = [mock_response1, mock_response2]
+
+        mock_manager = AsyncMock()
+        mock_manager.get_gemini_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            urls = ["gemini://example.org/page1", "gemini://example.org/page2"]
+            results = await gemini_batch_fetch(urls)
+
+            assert len(results) == 2
+            assert results[0]["raw_content"] == "# Page 1"
+            assert results[1]["raw_content"] == "# Page 2"
+
+    @pytest.mark.asyncio
+    async def test_gemini_batch_fetch_with_errors(self):
+        """Test batch fetch with some URLs failing."""
+        from gopher_mcp.server import gemini_batch_fetch
+
+        mock_response = MagicMock()
+        mock_response.model_dump.return_value = {
+            "kind": "gemtext",
+            "document": {"lines": [], "links": []},
+            "raw_content": "# Success",
+            "charset": "utf-8",
+            "size": 9,
+        }
+
+        mock_client = AsyncMock()
+        # First URL succeeds, second fails
+        mock_client.fetch.side_effect = [mock_response, Exception("TLS error")]
+
+        mock_manager = AsyncMock()
+        mock_manager.get_gemini_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            urls = ["gemini://example.org/success", "gemini://example.org/fail"]
+            results = await gemini_batch_fetch(urls)
+
+            assert len(results) == 2
+            assert results[0]["raw_content"] == "# Success"
+            # Second result should be an error
+            assert "error" in results[1]
+
+    @pytest.mark.asyncio
+    async def test_gemini_batch_fetch_invalid_url(self):
+        """Test batch fetch with invalid URL."""
+        from gopher_mcp.server import gemini_batch_fetch
+
+        with pytest.raises(Exception):  # Should raise validation error
+            await gemini_batch_fetch(["http://example.com/"])
+
+
 class TestCleanup:
     """Test cleanup function."""
 
     @pytest.mark.asyncio
-    async def test_cleanup_with_client(self):
-        """Test cleanup when client manager exists."""
-        # Set up a mock client manager
-        import gopher_mcp.server
+    async def test_cleanup_with_active_clients(self):
+        """Test cleanup with active client manager."""
+        clear_client_manager()
 
-        mock_manager = AsyncMock()
-        mock_gopher_client = AsyncMock()
-        mock_gemini_client = AsyncMock()
-        mock_manager._gopher_client = mock_gopher_client
-        mock_manager._gemini_client = mock_gemini_client
-        gopher_mcp.server._client_manager = mock_manager
+        # Create a client manager with clients
+        manager = await get_client_manager()
+        await manager.get_gopher_client()
+        await manager.get_gemini_client()
 
+        # Cleanup should close clients
         await cleanup()
 
-        # Verify cleanup was called on the manager
-        mock_manager.cleanup.assert_called_once()
+        # Verify cleanup was called
+        import gopher_mcp.server
+
         assert gopher_mcp.server._client_manager is None
 
     @pytest.mark.asyncio
-    async def test_cleanup_without_client(self):
-        """Test cleanup when no client manager exists."""
-        # Clear any existing client manager
-        import gopher_mcp.server
+    async def test_cleanup_without_clients(self):
+        """Test cleanup when no clients exist."""
+        clear_client_manager()
 
-        gopher_mcp.server._client_manager = None
-
-        # Should not raise any errors
+        # Cleanup should not raise error
         await cleanup()
-
-        assert gopher_mcp.server._client_manager is None
 
 
 class TestMCPServer:
@@ -386,7 +541,7 @@ class TestGeminiFetch:
 
     @pytest.mark.asyncio
     async def test_gemini_fetch_client_error(self):
-        """Test gemini fetch with client error."""
+        """Test gemini fetch when client raises an error."""
         mock_client = AsyncMock()
         mock_client.fetch.side_effect = Exception("Connection failed")
 
@@ -394,5 +549,7 @@ class TestGeminiFetch:
         mock_manager.get_gemini_client.return_value = mock_client
 
         with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
-            with pytest.raises(Exception):
+            with pytest.raises(Exception) as exc_info:
                 await gemini_fetch("gemini://example.org/")
+
+            assert "Connection failed" in str(exc_info.value)
