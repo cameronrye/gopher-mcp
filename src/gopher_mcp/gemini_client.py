@@ -1,7 +1,8 @@
 """Gemini protocol client implementation."""
 
 import time
-from typing import Dict, List, Optional, Tuple
+from collections import OrderedDict
+from typing import List, Optional, Tuple
 
 import structlog
 
@@ -24,6 +25,12 @@ from .utils import (
 
 logger = structlog.get_logger(__name__)
 
+# Default configuration constants
+DEFAULT_MAX_RESPONSE_SIZE = 1024 * 1024  # 1MB
+DEFAULT_TIMEOUT_SECONDS = 30.0
+DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
+DEFAULT_MAX_CACHE_ENTRIES = 1000
+
 
 class GeminiClient:
     """Async Gemini protocol client with TLS, caching and safety features."""
@@ -31,11 +38,11 @@ class GeminiClient:
     def __init__(
         self,
         *,
-        max_response_size: int = 1024 * 1024,  # 1MB
-        timeout_seconds: float = 30.0,
+        max_response_size: int = DEFAULT_MAX_RESPONSE_SIZE,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         cache_enabled: bool = True,
-        cache_ttl_seconds: int = 300,  # 5 minutes
-        max_cache_entries: int = 1000,
+        cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: Optional[List[str]] = None,
         tls_config: Optional[TLSConfig] = None,
         tofu_enabled: bool = True,
@@ -84,7 +91,8 @@ class GeminiClient:
                 client_certs_storage_path
             )
 
-        self._cache: Dict[str, GeminiCacheEntry] = {}
+        # Use OrderedDict for LRU cache implementation
+        self._cache: OrderedDict[str, GeminiCacheEntry] = OrderedDict()
 
     def _validate_security(self, parsed_url: GeminiURL) -> None:
         """Validate security constraints for a Gemini request.
@@ -331,10 +339,12 @@ class GeminiClient:
             del self._cache[url]
             return None
 
+        # Move to end to mark as recently used (LRU)
+        self._cache.move_to_end(url)
         return entry.value
 
     def _cache_response(self, url: str, response: GeminiFetchResponse) -> None:
-        """Cache a response.
+        """Cache a response using LRU eviction strategy.
 
         Args:
             url: Gemini URL
@@ -344,10 +354,10 @@ class GeminiClient:
         if not self.cache_enabled:
             return
 
-        # Evict oldest entries if cache is full
-        if len(self._cache) >= self.max_cache_entries:
-            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
-            del self._cache[oldest_key]
+        # Evict least recently used entry if cache is full
+        if len(self._cache) >= self.max_cache_entries and url not in self._cache:
+            # Remove first item (least recently used)
+            self._cache.popitem(last=False)
 
         entry = GeminiCacheEntry(
             key=url,
@@ -356,7 +366,9 @@ class GeminiClient:
             ttl=self.cache_ttl_seconds,
         )
 
+        # Add or update entry and move to end (most recently used)
         self._cache[url] = entry
+        self._cache.move_to_end(url)
 
     def update_tofu_certificate(
         self, host: str, port: int, cert_fingerprint: str, force: bool = False

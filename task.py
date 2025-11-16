@@ -49,7 +49,7 @@ class Colors:
             try:
                 import ctypes
 
-                kernel32 = ctypes.windll.kernel32
+                kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
                 kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)
                 return True
             except Exception:
@@ -142,8 +142,13 @@ class TaskRunner:
                 "category": "Server",
             },
             "serve-http": {
-                "cmd": "python -m gopher_mcp.http_server",
-                "desc": "Run MCP server (HTTP)",
+                "cmd": "python -m gopher_mcp --transport streamable-http",
+                "desc": "Run MCP server (streamable HTTP)",
+                "category": "Server",
+            },
+            "serve-sse": {
+                "cmd": "python -m gopher_mcp --transport sse",
+                "desc": "Run MCP server (SSE)",
                 "category": "Server",
             },
             # Documentation

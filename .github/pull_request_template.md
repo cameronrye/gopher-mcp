@@ -73,7 +73,7 @@ uv run task typecheck
 
 <!-- Highlight specific areas where you'd like reviewer attention -->
 
-<!-- 
+<!--
 Thank you for contributing to Gopher MCP Server! 🎉
 Your contribution helps make this project better for everyone.
 -->

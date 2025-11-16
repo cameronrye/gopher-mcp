@@ -88,33 +88,33 @@ jobs:
               repo: context.repo.repo,
               issue_number: context.issue.number,
             });
-            
-            const botComment = comments.find(comment => 
-              comment.user.type === 'Bot' && 
+
+            const botComment = comments.find(comment =>
+              comment.user.type === 'Bot' &&
               comment.body.includes('External PR Validation')
             );
-            
+
             const success = '${{ needs.validate.result }}' === 'success';
             const body = `## 🤖 External PR Validation
-            
+
             ${success ? '✅' : '❌'} **Validation Result**: ${success ? 'Passed' : 'Failed'}
-            
+
             This PR is from an external contributor. The basic validation checks have ${success ? 'passed' : 'failed'}.
-            
-            ${success ? 
-              '✅ All basic checks passed! A maintainer will review and approve the full CI workflow.' : 
+
+            ${success ?
+              '✅ All basic checks passed! A maintainer will review and approve the full CI workflow.' :
               '❌ Some checks failed. Please review the workflow logs and fix any issues.'
             }
-            
+
             **Checks performed:**
             - Code formatting and linting
             - Type checking
             - Basic test execution
             - Documentation build
             - Package build validation
-            
+
             _This comment is automatically updated on each push._`;
-            
+
             if (botComment) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,

@@ -3,7 +3,8 @@
 import asyncio
 import re
 import time
-from typing import Any, Dict, List, Optional, Set
+from collections import OrderedDict
+from typing import Any, List, Optional, Set
 
 import pituophis
 import structlog
@@ -22,6 +23,14 @@ from .utils import parse_gopher_url
 
 logger = structlog.get_logger(__name__)
 
+# Default configuration constants
+DEFAULT_MAX_RESPONSE_SIZE = 1024 * 1024  # 1MB
+DEFAULT_TIMEOUT_SECONDS = 30.0
+DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
+DEFAULT_MAX_CACHE_ENTRIES = 1000
+DEFAULT_MAX_SELECTOR_LENGTH = 1024
+DEFAULT_MAX_SEARCH_LENGTH = 256
+
 
 class GopherClient:
     """Async Gopher protocol client with caching and safety features."""
@@ -29,14 +38,14 @@ class GopherClient:
     def __init__(
         self,
         *,
-        max_response_size: int = 1024 * 1024,  # 1MB
-        timeout_seconds: float = 30.0,
+        max_response_size: int = DEFAULT_MAX_RESPONSE_SIZE,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         cache_enabled: bool = True,
-        cache_ttl_seconds: int = 300,  # 5 minutes
-        max_cache_entries: int = 1000,
+        cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
+        max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: Optional[List[str]] = None,
-        max_selector_length: int = 1024,
-        max_search_length: int = 256,
+        max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
+        max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
     ) -> None:
         """Initialize the Gopher client.
 
@@ -64,7 +73,8 @@ class GopherClient:
             set(allowed_hosts) if allowed_hosts else None
         )
 
-        self._cache: Dict[str, CacheEntry] = {}
+        # Use OrderedDict for LRU cache implementation
+        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
 
     def _validate_security(self, parsed_url: GopherURL) -> None:
         """Validate security constraints for a Gopher request.
@@ -375,10 +385,12 @@ class GopherClient:
             del self._cache[url]
             return None
 
+        # Move to end to mark as recently used (LRU)
+        self._cache.move_to_end(url)
         return entry.value
 
     def _cache_response(self, url: str, response: GopherFetchResponse) -> None:
-        """Cache a response.
+        """Cache a response using LRU eviction strategy.
 
         Args:
             url: Gopher URL
@@ -388,10 +400,10 @@ class GopherClient:
         if not self.cache_enabled:
             return
 
-        # Evict oldest entries if cache is full
-        if len(self._cache) >= self.max_cache_entries:
-            oldest_key = min(self._cache.keys(), key=lambda k: self._cache[k].timestamp)
-            del self._cache[oldest_key]
+        # Evict least recently used entry if cache is full
+        if len(self._cache) >= self.max_cache_entries and url not in self._cache:
+            # Remove first item (least recently used)
+            self._cache.popitem(last=False)
 
         entry = CacheEntry(
             key=url,
@@ -400,7 +412,9 @@ class GopherClient:
             ttl=self.cache_ttl_seconds,
         )
 
+        # Add or update entry and move to end (most recently used)
         self._cache[url] = entry
+        self._cache.move_to_end(url)
 
     async def close(self) -> None:
         """Close the client and cleanup resources."""

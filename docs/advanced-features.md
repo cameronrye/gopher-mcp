@@ -64,7 +64,7 @@ export GOPHER_MAX_CACHE_ENTRIES=1000
 
 ## Transport Support
 
-The MCP server supports both stdio and HTTP transports for maximum flexibility:
+The MCP server supports multiple transport protocols via FastMCP:
 
 ### Stdio Transport (Default)
 
@@ -72,34 +72,35 @@ Best for local desktop applications like Claude Desktop:
 
 ```bash
 uv run task serve
+# or
+gopher-mcp
 ```
 
-### HTTP Transport
+### Streamable HTTP Transport
 
 Ideal for remote access and web-based integrations:
 
 ```bash
-# Install HTTP dependencies
-uv add --optional-group http
-
 # Start HTTP server
 uv run task serve-http
+# or
+gopher-mcp --transport streamable-http
 ```
 
-Configuration:
+### SSE Transport
+
+Server-Sent Events transport for streaming responses:
+
 ```bash
-export GOPHER_HTTP_HOST=localhost
-export GOPHER_HTTP_PORT=8000
+# Start SSE server
+uv run task serve-sse
+# or
+gopher-mcp --transport sse
 ```
 
 ### HTTP API
 
-The HTTP transport provides a JSON-RPC 2.0 API:
-
-**Endpoint**: `POST /mcp`
-**Health Check**: `GET /health`
-
-Example request:
+The HTTP transports provide a JSON-RPC 2.0 API. Example request:
 ```json
 {
   "jsonrpc": "2.0",

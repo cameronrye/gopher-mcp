@@ -34,6 +34,7 @@ dependencies = [
     "mcp>=1.0.0",
     "pituophis>=1.0.0",
     "pydantic>=2.5.0",
+    "pydantic-settings>=2.0.0",
     "structlog>=23.2.0",
     "anyio>=4.0.0",
     "cryptography>=41.0.0",
@@ -47,7 +48,7 @@ dev = [
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.11.0",
     "mypy>=1.7.0",
-    "ruff>=0.1.6",
+    "ruff>=0.14.5",
     "pre-commit>=3.5.0",
     "bandit>=1.7.5",
     "safety>=2.3.0,<3.0.0",
@@ -154,7 +155,7 @@ ignore_missing_imports = true
 
 # Pytest configuration
 [tool.pytest.ini_options]
-minversion = "7.0"
+minversion = "7.4"
 addopts = [
     "--strict-markers",
     "--strict-config",
@@ -213,7 +214,8 @@ test-slow = "pytest tests/ -v -m slow"
 
 # Server operations
 serve = "python -m gopher_mcp"
-serve-http = "python -m gopher_mcp.http_server"
+serve-http = "python -m gopher_mcp --transport streamable-http"
+serve-sse = "python -m gopher_mcp --transport sse"
 
 # Documentation
 docs-serve = "mkdocs serve"
