@@ -245,9 +245,9 @@ class TestEnvironmentVariables:
                 clear_client_manager()
                 manager = await get_client_manager()
                 client = await manager.get_gopher_client()
-                assert (
-                    client.cache_enabled is expected
-                ), f"Failed for env_value='{env_value}'"
+                assert client.cache_enabled is expected, (
+                    f"Failed for env_value='{env_value}'"
+                )
 
     @pytest.mark.asyncio
     async def test_numeric_env_var_parsing(self):
