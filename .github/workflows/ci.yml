@@ -173,7 +173,7 @@ jobs:
         run: uv run safety check --save-json safety-report.json
 
       - name: Upload security reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: security-reports
@@ -207,7 +207,7 @@ jobs:
         run: uv run mkdocs build
 
       - name: Upload docs artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: documentation
           path: site/
