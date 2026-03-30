@@ -14,6 +14,10 @@ A modern, cross-platform [Model Context Protocol (MCP)](https://modelcontextprot
 browse and interact with both [Gopher protocol](<https://en.wikipedia.org/wiki/Gopher_(protocol)>) and
 [Gemini protocol](https://geminiprotocol.net/) resources safely and efficiently.
 
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/cameronrye-gopher-mcp).
+
 ## Overview
 
 The Gopher & Gemini MCP Server bridges vintage and modern alternative internet protocols with AI assistants, allowing LLMs like
