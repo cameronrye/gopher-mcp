@@ -5,6 +5,10 @@ on:
     tags:
       - "v*" # Trigger on version tags like v1.0.0, v1.2.3, etc.
 
+# Least-privilege default; release/publish jobs opt into the scopes they need.
+permissions:
+  contents: read
+
 env:
   FORCE_COLOR: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"

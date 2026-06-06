@@ -12,6 +12,10 @@ on:
           - testpypi
           - pypi
 
+# Least-privilege default; the publish jobs opt into id-token: write.
+permissions:
+  contents: read
+
 env:
   FORCE_COLOR: "1"
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
