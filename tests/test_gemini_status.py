@@ -505,7 +505,7 @@ class TestProcessGeminiResponse:
         result = process_gemini_response(response, "gemini://example.org/")
         assert isinstance(result, GeminiSuccessResult)
         # Should fallback to latin1 charset
-        assert result.mime_type.charset == "latin1"
+        assert result.mime_type.charset == "latin-1"
 
     def test_request_info_included(self):
         """Test that request info is included in results."""
@@ -547,7 +547,7 @@ class TestProcessGeminiResponse:
 
         assert isinstance(result, GeminiSuccessResult)
         assert result.content == "Café"
-        assert result.mime_type.charset == "latin1"  # Should fallback to latin1
+        assert result.mime_type.charset == "latin-1"  # Should fallback to latin1
 
     def test_success_response_binary_detection(self):
         """Test success response with binary content detection."""

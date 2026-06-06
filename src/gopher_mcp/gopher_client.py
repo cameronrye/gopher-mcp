@@ -346,7 +346,11 @@ class GopherClient:
             return
 
         # Evict least recently used entry if cache is full
-        if len(self._cache) >= self.max_cache_entries and url not in self._cache:
+        if (
+            self._cache
+            and len(self._cache) >= self.max_cache_entries
+            and url not in self._cache
+        ):
             # Remove first item (least recently used)
             self._cache.popitem(last=False)
 

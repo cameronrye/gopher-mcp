@@ -936,6 +936,13 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         status_str = status_line[:2]
         meta = status_line[3:]  # Everything after "XX "
 
+        # A spec-compliant meta is at most 1024 bytes. Truncate a
+        # non-compliant server's over-long meta instead of discarding the
+        # whole response (the GeminiResponse validator would otherwise raise).
+        meta_bytes = meta.encode("utf-8")
+        if len(meta_bytes) > 1024:
+            meta = meta_bytes[:1024].decode("utf-8", errors="ignore")
+
         # Validate status code
         if not status_str.isdigit():
             raise ValueError(f"Invalid status code: {status_str}")
@@ -1276,67 +1283,33 @@ def _process_success_response(
 
     # Handle gemtext content specially
     if mime_type.is_gemtext:
-        try:
-            content = body.decode(mime_type.charset)
-            # Parse gemtext into structured format
-            document = parse_gemtext(content)
+        content, used_charset = _decode_with_fallback(body, mime_type.charset)
+        mime_type.charset = used_charset
+        # Parse gemtext into structured format
+        document = parse_gemtext(content)
 
-            # Import here to avoid circular imports
-            from .models import GeminiGemtextResult
+        # Import here to avoid circular imports
+        from .models import GeminiGemtextResult
 
-            return GeminiGemtextResult(
-                document=document,
-                rawContent=content,
-                charset=mime_type.charset,
-                lang=mime_type.lang,
-                size=size,
-                requestInfo=request_info,
-            )
-        except UnicodeDecodeError as e:
-            # Try fallback charsets for gemtext content
-            for fallback_charset in ["latin1", "ascii", "utf-8"]:
-                if fallback_charset != mime_type.charset:
-                    try:
-                        content = body.decode(fallback_charset)
-                        # Update charset in mime_type
-                        mime_type.charset = fallback_charset
-                        return GeminiSuccessResult(
-                            mimeType=mime_type,
-                            content=content,
-                            size=size,
-                            requestInfo=request_info,
-                        )
-                    except UnicodeDecodeError:
-                        continue
-            raise ValueError(f"Failed to decode gemtext content with any charset: {e}")
+        return GeminiGemtextResult(
+            document=document,
+            rawContent=content,
+            charset=used_charset,
+            lang=mime_type.lang,
+            size=size,
+            requestInfo=request_info,
+        )
 
     # Handle text content
     elif mime_type.is_text:
-        try:
-            content = body.decode(mime_type.charset)
-            return GeminiSuccessResult(
-                mimeType=mime_type,
-                content=content,
-                size=size,
-                requestInfo=request_info,
-            )
-        except UnicodeDecodeError as e:
-            # Try fallback charsets for text content
-            for fallback_charset in ["latin1", "ascii", "utf-8"]:
-                if fallback_charset != mime_type.charset:
-                    try:
-                        content = body.decode(fallback_charset)
-                        # Update charset in mime_type
-                        mime_type.charset = fallback_charset
-                        return GeminiSuccessResult(
-                            mimeType=mime_type,
-                            content=content,
-                            size=size,
-                            requestInfo=request_info,
-                        )
-                    except UnicodeDecodeError:
-                        continue
-            raise ValueError(f"Failed to decode text content with any charset: {e}")
+        content, used_charset = _decode_with_fallback(body, mime_type.charset)
+        mime_type.charset = used_charset
+        return GeminiSuccessResult(
+            mimeType=mime_type,
+            content=content,
+            size=size,
+            requestInfo=request_info,
+        )
 
     # Handle binary content
     else:
@@ -1350,12 +1323,32 @@ def _process_success_response(
                 except ValueError:
                     pass  # Keep original mime_type
 
+        # Binary content is base64-encoded on serialization; flag it so the
+        # consumer knows how to interpret the content field.
+        binary_request_info = {**request_info, "content_encoding": "base64"}
         return GeminiSuccessResult(
             mimeType=mime_type,
-            content=body,  # Keep as bytes for binary content
+            content=body,  # serialized as base64 (JSON-safe) by the model
             size=size,
-            requestInfo=request_info,
+            requestInfo=binary_request_info,
         )
+
+
+def _decode_with_fallback(body: bytes, charset: str) -> tuple[str, str]:
+    """Decode ``body`` using ``charset``, falling back to latin-1.
+
+    Catches both UnicodeDecodeError and LookupError (an unknown charset name),
+    so a server advertising a bogus charset degrades gracefully instead of
+    crashing the whole response. Returns ``(text, charset_actually_used)``.
+    latin-1 maps every byte, so the final fallback never fails.
+    """
+    for candidate in [charset, "utf-8", "latin-1"]:
+        try:
+            return body.decode(candidate), candidate
+        except (UnicodeDecodeError, LookupError):
+            continue
+    # Unreachable: latin-1 always succeeds, but keep mypy/readers happy.
+    return body.decode("latin-1", errors="replace"), "latin-1"
 
 
 def _process_redirect_response(

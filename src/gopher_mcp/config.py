@@ -1,8 +1,11 @@
 """Centralized configuration management using Pydantic Settings."""
 
+import logging
+import sys
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
+import structlog
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,11 +33,12 @@ class GopherConfig(BaseSettings):
         default=300,  # 5 minutes
         description="Cache time-to-live in seconds",
         ge=0,
+        le=86400,  # at most one day
     )
     max_cache_entries: int = Field(
         default=1000,
         description="Maximum number of cache entries",
-        ge=0,
+        ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
     allowed_hosts: Optional[List[str]] = Field(
@@ -101,11 +105,12 @@ class GeminiConfig(BaseSettings):
         default=300,
         description="Cache time-to-live in seconds",
         ge=0,
+        le=86400,  # at most one day
     )
     max_cache_entries: int = Field(
         default=1000,
         description="Maximum number of cache entries",
-        ge=0,
+        ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
     allowed_hosts: Optional[List[str]] = Field(
@@ -221,3 +226,37 @@ def reset_config() -> None:
     """Reset the global configuration instance (useful for testing)."""
     global _config
     _config = None
+
+
+def configure_logging(config: Optional[ServerConfig] = None) -> None:
+    """Configure structlog/stdlib logging from the server configuration.
+
+    Logs are written to STDERR, never stdout: the stdio MCP transport uses
+    stdout for the protocol stream, so logging there would corrupt it.
+    """
+    config = config or ServerConfig()
+    level = getattr(logging, config.log_level.upper(), logging.INFO)
+
+    handlers: List[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    if config.log_file_path:
+        handlers.append(logging.FileHandler(str(config.log_file_path)))
+    logging.basicConfig(
+        level=level, handlers=handlers, format="%(message)s", force=True
+    )
+
+    processors: List[Any] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+    ]
+    if config.structured_logging:
+        processors.append(structlog.processors.JSONRenderer())
+    else:
+        processors.append(structlog.dev.ConsoleRenderer(colors=False))
+
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        cache_logger_on_first_use=True,
+    )
