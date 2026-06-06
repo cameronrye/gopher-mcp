@@ -4,10 +4,10 @@ import pytest
 import ssl
 from unittest.mock import Mock, patch
 
-from src.gopher_mcp.gemini_client import GeminiClient
-from src.gopher_mcp.models import GeminiErrorResult
-from src.gopher_mcp.security import TLSSecurityManager, SecurityLevel
-from src.gopher_mcp.security_policy import SecurityPolicyEnforcer
+from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.models import GeminiErrorResult
+from gopher_mcp.security import TLSSecurityManager, SecurityLevel
+from gopher_mcp.security_policy import SecurityPolicyEnforcer
 
 
 class TestInputSanitization:
@@ -26,7 +26,7 @@ class TestInputSanitization:
     )
     def test_malicious_url_rejection(self, malicious_url: str):
         """Test that malicious URLs are rejected."""
-        from src.gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
+        from gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
 
         # These should all be rejected due to wrong scheme
         with pytest.raises(ValueError):
@@ -37,7 +37,7 @@ class TestInputSanitization:
 
     def test_suspicious_port_detection(self):
         """Test detection of suspicious ports (this would be enforced by security policy)."""
-        from src.gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
+        from gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
 
         # These URLs are technically valid but would be blocked by security policy
         suspicious_urls = [
@@ -71,7 +71,7 @@ class TestInputSanitization:
     )
     def test_path_traversal_prevention(self, malicious_input: str):
         """Test prevention of path traversal attacks."""
-        from src.gopher_mcp.utils import sanitize_selector
+        from gopher_mcp.utils import sanitize_selector
 
         # sanitize_selector only checks for tab, CR, LF and length
         if any(char in malicious_input for char in ["\t", "\r", "\n"]):
@@ -89,7 +89,7 @@ class TestInputSanitization:
 
     def test_url_length_limits(self):
         """Test URL length validation."""
-        from src.gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
+        from gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
 
         # Test extremely long URLs - only Gemini has length limits (1024 bytes)
         long_path = "A" * 2000
@@ -111,7 +111,7 @@ class TestResourceExhaustion:
     @pytest.mark.asyncio
     async def test_response_size_limits(self):
         """Test that oversized responses are rejected."""
-        client = GeminiClient(max_response_size=1024)  # 1KB limit
+        client = GeminiClient(max_response_size=1024, tofu_enabled=False)  # 1KB limit
 
         # Mock a large response
         large_response = b"A" * 2048  # 2KB response
@@ -158,7 +158,7 @@ class TestResourceExhaustion:
         client = GeminiClient(max_cache_entries=10)
 
         # Fill cache beyond limit
-        from src.gopher_mcp.models import GeminiSuccessResult, GeminiMimeType
+        from gopher_mcp.models import GeminiSuccessResult, GeminiMimeType
 
         for i in range(20):
             url = f"gemini://example{i}.com/"
@@ -179,7 +179,7 @@ class TestTLSSecurityValidation:
 
     def test_tls_version_enforcement(self):
         """Test TLS version requirements."""
-        from src.gopher_mcp.security import TLSSecurityConfig, TLSVersion
+        from gopher_mcp.security import TLSSecurityConfig, TLSVersion
 
         # Test minimum TLS version enforcement
         config = TLSSecurityConfig(min_tls_version=TLSVersion.TLS_1_3)
@@ -190,7 +190,7 @@ class TestTLSSecurityValidation:
 
     def test_cipher_suite_restrictions(self):
         """Test cipher suite security restrictions."""
-        from src.gopher_mcp.security import (
+        from gopher_mcp.security import (
             TLSSecurityConfig,
         )
 
@@ -211,7 +211,7 @@ class TestTLSSecurityValidation:
 
     def test_certificate_validation_modes(self):
         """Test different certificate validation modes."""
-        from src.gopher_mcp.security import TLSSecurityConfig, CertificateValidationMode
+        from gopher_mcp.security import TLSSecurityConfig, CertificateValidationMode
 
         # Test TOFU mode
         tofu_config = TLSSecurityConfig(
@@ -229,7 +229,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_host_allowlist_enforcement(self):
         """Test host allowlist enforcement."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -248,7 +248,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_host_blocklist_enforcement(self):
         """Test host blocklist enforcement."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -267,7 +267,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_connection_rate_limiting(self):
         """Test connection rate limiting."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -285,7 +285,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_host_pattern_blocking(self):
         """Test host pattern blocking."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -310,7 +310,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_host_pattern_allowing(self):
         """Test host pattern allowing."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -335,11 +335,11 @@ class TestSecurityPolicyEnforcement:
 
     def test_certificate_scope_enforcement(self):
         """Test certificate scope enforcement."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
             PolicyAction,
         )
-        from src.gopher_mcp.models import GeminiCertificateInfo
+        from gopher_mcp.models import GeminiCertificateInfo
 
         config = SecurityPolicyConfig(
             certificate_scope_enforcement=True,
@@ -398,11 +398,11 @@ class TestSecurityPolicyEnforcement:
 
     def test_certificate_reuse_prevention(self):
         """Test certificate reuse prevention."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
             PolicyAction,
         )
-        from src.gopher_mcp.models import GeminiCertificateInfo
+        from gopher_mcp.models import GeminiCertificateInfo
 
         config = SecurityPolicyConfig(
             allow_certificate_reuse=False,
@@ -437,7 +437,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_connection_recording(self):
         """Test connection recording."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -458,7 +458,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_cleanup_expired_records(self):
         """Test cleanup of expired records."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
         import time
@@ -481,10 +481,10 @@ class TestSecurityPolicyEnforcement:
 
     def test_policy_statistics(self):
         """Test policy statistics."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
-        from src.gopher_mcp.models import GeminiCertificateInfo
+        from gopher_mcp.models import GeminiCertificateInfo
 
         config = SecurityPolicyConfig()
         manager = SecurityPolicyEnforcer(config)
@@ -518,7 +518,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_connection_limit_enforcement(self):
         """Test connection limit enforcement."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -541,7 +541,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_policy_violation_logging(self):
         """Test policy violation logging."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -557,7 +557,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_allowed_connection_logging(self):
         """Test allowed connection logging."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -570,7 +570,7 @@ class TestSecurityPolicyEnforcement:
 
     def test_security_policy_config_validation(self):
         """Test security policy config validation."""
-        from src.gopher_mcp.security_policy import (
+        from gopher_mcp.security_policy import (
             SecurityPolicyConfig,
         )
 
@@ -586,7 +586,7 @@ class TestCertificateSecurityValidation:
 
     def test_certificate_chain_length_validation(self):
         """Test certificate chain length limits."""
-        from src.gopher_mcp.security import TLSSecurityConfig
+        from gopher_mcp.security import TLSSecurityConfig
 
         config = TLSSecurityConfig(max_cert_chain_length=5)
         manager = TLSSecurityManager(config)
@@ -601,7 +601,7 @@ class TestCertificateSecurityValidation:
 
     def test_certificate_fingerprint_validation(self):
         """Test certificate fingerprint validation."""
-        from src.gopher_mcp.fingerprints import CertificateFingerprint
+        from gopher_mcp.fingerprints import CertificateFingerprint
 
         # Test valid fingerprint creation
         valid_sha256 = (
@@ -621,7 +621,7 @@ class TestProtocolCompliance:
 
     def test_gemini_status_code_validation(self):
         """Test Gemini status code validation."""
-        from src.gopher_mcp.utils import parse_gemini_response
+        from gopher_mcp.utils import parse_gemini_response
 
         # Test valid status codes
         valid_responses = [
@@ -655,7 +655,7 @@ class TestProtocolCompliance:
 
     def test_gopher_type_validation(self):
         """Test Gopher type validation."""
-        from src.gopher_mcp.utils import parse_gopher_url
+        from gopher_mcp.utils import parse_gopher_url
 
         # Test valid Gopher types
         valid_urls = [
@@ -690,12 +690,13 @@ class TestErrorHandling:
         ):
             result = await client.fetch("gemini://example.com/")
 
-            # Error message should not contain sensitive paths
+            # The sanitized client-facing message must not leak the raw
+            # exception text or filesystem paths.
             assert isinstance(result, GeminiErrorResult)
-            error_msg = result.error["message"].lower()
-            # For now, just check that we get an error result
-            # TODO: Implement proper error sanitization to prevent information leakage
-            assert "error" in error_msg
+            error_msg = result.error["message"]
+            assert "/etc/passwd" not in error_msg
+            assert "Internal error" not in error_msg
+            assert result.error["code"] == "FETCH_ERROR"
 
     def test_stack_trace_sanitization(self):
         """Test that stack traces are sanitized in production."""
@@ -712,7 +713,10 @@ class TestSecurityIntegration:
     async def test_end_to_end_security_validation(self):
         """Test complete security validation flow."""
         client = GeminiClient(
-            allowed_hosts=["example.com"], timeout_seconds=5, max_response_size=1024
+            allowed_hosts=["example.com"],
+            timeout_seconds=5,
+            max_response_size=1024,
+            tofu_enabled=False,
         )
 
         # Test that all security measures work together
@@ -731,7 +735,7 @@ class TestSecurityIntegration:
 
     def test_security_configuration_validation(self):
         """Test security configuration validation."""
-        from src.gopher_mcp.security import TLSSecurityConfig
+        from gopher_mcp.security import TLSSecurityConfig
 
         # Test invalid configuration
         with pytest.raises(ValueError):

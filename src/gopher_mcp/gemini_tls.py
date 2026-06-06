@@ -227,10 +227,12 @@ class GeminiTLSClient:
         """
         try:
             peer_cert = ssl_sock.getpeercert(binary_form=True)
-            peer_cert_info = ssl_sock.getpeercert()
+            # Under CERT_NONE getpeercert() returns {}, so derive cert details
+            # from the DER instead (this is where the expiry actually lives).
+            peer_cert_info = self._parse_peer_cert(peer_cert)
             cipher = ssl_sock.cipher()
 
-            info = {
+            info: Dict[str, Any] = {
                 "connection_time": connection_time,
                 "tls_version": ssl_sock.version(),
                 "cipher": cipher[0] if cipher else None,
@@ -252,6 +254,29 @@ class GeminiTLSClient:
         except Exception as e:
             logger.warning("Failed to extract connection info", error=str(e))
             return {"connection_time": connection_time, "error": str(e)}
+
+    @staticmethod
+    def _parse_peer_cert(peer_cert_der: Optional[bytes]) -> Dict[str, Any]:
+        """Extract certificate details from DER bytes.
+
+        Works under CERT_NONE (where ssl.getpeercert() returns an empty dict),
+        so the certificate's validity window is actually available to TOFU.
+        """
+        if not peer_cert_der:
+            return {}
+        try:
+            from cryptography import x509
+
+            cert = x509.load_der_x509_certificate(peer_cert_der)
+            return {
+                "subject": cert.subject.rfc4514_string(),
+                "issuer": cert.issuer.rfc4514_string(),
+                "not_before_timestamp": cert.not_valid_before_utc.timestamp(),
+                "not_after_timestamp": cert.not_valid_after_utc.timestamp(),
+            }
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to parse peer certificate", error=str(e))
+            return {}
 
     async def close(self, ssl_sock: ssl.SSLSocket) -> None:
         """Close TLS connection gracefully with close_notify.

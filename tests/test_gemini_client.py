@@ -174,7 +174,7 @@ class TestGeminiClientFetch:
             result = await client.fetch("invalid://url")
 
             assert isinstance(result, GeminiErrorResult)
-            assert result.error["code"] == "FETCH_ERROR"
+            assert result.error["code"] == "INVALID_REQUEST"
             assert "Invalid URL" in result.error["message"]
 
     @pytest.mark.asyncio
@@ -270,13 +270,14 @@ class TestGeminiClientFetchContent:
         with patch.object(client.tls_client, "connect") as mock_connect:
             mock_connect.side_effect = TLSConnectionError("Connection failed")
 
-            with pytest.raises(ValueError, match="TLS connection failed"):
+            # The typed error now propagates (fetch() maps it to TLS_ERROR).
+            with pytest.raises(TLSConnectionError, match="Connection failed"):
                 await client._fetch_content(mock_parsed_url)
 
     @pytest.mark.asyncio
     async def test_fetch_content_cleanup_on_error(self):
         """Test that TLS connection is cleaned up on error."""
-        client = GeminiClient()
+        client = GeminiClient(tofu_enabled=False)
 
         mock_parsed_url = Mock()
         mock_parsed_url.host = "example.com"
@@ -547,6 +548,7 @@ class TestGeminiClientAdvancedFeatures:
                 with patch.object(client.tls_client, "close") as _mock_close:
                     result = await client.fetch("gemini://example.com/test")
 
-                    # Should return error result
+                    # Should return a distinct, sanitized certificate error
                     assert isinstance(result, GeminiErrorResult)
-                    assert "Certificate validation failed" in result.error["message"]
+                    assert result.error["code"] == "CERTIFICATE_CHANGED"
+                    assert "TOFU" in result.error["message"]

@@ -19,7 +19,7 @@ class TestPerformanceBaselines:
     @pytest.mark.asyncio
     async def test_gemini_client_response_time(self):
         """Test Gemini client response time baseline."""
-        client = GeminiClient()
+        client = GeminiClient(tofu_enabled=False)
 
         # Mock fast response
         mock_response = b"20 text/plain\r\nTest content"
@@ -108,7 +108,7 @@ class TestConcurrentLoad:
     @pytest.mark.asyncio
     async def test_concurrent_gemini_requests(self):
         """Test handling multiple concurrent Gemini requests."""
-        client = GeminiClient()
+        client = GeminiClient(tofu_enabled=False)
 
         # Mock responses
         mock_response = b"20 text/plain\r\nTest content"

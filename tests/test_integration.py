@@ -112,6 +112,7 @@ class TestGeminiIntegration:
         mock_connection_info = {
             "peer_cert": Mock(),
             "cipher": ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
         }
 
         raw_response = b"20 text/gemini\r\n# Test Page\nHello, Gemini!"
@@ -125,7 +126,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None  # No TOFU errors
+            mock_tofu.return_value = (True, None)  # No TOFU errors
 
             result = await gemini_fetch("gemini://example.com/")
 
@@ -142,7 +143,11 @@ class TestGeminiIntegration:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
 
         # Redirect response
         raw_response = b"30 gemini://example.com/new-location\r\n"
@@ -156,7 +161,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             result = await gemini_fetch("gemini://example.com/old-location")
 
@@ -169,7 +174,11 @@ class TestGeminiIntegration:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
 
         # Error response
         raw_response = b"40 Not Found\r\n"
@@ -183,7 +192,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             result = await gemini_fetch("gemini://example.com/notfound")
 
@@ -196,7 +205,11 @@ class TestGeminiIntegration:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
         raw_response = b"20 text/gemini\r\n# Cached\nCached content"
 
         with (
@@ -208,7 +221,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             # First fetch
             result1 = await gemini_fetch("gemini://example.com/cached")
@@ -326,7 +339,11 @@ class TestErrorPaths:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
 
         # Invalid response (missing CRLF)
         raw_response = b"20 text/gemini"
@@ -340,7 +357,7 @@ class TestErrorPaths:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             result = await gemini_fetch("gemini://example.com/malformed")
 
@@ -388,7 +405,11 @@ class TestConcurrency:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
         raw_response = b"20 text/gemini\r\n# Concurrent\nContent"
 
         with (
@@ -400,7 +421,7 @@ class TestConcurrency:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             # Make 10 concurrent requests
             tasks = [gemini_fetch(f"gemini://example.com/page{i}") for i in range(10)]
@@ -432,7 +453,11 @@ class TestConcurrency:
 
         # Mock Gemini
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
         raw_gemini_response = b"20 text/gemini\r\n# Gemini\nContent"
 
         with (
@@ -445,7 +470,7 @@ class TestConcurrency:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_gemini_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             # Mix of Gopher and Gemini requests
             tasks = [

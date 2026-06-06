@@ -110,16 +110,15 @@ class TestTOFUManager:
             assert entry.fingerprint == "abc123"
 
     def test_load_entries_invalid_json(self):
-        """Test loading entries with invalid JSON."""
+        """A corrupt store fails closed rather than silently resetting."""
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = str(Path(temp_dir) / "tofu.json")
 
             with open(storage_path, "w") as f:
                 f.write("invalid json")
 
-            manager = TOFUManager(storage_path)
-
-            assert manager._entries == {}
+            with pytest.raises(TOFUValidationError, match="corrupt"):
+                TOFUManager(storage_path)
 
     def test_save_entries(self):
         """Test saving entries to file."""
@@ -555,7 +554,7 @@ class TestTOFUManager:
                 TOFUManager()
 
     def test_load_entries_with_corrupted_file(self):
-        """Test loading entries from a corrupted JSON file."""
+        """A corrupt store fails closed (refuses to start with empty pins)."""
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = str(Path(temp_dir) / "tofu.json")
 
@@ -563,6 +562,5 @@ class TestTOFUManager:
             with open(storage_path, "w") as f:
                 f.write("invalid json content")
 
-            # Should handle corrupted file gracefully
-            manager = TOFUManager(storage_path)
-            assert len(manager._entries) == 0
+            with pytest.raises(TOFUValidationError, match="corrupt"):
+                TOFUManager(storage_path)

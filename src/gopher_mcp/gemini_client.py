@@ -9,7 +9,7 @@ import structlog
 from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnectionError
 from .tofu import TOFUManager, TOFUValidationError
 from .client_certs import ClientCertificateManager
-from .ssrf import normalize_host, validate_target
+from .ssrf import SSRFError, normalize_host, validate_target
 from .models import (
     GeminiFetchResponse,
     GeminiURL,
@@ -181,20 +181,42 @@ class GeminiClient:
 
             return response
 
+        except SSRFError as e:
+            # Policy messages name a host/category only (no internal detail).
+            return self._error_result(url, "BLOCKED", str(e), e)
+        except TOFUValidationError as e:
+            return self._error_result(
+                url,
+                "CERTIFICATE_CHANGED",
+                "Server certificate failed TOFU verification (it does not match "
+                "the previously trusted certificate)",
+                e,
+            )
+        except TLSConnectionError as e:
+            return self._error_result(url, "TLS_ERROR", "TLS connection failed", e)
+        except ValueError as e:
+            # URL/host validation errors are safe to surface verbatim.
+            return self._error_result(url, "INVALID_REQUEST", str(e), e)
         except Exception as e:
-            logger.error(
-                "Gemini fetch failed",
-                url=url,
-                error=str(e),
-                error_type=type(e).__name__,
+            return self._error_result(
+                url, "FETCH_ERROR", "Failed to fetch the requested resource", e
             )
-            return GeminiErrorResult(
-                error={
-                    "code": "FETCH_ERROR",
-                    "message": str(e),
-                },
-                requestInfo={"url": url, "timestamp": time.time()},
-            )
+
+    def _error_result(
+        self, url: str, code: str, message: str, exc: Exception
+    ) -> GeminiErrorResult:
+        """Build a sanitized error result, logging full detail server-side."""
+        logger.error(
+            "Gemini fetch failed",
+            url=url,
+            code=code,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return GeminiErrorResult(
+            error={"code": code, "message": message},
+            requestInfo={"url": url, "timestamp": time.time()},
+        )
 
     async def _fetch_content(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
         """Fetch content from parsed Gemini URL using TLS.
@@ -257,32 +279,35 @@ class GeminiClient:
                     parsed_url.host, parsed_url.port, timeout=self.timeout_seconds
                 )
 
-            # Validate certificate using TOFU if enabled
+            # Validate certificate using TOFU if enabled (fail CLOSED).
             tofu_warning = None
-            if self.tofu_manager and connection_info.get("cert_fingerprint"):
-                try:
-                    is_valid, warning = self.tofu_manager.validate_certificate(
-                        parsed_url.host,
-                        parsed_url.port,
-                        connection_info["cert_fingerprint"],
-                        connection_info.get("peer_cert_info"),
+            if self.tofu_manager:
+                cert_fingerprint = connection_info.get("cert_fingerprint")
+                if not cert_fingerprint:
+                    # The TLS layer runs with CERT_NONE, so TOFU is the only
+                    # thing authenticating the peer. Without a fingerprint we
+                    # cannot apply the pin -- refuse rather than send the
+                    # request to an unverified server.
+                    raise TOFUValidationError(
+                        "No certificate fingerprint available; cannot verify "
+                        "the server identity via TOFU"
                     )
-                    if warning:
-                        tofu_warning = warning
-                        logger.warning(
-                            "TOFU validation warning",
-                            host=parsed_url.host,
-                            port=parsed_url.port,
-                            warning=warning,
-                        )
-                except TOFUValidationError as e:
-                    logger.error(
-                        "TOFU validation failed",
+                # A fingerprint mismatch raises TOFUValidationError, which
+                # propagates to fetch() and becomes a CERTIFICATE_CHANGED error.
+                is_valid, warning = self.tofu_manager.validate_certificate(
+                    parsed_url.host,
+                    parsed_url.port,
+                    cert_fingerprint,
+                    connection_info.get("peer_cert_info"),
+                )
+                if warning:
+                    tofu_warning = warning
+                    logger.warning(
+                        "TOFU validation warning",
                         host=parsed_url.host,
                         port=parsed_url.port,
-                        error=str(e),
+                        warning=warning,
                     )
-                    raise ValueError(f"Certificate validation failed: {e}")
 
             # Format Gemini request: URL + CRLF
             request_url = f"gemini://{parsed_url.host}"
@@ -321,11 +346,10 @@ class GeminiClient:
 
             return result
 
-        except TLSConnectionError as e:
-            logger.error("TLS connection failed", url=parsed_url, error=str(e))
-            raise ValueError(f"TLS connection failed: {e}")
         except Exception as e:
-            logger.error("Gemini fetch failed", url=parsed_url, error=str(e))
+            # Preserve the exception type (TLSConnectionError, TOFUValidationError,
+            # SSRFError, ...) so fetch() can map it to a distinct error code.
+            logger.error("Gemini fetch failed", url=str(parsed_url), error=str(e))
             raise
         finally:
             # Always close the connection
