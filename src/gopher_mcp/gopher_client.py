@@ -110,8 +110,11 @@ class GopherClient:
         if re.search(r"[\r\n\t]", parsed_url.selector):
             raise ValueError("Selector contains invalid control characters")
 
-        # Validate search query doesn't contain dangerous characters
-        if parsed_url.search and re.search(r"[\r\n]", parsed_url.search):
+        # Validate search query doesn't contain dangerous characters. TAB is
+        # rejected too: the transport joins selector and search with a literal
+        # TAB, so an unescaped TAB here would inject an extra field into the
+        # single Gopher request line.
+        if parsed_url.search and re.search(r"[\r\n\t]", parsed_url.search):
             raise ValueError("Search query contains invalid control characters")
 
         # Validate port range

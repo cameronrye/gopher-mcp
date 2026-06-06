@@ -146,6 +146,24 @@ class TestSecurityValidation:
         ):
             client._validate_security(parsed_url)
 
+    def test_validate_security_search_tab_injection(self):
+        """Reject TAB in the search query: the transport joins selector and
+        search with a literal TAB, so an unescaped TAB would inject an extra
+        field into the single Gopher request line."""
+        client = GopherClient()
+        parsed_url = GopherURL(
+            host="example.com",
+            port=70,
+            gopherType="7",
+            selector="/search",
+            search="foo\textrafield",
+        )
+
+        with pytest.raises(
+            ValueError, match="Search query contains invalid control characters"
+        ):
+            client._validate_security(parsed_url)
+
     def test_validate_security_invalid_port(self):
         """Test security validation fails for invalid port numbers."""
         client = GopherClient()
