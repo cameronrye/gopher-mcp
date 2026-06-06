@@ -12,6 +12,7 @@ from gopher_mcp.models import (
     GeminiStatusCode,
     GeminiSuccessResult,
     GeminiErrorResult,
+    GeminiRedirectResult,
     GeminiMimeType,
 )
 from gopher_mcp.tofu import TOFUValidationError
@@ -193,6 +194,95 @@ class TestGeminiClientFetch:
 
             assert isinstance(result, GeminiErrorResult)
             assert "Host not allowed" in result.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_does_not_cache_error_result(self):
+        """A transient error result must not be cached, or a momentary server
+        failure would be served stale for the full cache TTL."""
+        client = GeminiClient(cache_enabled=True)
+
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "example.com"
+        mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
+        mock_parsed_url.query = None
+
+        error_response = GeminiErrorResult(
+            error={"code": "TEMPORARY_FAILURE", "message": "Server unavailable"},
+            requestInfo={},
+        )
+
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = mock_parsed_url
+            mock_fetch.return_value = error_response
+
+            result = await client.fetch("gemini://example.com/")
+
+            assert result == error_response
+            assert client._get_cached_response("gemini://example.com/") is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_does_not_cache_redirect_result(self):
+        """A redirect result must not be cached: the target can change and a
+        stale redirect would keep sending the client to the old location."""
+        client = GeminiClient(cache_enabled=True)
+
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "example.com"
+        mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
+        mock_parsed_url.query = None
+
+        redirect_response = GeminiRedirectResult(
+            newUrl="gemini://example.com/new", requestInfo={}
+        )
+
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = mock_parsed_url
+            mock_fetch.return_value = redirect_response
+
+            result = await client.fetch("gemini://example.com/")
+
+            assert result == redirect_response
+            assert client._get_cached_response("gemini://example.com/") is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_caches_success_result(self):
+        """A successful response is still cached."""
+        client = GeminiClient(cache_enabled=True)
+
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "example.com"
+        mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
+        mock_parsed_url.query = None
+
+        success_response = GeminiSuccessResult(
+            content="Hello",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=5,
+            requestInfo={},
+        )
+
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = mock_parsed_url
+            mock_fetch.return_value = success_response
+
+            result = await client.fetch("gemini://example.com/")
+
+            assert result == success_response
+            assert (
+                client._get_cached_response("gemini://example.com/") == success_response
+            )
 
 
 class TestGeminiClientFetchContent:

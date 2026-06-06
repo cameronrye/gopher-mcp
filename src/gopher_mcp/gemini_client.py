@@ -164,8 +164,16 @@ class GeminiClient:
             if hasattr(response, "request_info"):
                 response.request_info.update(request_info)
 
-            # Cache the response
-            if self.cache_enabled:
+            # Cache the response. Skip transient/non-content results: error
+            # and redirect targets can change moment to moment, and
+            # input/certificate prompts are per-interaction, so caching them
+            # would serve a stale failure or redirect for the full TTL.
+            if self.cache_enabled and getattr(response, "kind", None) not in (
+                "error",
+                "redirect",
+                "input",
+                "certificate",
+            ):
                 self._cache_response(url, response)
 
             logger.info(
