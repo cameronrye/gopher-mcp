@@ -776,7 +776,7 @@ requires-dist = [
     { name = "safety", marker = "extra == 'dev'", specifier = ">=2.3.0,<3.0.0" },
     { name = "structlog", specifier = ">=23.2.0" },
     { name = "twine", marker = "extra == 'dev'", specifier = ">=4.0.0" },
-    { name = "typer", marker = "extra == 'dev'", specifier = "<0.21.0" },
+    { name = "typer", marker = "extra == 'dev'", specifier = "<0.22.0" },
 ]
 provides-extras = ["http", "dev", "docs", "test"]
 
