@@ -96,7 +96,11 @@ async def fetch_gopher(
     except GopherProtocolError:
         raise
     except OSError as e:
-        raise GopherProtocolError(f"Connection failed: {e}") from e
+        # Use strerror only, so the resolved IP/address isn't echoed back to
+        # the caller (which would act as an internal-reachability oracle).
+        raise GopherProtocolError(
+            f"Connection failed: {e.strerror or 'unable to connect'}"
+        ) from e
 
 
 def decode_gopher_text(data: bytes) -> Tuple[str, str]:

@@ -7,8 +7,8 @@ from typing import List, Optional, Set
 
 import structlog
 
-from .gopher_transport import decode_gopher_text, fetch_gopher
-from .ssrf import normalize_host, validate_target
+from .gopher_transport import GopherProtocolError, decode_gopher_text, fetch_gopher
+from .ssrf import SSRFError, normalize_host, validate_target
 from .models import (
     BinaryResult,
     CacheEntry,
@@ -182,20 +182,35 @@ class GopherClient:
 
             return response
 
+        except SSRFError as e:
+            return self._error_result(url, "BLOCKED", str(e), e)
+        except GopherProtocolError as e:
+            # Network-level failure (timeout / connection / oversize). The
+            # transport keeps these messages free of internal detail.
+            return self._error_result(url, "FETCH_ERROR", str(e), e)
+        except ValueError as e:
+            # Validation errors (allowlist, selector, port) are safe to surface.
+            return self._error_result(url, "INVALID_REQUEST", str(e), e)
         except Exception as e:
-            logger.error(
-                "Gopher fetch failed",
-                url=url,
-                error=str(e),
-                error_type=type(e).__name__,
+            return self._error_result(
+                url, "FETCH_ERROR", "Failed to fetch the requested resource", e
             )
-            return ErrorResult(
-                error={
-                    "code": "FETCH_ERROR",
-                    "message": str(e),
-                },
-                requestInfo={"url": url, "timestamp": time.time()},
-            )
+
+    def _error_result(
+        self, url: str, code: str, message: str, exc: Exception
+    ) -> ErrorResult:
+        """Build a sanitized error result, logging full detail server-side."""
+        logger.error(
+            "Gopher fetch failed",
+            url=url,
+            code=code,
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return ErrorResult(
+            error={"code": code, "message": message},
+            requestInfo={"url": url, "timestamp": time.time()},
+        )
 
     async def _fetch_content(self, parsed_url: GopherURL) -> GopherFetchResponse:
         """Fetch content from a parsed Gopher URL over the native transport.

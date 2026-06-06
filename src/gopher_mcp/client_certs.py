@@ -43,6 +43,11 @@ class ClientCertificateManager:
 
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
+        # Harden directory permissions (mkdir mode is subject to umask).
+        try:
+            os.chmod(self.storage_path, 0o700)
+        except OSError:  # pragma: no cover - non-POSIX or restricted FS
+            pass
 
         # Certificate registry file
         self.registry_path = self.storage_path / "registry.json"
@@ -196,18 +201,17 @@ class ClientCertificateManager:
             with open(cert_path, "wb") as f:
                 f.write(cert.public_bytes(serialization.Encoding.PEM))
 
-            # Write private key
-            with open(key_path, "wb") as f:
-                f.write(
-                    private_key.private_bytes(
-                        encoding=serialization.Encoding.PEM,
-                        format=serialization.PrivateFormat.PKCS8,
-                        encryption_algorithm=serialization.NoEncryption(),
-                    )
-                )
-
-            # Set restrictive permissions on private key
-            os.chmod(key_path, 0o600)
+            # Write the private key with owner-only permissions from creation.
+            # Using os.open avoids the brief world-readable TOCTOU window that
+            # exists when writing first and chmod-ing afterwards.
+            key_bytes = private_key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.PKCS8,
+                encryption_algorithm=serialization.NoEncryption(),
+            )
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "wb") as f:
+                f.write(key_bytes)
 
             # Calculate fingerprint
             fingerprint = hashlib.sha256(

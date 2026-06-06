@@ -329,7 +329,7 @@ class TestFetchMethod:
 
             result = await client.fetch(url)
             assert isinstance(result, ErrorResult)
-            assert result.error["code"] == "FETCH_ERROR"
+            assert result.error["code"] == "INVALID_REQUEST"
             assert "not in allowed hosts list" in result.error["message"]
 
     @pytest.mark.asyncio
@@ -343,7 +343,7 @@ class TestFetchMethod:
 
             result = await client.fetch(url)
             assert isinstance(result, ErrorResult)
-            assert result.error["code"] == "FETCH_ERROR"
+            assert result.error["code"] == "INVALID_REQUEST"
             assert "URL must start with 'gopher://'" in result.error["message"]
 
     @pytest.mark.asyncio
@@ -364,7 +364,9 @@ class TestFetchMethod:
             result = await client.fetch(url)
             assert isinstance(result, ErrorResult)
             assert result.error["code"] == "FETCH_ERROR"
-            assert "Network error" in result.error["message"]
+            # Unexpected exceptions are sanitized -- the raw text must not leak.
+            assert "Network error" not in result.error["message"]
+            assert result.error["message"] == "Failed to fetch the requested resource"
 
     @pytest.mark.asyncio
     async def test_fetch_successful_with_caching(self):

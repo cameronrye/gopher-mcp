@@ -67,6 +67,12 @@ class TOFUManager:
                 raise ValueError("Could not determine home directory")
             gemini_dir = home_dir / ".gemini"
             gemini_dir.mkdir(exist_ok=True)
+            # The trust store lives here; keep it owner-only (mkdir mode is
+            # subject to umask).
+            try:
+                os.chmod(gemini_dir, 0o700)
+            except OSError:  # pragma: no cover - non-POSIX or restricted FS
+                pass
             storage_path = str(gemini_dir / "tofu.json")
 
         self.storage_path = storage_path
