@@ -228,20 +228,51 @@ def reset_config() -> None:
     _config = None
 
 
+class _TeeStream:
+    """Write-only text stream that fans each write out to several streams.
+
+    structlog's PrintLogger writes every rendered line to a single file
+    object; teeing stderr and a log file lets the configured file receive the
+    same records without a second open handle or a stdlib logging bridge.
+    """
+
+    def __init__(self, *streams: Any) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
 def configure_logging(config: Optional[ServerConfig] = None) -> None:
     """Configure structlog/stdlib logging from the server configuration.
 
     Logs are written to STDERR, never stdout: the stdio MCP transport uses
-    stdout for the protocol stream, so logging there would corrupt it.
+    stdout for the protocol stream, so logging there would corrupt it. When
+    ``log_file_path`` is set, the same records are mirrored to that file.
     """
     config = config or ServerConfig()
     level = getattr(logging, config.log_level.upper(), logging.INFO)
 
-    handlers: List[logging.Handler] = [logging.StreamHandler(sys.stderr)]
+    # Every module logs through structlog, whose PrintLogger writes to one
+    # stream. A stdlib FileHandler would therefore never see those records, so
+    # mirror to the file by teeing stderr + the file and pointing both stdlib
+    # logging and structlog at that single stream.
+    log_stream: Any = sys.stderr
     if config.log_file_path:
-        handlers.append(logging.FileHandler(str(config.log_file_path)))
+        log_file = open(str(config.log_file_path), "a", encoding="utf-8")
+        log_stream = _TeeStream(sys.stderr, log_file)
+
     logging.basicConfig(
-        level=level, handlers=handlers, format="%(message)s", force=True
+        level=level,
+        handlers=[logging.StreamHandler(log_stream)],
+        format="%(message)s",
+        force=True,
     )
 
     processors: List[Any] = [
@@ -257,6 +288,6 @@ def configure_logging(config: Optional[ServerConfig] = None) -> None:
     structlog.configure(
         processors=processors,
         wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=structlog.PrintLoggerFactory(file=log_stream),
         cache_logger_on_first_use=True,
     )
