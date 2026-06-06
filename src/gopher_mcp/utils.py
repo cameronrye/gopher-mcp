@@ -936,12 +936,12 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         status_str = status_line[:2]
         meta = status_line[3:]  # Everything after "XX "
 
-        # A spec-compliant meta is at most 1024 bytes. Truncate a
-        # non-compliant server's over-long meta instead of discarding the
-        # whole response (the GeminiResponse validator would otherwise raise).
-        meta_bytes = meta.encode("utf-8")
-        if len(meta_bytes) > 1024:
-            meta = meta_bytes[:1024].decode("utf-8", errors="ignore")
+        # A spec-compliant meta is at most 1024 bytes. Reject an over-long
+        # meta rather than truncating it: for a 3x redirect the meta is the
+        # target URL, so truncation would hand back a corrupted URL pointing
+        # somewhere other than intended instead of a clear protocol error.
+        if len(meta.encode("utf-8")) > 1024:
+            raise ValueError("Meta field exceeds 1024 bytes")
 
         # Validate status code
         if not status_str.isdigit():
