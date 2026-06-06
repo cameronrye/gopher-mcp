@@ -87,11 +87,17 @@ We follow responsible disclosure practices:
 
 ### Configuration
 
+Settings are read with a `GOPHER_` or `GEMINI_` prefix (unprefixed names are
+ignored). Set the equivalent `GEMINI_*` variables to apply the same limits to
+Gemini.
+
 ```bash
-# Set conservative limits
-export MAX_RESPONSE_SIZE=524288    # 512KB instead of 1MB
-export TIMEOUT_SECONDS=15          # Shorter timeout
-export CACHE_TTL_SECONDS=60        # Shorter cache TTL
+# Set conservative limits (Gopher shown; mirror with GEMINI_ for Gemini)
+export GOPHER_MAX_RESPONSE_SIZE=524288    # 512KB instead of 1MB
+export GOPHER_TIMEOUT_SECONDS=15          # Shorter timeout
+export GOPHER_CACHE_TTL_SECONDS=60        # Shorter cache TTL
+# Keep SSRF protection on (the default) so internal hosts are unreachable
+export GOPHER_ALLOW_LOCAL_HOSTS=false
 ```
 
 ### Network Environment
@@ -112,12 +118,16 @@ export CACHE_TTL_SECONDS=60        # Shorter cache TTL
 
 ### Environment Variables
 
-| Variable            | Security Impact              | Recommendation                    |
-| ------------------- | ---------------------------- | --------------------------------- |
-| `MAX_RESPONSE_SIZE` | Prevents memory exhaustion   | Set based on your needs, max 10MB |
-| `TIMEOUT_SECONDS`   | Prevents hanging connections | 15-60 seconds recommended         |
-| `CACHE_ENABLED`     | Reduces network requests     | Enable for better security        |
-| `CACHE_TTL_SECONDS` | Limits stale data exposure   | 60-300 seconds recommended        |
+Use the `GOPHER_` / `GEMINI_` prefix for each protocol.
+
+| Variable                   | Security Impact              | Recommendation                    |
+| -------------------------- | ---------------------------- | --------------------------------- |
+| `GOPHER_MAX_RESPONSE_SIZE` | Prevents memory exhaustion   | Set based on your needs, max 10MB |
+| `GOPHER_TIMEOUT_SECONDS`   | Prevents hanging connections | 15-60 seconds recommended         |
+| `GOPHER_CACHE_ENABLED`     | Reduces network requests     | Enable for better security        |
+| `GOPHER_CACHE_TTL_SECONDS` | Limits stale data exposure   | 60-300 seconds recommended        |
+| `GOPHER_ALLOW_LOCAL_HOSTS` | SSRF protection (keep off)   | Leave `false` in production       |
+| `GEMINI_ALLOW_LOCAL_HOSTS` | SSRF protection (keep off)   | Leave `false` in production       |
 
 ### Example Secure Configuration
 
@@ -128,10 +138,10 @@ export CACHE_TTL_SECONDS=60        # Shorter cache TTL
       "command": "uv",
       "args": ["--directory", "/path/to/gopher-mcp", "run", "task", "serve"],
       "env": {
-        "MAX_RESPONSE_SIZE": "524288",
-        "TIMEOUT_SECONDS": "15",
-        "CACHE_ENABLED": "true",
-        "CACHE_TTL_SECONDS": "60"
+        "GOPHER_MAX_RESPONSE_SIZE": "524288",
+        "GOPHER_TIMEOUT_SECONDS": "15",
+        "GOPHER_CACHE_ENABLED": "true",
+        "GOPHER_CACHE_TTL_SECONDS": "60"
       }
     }
   }
