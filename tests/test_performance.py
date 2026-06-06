@@ -5,7 +5,7 @@ import time
 import pytest
 import psutil
 import gc
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from src.gopher_mcp.gemini_client import GeminiClient
 from src.gopher_mcp.gopher_client import GopherClient
@@ -49,12 +49,9 @@ class TestPerformanceBaselines:
         mock_response = b"Test content line 1\r\nTest content line 2\r\n.\r\n"
 
         with patch(
-            "src.gopher_mcp.gopher_client.pituophis.Request"
-        ) as mock_request_class:
-            mock_request = Mock()
-            mock_request.get.return_value = mock_response
-            mock_request_class.return_value = mock_request
-
+            "src.gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=mock_response),
+        ):
             start_time = time.time()
             result = await client.fetch("gopher://example.com/0/test.txt")
             end_time = time.time()
@@ -151,11 +148,9 @@ class TestConcurrentLoad:
 
         async def mock_fetch(url: str):
             with patch(
-                "src.gopher_mcp.gopher_client.pituophis.Request"
-            ) as mock_request_class:
-                mock_request = Mock()
-                mock_request.get.return_value = mock_response
-                mock_request_class.return_value = mock_request
+                "src.gopher_mcp.gopher_client.fetch_gopher",
+                new=AsyncMock(return_value=mock_response),
+            ):
                 return await client.fetch(url)
 
         # Test concurrent requests

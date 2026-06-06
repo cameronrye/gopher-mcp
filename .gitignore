@@ -230,3 +230,6 @@ desktop.ini
 *.orig
 *.swp
 *~
+
+# Claude Code local artifacts
+.claude/

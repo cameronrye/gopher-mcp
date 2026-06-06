@@ -1,25 +1,23 @@
 """Gopher protocol client implementation."""
 
-import asyncio
 import re
 import time
 from collections import OrderedDict
-from typing import Any, List, Optional, Set
+from typing import List, Optional, Set
 
-import pituophis
 import structlog
 
+from .gopher_transport import decode_gopher_text, fetch_gopher
 from .models import (
     BinaryResult,
     CacheEntry,
     ErrorResult,
     GopherFetchResponse,
-    GopherMenuItem,
     GopherURL,
     MenuResult,
     TextResult,
 )
-from .utils import parse_gopher_url
+from .utils import detect_binary_mime_type, parse_gopher_menu, parse_gopher_url
 
 logger = structlog.get_logger(__name__)
 
@@ -194,176 +192,95 @@ class GopherClient:
             )
 
     async def _fetch_content(self, parsed_url: GopherURL) -> GopherFetchResponse:
-        """Fetch content from parsed Gopher URL using Pituophis.
+        """Fetch content from a parsed Gopher URL over the native transport.
+
+        The configured ``max_response_size`` and ``timeout_seconds`` are
+        enforced by :func:`fetch_gopher` (bounded read + overall deadline),
+        unlike the previous pituophis path which ignored both.
 
         Args:
             parsed_url: Parsed Gopher URL
 
         Returns:
             Appropriate response based on content type
-
         """
-        try:
-            # Create Pituophis request
-            request = pituophis.Request(
-                host=parsed_url.host,
-                port=parsed_url.port,
-                path=parsed_url.selector,
-                query=parsed_url.search or "",
-                itype=parsed_url.gopher_type,
-                tls=False,  # Standard Gopher doesn't use TLS
-                tls_verify=True,
-            )
+        raw = await fetch_gopher(
+            parsed_url.host,
+            parsed_url.port,
+            parsed_url.selector,
+            parsed_url.search,
+            max_bytes=self.max_response_size,
+            timeout=self.timeout_seconds,
+        )
 
-            # Fetch content in a thread pool to avoid blocking
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, request.get)
+        gopher_type = parsed_url.gopher_type
+        if gopher_type in ("1", "7"):
+            # Menu/directory or search results (which are menus)
+            return self._process_menu_response(raw)
+        elif gopher_type in ("4", "5", "6", "9", "g", "I"):
+            # Binary content - return metadata only
+            return self._process_binary_response(raw)
+        else:
+            # Text (type 0) and unknown types - try as text
+            return self._process_text_response(raw)
 
-            # Process based on content type
-            if parsed_url.gopher_type == "1":
-                # Menu/directory
-                return await self._process_menu_response(response, parsed_url)
-            elif parsed_url.gopher_type == "0":
-                # Text file
-                return await self._process_text_response(response)
-            elif parsed_url.gopher_type == "7":
-                # Search - treat as menu
-                return await self._process_menu_response(response, parsed_url)
-            elif parsed_url.gopher_type in ["4", "5", "6", "9", "g", "I"]:
-                # Binary content
-                return await self._process_binary_response(response)
-            else:
-                # Unknown type - try as text
-                return await self._process_text_response(response)
+    def _process_menu_response(self, raw: bytes) -> MenuResult:
+        """Parse a Gopher menu (RFC 1436) into a structured result.
 
-        except Exception as e:
-            logger.error("Gopher fetch failed", url=parsed_url, error=str(e))
-            raise
-
-    async def _process_menu_response(
-        self, response: Any, parsed_url: GopherURL
-    ) -> MenuResult:
-        """Process a Gopher menu response.
+        Uses the project's own ``parse_gopher_menu``, which honours the
+        ``.`` terminator and skips malformed lines. An empty result means
+        an empty directory, not a swallowed parse failure (unexpected
+        errors propagate to the caller and surface as an ErrorResult).
 
         Args:
-            response: Pituophis response object
-            parsed_url: Original parsed URL for context
+            raw: Raw response bytes from the server
 
         Returns:
             Parsed menu result
-
         """
-        try:
-            # Parse the menu using Pituophis
-            menu_items = response.menu()
-            items = []
+        content, _ = decode_gopher_text(raw)
+        items = parse_gopher_menu(content)
+        return MenuResult(items=items)
 
-            for item in menu_items:
-                # Convert Pituophis Item to our GopherMenuItem
-                next_url = f"gopher://{item.host}:{item.port}/{item.itype}{item.path}"
-                if item.itype == "7" and parsed_url.search:
-                    # Add search for search items
-                    next_url += f"?{parsed_url.search}"
-
-                gopher_item = GopherMenuItem(
-                    type=item.itype,
-                    title=item.text,
-                    selector=item.path,
-                    host=item.host,
-                    port=item.port,
-                    nextUrl=next_url,
-                )
-                items.append(gopher_item)
-
-            return MenuResult(items=items)
-
-        except Exception as e:
-            logger.error("Failed to parse menu", error=str(e))
-            # Return empty menu on parse error
-            return MenuResult(items=[])
-
-    async def _process_text_response(self, response: Any) -> TextResult:
+    def _process_text_response(self, raw: bytes) -> TextResult:
         """Process a Gopher text response.
 
         Args:
-            response: Pituophis response object
+            raw: Raw response bytes from the server
 
         Returns:
             Text result
-
         """
-        try:
-            # Get text content from response
-            text_content = response.text()
+        text_content, charset = decode_gopher_text(raw)
 
-            # Sanitize the text content
-            # Remove any control characters except newlines, carriage returns, and tabs
-            sanitized_text = "".join(
-                char
-                for char in text_content
-                if char.isprintable() or char in ["\n", "\t", "\r"]
-            )
+        # Strip control characters except newlines, carriage returns and tabs.
+        sanitized_text = "".join(
+            char
+            for char in text_content
+            if char.isprintable() or char in ("\n", "\t", "\r")
+        )
 
-            return TextResult(
-                text=sanitized_text,
-                bytes=len(response.binary),
-                charset="utf-8",
-            )
-
-        except Exception as e:
-            logger.error("Failed to process text response", error=str(e))
-            # Return error message as text
-            error_text = f"Error processing text: {str(e)}"
-            return TextResult(
-                text=error_text,
-                bytes=len(error_text.encode("utf-8")),
-                charset="utf-8",
-            )
+        return TextResult(
+            text=sanitized_text,
+            bytes=len(raw),
+            charset=charset,
+        )
 
     # Note: Search is handled by _process_menu_response since search results are menus
 
-    async def _process_binary_response(self, response: Any) -> BinaryResult:
-        """Process a Gopher binary response.
+    def _process_binary_response(self, raw: bytes) -> BinaryResult:
+        """Process a Gopher binary response (metadata only; no bytes to the LLM).
 
         Args:
-            response: Pituophis response object
+            raw: Raw response bytes from the server
 
         Returns:
-            Binary result with metadata only (no binary data for LLM)
-
+            Binary result with size and sniffed MIME type
         """
-        try:
-            # Get the binary size
-            binary_size = len(response.binary)
-
-            # Try to determine MIME type from content
-            mime_type = "application/octet-stream"  # Default
-
-            # Simple MIME type detection based on first few bytes
-            if binary_size > 0:
-                header = response.binary[:16]
-                if header.startswith(b"\x89PNG"):
-                    mime_type = "image/png"
-                elif header.startswith(b"\xff\xd8\xff"):
-                    mime_type = "image/jpeg"
-                elif header.startswith(b"GIF8"):
-                    mime_type = "image/gif"
-                elif header.startswith(b"%PDF"):
-                    mime_type = "application/pdf"
-                elif header.startswith(b"PK"):
-                    mime_type = "application/zip"
-
-            return BinaryResult(
-                bytes=binary_size,
-                mimeType=mime_type,
-            )
-
-        except Exception as e:
-            logger.error("Failed to process binary response", error=str(e))
-            return BinaryResult(
-                bytes=0,
-                mimeType="application/octet-stream",
-            )
+        return BinaryResult(
+            bytes=len(raw),
+            mimeType=detect_binary_mime_type(raw),
+        )
 
     def _get_cached_response(self, url: str) -> Optional[GopherFetchResponse]:
         """Get cached response if available and not expired.
