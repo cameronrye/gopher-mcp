@@ -330,7 +330,21 @@ class GeminiTLSClient:
             # Hit the cap without EOF: probe one more byte so an over-limit
             # response is REJECTED rather than silently truncated (which would
             # hand the model a corrupted, incomplete document as if complete).
-            extra = await loop.run_in_executor(None, ssl_sock.recv, 1)
+            #
+            # Use a short timeout for the probe: a server that sent a body of
+            # exactly max_size bytes and then holds the connection open
+            # (delayed or absent close_notify) would otherwise block this
+            # recv until the socket deadline and turn a complete, valid
+            # response into a spurious error. A probe timeout means "no more
+            # data is forthcoming", so treat the response as complete.
+            prev_timeout = ssl_sock.gettimeout()
+            ssl_sock.settimeout(1.0)
+            try:
+                extra = await loop.run_in_executor(None, ssl_sock.recv, 1)
+            except (TimeoutError, ssl.SSLError, OSError):
+                extra = b""
+            finally:
+                ssl_sock.settimeout(prev_timeout)
             if extra:
                 raise TLSConnectionError(
                     f"Response exceeds maximum size of {max_size} bytes"

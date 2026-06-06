@@ -353,6 +353,22 @@ class TestGeminiTLSClient:
         with pytest.raises(TLSConnectionError, match="exceeds maximum size"):
             await client.receive_data(mock_ssl_sock, max_size=1024)
 
+    @pytest.mark.asyncio
+    async def test_receive_data_accepts_exactly_max_size(self):
+        """A response of exactly max_size bytes must be accepted, not turned
+        into a TLS error, even when the server holds the connection open
+        (delayed/absent close_notify) so the over-limit probe times out."""
+        mock_ssl_sock = Mock()
+        client = GeminiTLSClient()
+
+        # Body fills the cap exactly; the over-limit probe then blocks and
+        # times out instead of returning data or EOF.
+        mock_ssl_sock.recv.side_effect = [b"x" * 1024, TimeoutError()]
+
+        result = await client.receive_data(mock_ssl_sock, max_size=1024)
+
+        assert result == b"x" * 1024
+
     def test_get_connection_info(self):
         """Test extracting connection information."""
         mock_ssl_sock = Mock()
