@@ -9,8 +9,6 @@ from dataclasses import dataclass
 
 import structlog
 
-from .security import TLSSecurityManager, TLSSecurityConfig
-
 logger = structlog.get_logger(__name__)
 
 
@@ -23,7 +21,6 @@ class TLSConfig:
     client_cert_path: Optional[str] = None
     client_key_path: Optional[str] = None
     timeout_seconds: float = 30.0
-    security_config: Optional[TLSSecurityConfig] = None
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -60,9 +57,6 @@ class GeminiTLSClient:
         self.config = config or TLSConfig()
         self._ssl_context: Optional[ssl.SSLContext] = None
 
-        # Initialize security manager
-        self.security_manager = TLSSecurityManager(self.config.security_config)
-
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context with secure defaults.
 
@@ -73,12 +67,7 @@ class GeminiTLSClient:
             TLSConnectionError: If SSL context creation fails
         """
         try:
-            # Use security manager to create context if available
-            if self.config.security_config:
-                context = self.security_manager.create_ssl_context()
-            else:
-                # Fallback to legacy configuration
-                context = self._create_legacy_ssl_context()
+            context = self._create_base_ssl_context()
 
             # Load client certificate if provided
             if self.config.client_cert_path and self.config.client_key_path:
@@ -94,8 +83,8 @@ class GeminiTLSClient:
         except Exception as e:
             raise TLSConnectionError(f"Failed to create SSL context: {e}", e)
 
-    def _create_legacy_ssl_context(self) -> ssl.SSLContext:
-        """Create SSL context using legacy configuration for backward compatibility."""
+    def _create_base_ssl_context(self) -> ssl.SSLContext:
+        """Create the SSL context used for Gemini (TOFU, not CA validation)."""
         # Create default context with secure settings
         context = ssl.create_default_context()
 
@@ -149,12 +138,9 @@ class GeminiTLSClient:
         Raises:
             TLSConnectionError: If connection fails
         """
-        # Validate host against security policy
-        if not self.security_manager.validate_host(host):
-            raise TLSConnectionError(f"Host {host} blocked by security policy")
-
-        # Use security manager timeout if available
-        timeout = timeout or self.security_manager.get_connection_timeout()
+        # Host-level SSRF/allowlist validation is performed by the caller
+        # (GeminiClient) before reaching the transport.
+        timeout = timeout or self.config.timeout_seconds
 
         logger.info(
             "Establishing TLS connection",
@@ -176,8 +162,8 @@ class GeminiTLSClient:
                 None, sock.connect, (host, port)
             )
 
-            # Wrap socket with TLS, including SNI
-            server_hostname = host if self.security_manager.requires_sni() else None
+            # Wrap socket with TLS, including SNI (mandatory for Gemini)
+            server_hostname = host
             ssl_sock = self.ssl_context.wrap_socket(
                 sock,
                 server_hostname=server_hostname,  # This enables SNI
