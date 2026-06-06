@@ -1,8 +1,35 @@
 """Pytest configuration and shared fixtures for gopher-mcp tests."""
 
+from typing import List
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _stub_dns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Resolve hostnames deterministically and offline for the SSRF guard.
+
+    Keeps the suite hermetic (no real DNS) while letting tests select an
+    internal vs public outcome via the hostname:
+      * ``localhost`` -> 127.0.0.1 (blocked)
+      * ``*.internal`` / ``*.local`` -> 10.0.0.5 (blocked)
+      * ``blocked.example`` -> 169.254.169.254 (blocked)
+      * anything else -> a public address (allowed)
+    IP-literal hosts are classified without resolution, so they bypass this.
+    """
+
+    async def fake_resolve(host: str, port: int) -> List[str]:
+        h = host.strip().rstrip(".").lower()
+        if h == "localhost":
+            return ["127.0.0.1"]
+        if h.endswith(".internal") or h.endswith(".local"):
+            return ["10.0.0.5"]
+        if h == "blocked.example":
+            return ["169.254.169.254"]
+        return ["93.184.216.34"]
+
+    monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", fake_resolve)
 
 
 @pytest.fixture

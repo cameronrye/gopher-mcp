@@ -53,6 +53,7 @@ class ClientManager:
                     cache_ttl_seconds=gopher_config.cache_ttl_seconds,
                     max_cache_entries=gopher_config.max_cache_entries,
                     allowed_hosts=gopher_config.allowed_hosts,
+                    allow_local_hosts=gopher_config.allow_local_hosts,
                     max_selector_length=gopher_config.max_selector_length,
                     max_search_length=gopher_config.max_search_length,
                 )
@@ -90,6 +91,7 @@ class ClientManager:
                     cache_ttl_seconds=gemini_config.cache_ttl_seconds,
                     max_cache_entries=gemini_config.max_cache_entries,
                     allowed_hosts=gemini_config.allowed_hosts,
+                    allow_local_hosts=gemini_config.allow_local_hosts,
                     tofu_enabled=gemini_config.tofu_enabled,
                     tofu_storage_path=tofu_path,
                     client_certs_enabled=gemini_config.client_certs_enabled,

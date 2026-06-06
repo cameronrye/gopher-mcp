@@ -8,6 +8,7 @@ from typing import List, Optional, Set
 import structlog
 
 from .gopher_transport import decode_gopher_text, fetch_gopher
+from .ssrf import normalize_host, validate_target
 from .models import (
     BinaryResult,
     CacheEntry,
@@ -42,6 +43,7 @@ class GopherClient:
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: Optional[List[str]] = None,
+        allow_local_hosts: bool = False,
         max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
     ) -> None:
@@ -66,6 +68,8 @@ class GopherClient:
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
 
+        self.allow_local_hosts = allow_local_hosts
+
         # Convert allowed hosts to a set for faster lookup
         self.allowed_hosts: Optional[Set[str]] = (
             set(allowed_hosts) if allowed_hosts else None
@@ -84,9 +88,11 @@ class GopherClient:
             ValueError: If security validation fails
 
         """
-        # Check allowed hosts
-        if self.allowed_hosts and parsed_url.host not in self.allowed_hosts:
-            raise ValueError(f"Host '{parsed_url.host}' not in allowed hosts list")
+        # Check allowed hosts (normalized to close trailing-dot/case bypasses)
+        if self.allowed_hosts:
+            allowed = {normalize_host(h) for h in self.allowed_hosts}
+            if normalize_host(parsed_url.host) not in allowed:
+                raise ValueError(f"Host '{parsed_url.host}' not in allowed hosts list")
 
         # Validate selector length
         if len(parsed_url.selector) > self.max_selector_length:
@@ -204,6 +210,13 @@ class GopherClient:
         Returns:
             Appropriate response based on content type
         """
+        # SSRF guard: reject internal/loopback/link-local targets before connecting.
+        await validate_target(
+            parsed_url.host,
+            parsed_url.port,
+            allow_local=self.allow_local_hosts,
+        )
+
         raw = await fetch_gopher(
             parsed_url.host,
             parsed_url.port,

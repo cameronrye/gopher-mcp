@@ -41,6 +41,11 @@ class GopherConfig(BaseSettings):
         default=None,
         description="List of allowed hostnames (None = allow all)",
     )
+    allow_local_hosts: bool = Field(
+        default=False,
+        description="Allow connections to loopback/private/internal addresses "
+        "(disabled by default to prevent SSRF)",
+    )
     max_selector_length: int = Field(
         default=1024,
         description="Maximum selector string length",
@@ -106,6 +111,11 @@ class GeminiConfig(BaseSettings):
     allowed_hosts: Optional[List[str]] = Field(
         default=None,
         description="List of allowed hostnames (None = allow all)",
+    )
+    allow_local_hosts: bool = Field(
+        default=False,
+        description="Allow connections to loopback/private/internal addresses "
+        "(disabled by default to prevent SSRF)",
     )
     tofu_enabled: bool = Field(
         default=True,

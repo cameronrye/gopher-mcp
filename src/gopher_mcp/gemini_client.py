@@ -9,6 +9,7 @@ import structlog
 from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnectionError
 from .tofu import TOFUManager, TOFUValidationError
 from .client_certs import ClientCertificateManager
+from .ssrf import normalize_host, validate_target
 from .models import (
     GeminiFetchResponse,
     GeminiURL,
@@ -44,6 +45,7 @@ class GeminiClient:
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: Optional[List[str]] = None,
+        allow_local_hosts: bool = False,
         tls_config: Optional[TLSConfig] = None,
         tofu_enabled: bool = True,
         tofu_storage_path: Optional[str] = None,
@@ -71,6 +73,7 @@ class GeminiClient:
         self.cache_ttl_seconds = cache_ttl_seconds
         self.max_cache_entries = max_cache_entries
         self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
+        self.allow_local_hosts = allow_local_hosts
         self.tofu_enabled = tofu_enabled
         self.client_certs_enabled = client_certs_enabled
 
@@ -103,9 +106,11 @@ class GeminiClient:
         Raises:
             ValueError: If security constraints are violated
         """
-        # Check allowed hosts
-        if self.allowed_hosts and parsed_url.host not in self.allowed_hosts:
-            raise ValueError(f"Host not allowed: {parsed_url.host}")
+        # Check allowed hosts (normalized to close trailing-dot/case bypasses)
+        if self.allowed_hosts:
+            allowed = {normalize_host(h) for h in self.allowed_hosts}
+            if normalize_host(parsed_url.host) not in allowed:
+                raise ValueError(f"Host not allowed: {parsed_url.host}")
 
         # Validate port range
         if not 1 <= parsed_url.port <= 65535:
@@ -203,6 +208,14 @@ class GeminiClient:
         """
         ssl_sock = None
         try:
+            # SSRF guard: reject internal/loopback/link-local targets before
+            # opening the TLS connection.
+            await validate_target(
+                parsed_url.host,
+                parsed_url.port,
+                allow_local=self.allow_local_hosts,
+            )
+
             # Check for client certificate
             client_cert_path = None
             client_key_path = None

@@ -5,16 +5,16 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.gopher_mcp.gemini_client import GeminiClient
-from src.gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
-from src.gopher_mcp.models import (
+from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
+from gopher_mcp.models import (
     GeminiResponse,
     GeminiStatusCode,
     GeminiSuccessResult,
     GeminiErrorResult,
     GeminiMimeType,
 )
-from src.gopher_mcp.tofu import TOFUValidationError
+from gopher_mcp.tofu import TOFUValidationError
 
 
 class TestGeminiClientInit:
@@ -129,7 +129,7 @@ class TestGeminiClientFetch:
         )
 
         with (
-            patch("src.gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
             patch.object(client, "_fetch_content") as mock_fetch,
         ):
             mock_parse.return_value = mock_parsed_url
@@ -168,7 +168,7 @@ class TestGeminiClientFetch:
         """Test fetch error handling."""
         client = GeminiClient()
 
-        with patch("src.gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
+        with patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
             mock_parse.side_effect = ValueError("Invalid URL")
 
             result = await client.fetch("invalid://url")
@@ -186,7 +186,7 @@ class TestGeminiClientFetch:
         mock_parsed_url.host = "forbidden.com"
         mock_parsed_url.port = 1965
 
-        with patch("src.gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
+        with patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
             mock_parse.return_value = mock_parsed_url
 
             result = await client.fetch("gemini://forbidden.com/")
@@ -235,12 +235,8 @@ class TestGeminiClientFetchContent:
             patch.object(client.tls_client, "send_data") as mock_send,
             patch.object(client.tls_client, "receive_data") as mock_receive,
             patch.object(client.tls_client, "close") as mock_close,
-            patch(
-                "src.gopher_mcp.gemini_client.parse_gemini_response"
-            ) as mock_parse_resp,
-            patch(
-                "src.gopher_mcp.gemini_client.process_gemini_response"
-            ) as mock_process,
+            patch("gopher_mcp.gemini_client.parse_gemini_response") as mock_parse_resp,
+            patch("gopher_mcp.gemini_client.process_gemini_response") as mock_process,
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = mock_raw_response
