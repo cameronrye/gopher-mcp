@@ -162,7 +162,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=50",
+    "--cov-fail-under=85",
 ]
 testpaths = ["tests"]
 asyncio_mode = "auto"
