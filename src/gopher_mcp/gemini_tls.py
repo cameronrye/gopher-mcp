@@ -326,20 +326,33 @@ class GeminiTLSClient:
             Received data
 
         Raises:
-            TLSConnectionError: If receive fails
+            TLSConnectionError: If receive fails or the response exceeds max_size.
         """
+        loop = asyncio.get_running_loop()
         try:
-            data = b""
-            while len(data) < max_size:
-                chunk = await asyncio.get_event_loop().run_in_executor(
-                    None, ssl_sock.recv, min(4096, max_size - len(data))
+            chunks: list[bytes] = []
+            total = 0
+            while total < max_size:
+                chunk = await loop.run_in_executor(
+                    None, ssl_sock.recv, min(4096, max_size - total)
                 )
                 if not chunk:
-                    break
-                data += chunk
+                    return b"".join(chunks)
+                chunks.append(chunk)
+                total += len(chunk)
 
-            return data
+            # Hit the cap without EOF: probe one more byte so an over-limit
+            # response is REJECTED rather than silently truncated (which would
+            # hand the model a corrupted, incomplete document as if complete).
+            extra = await loop.run_in_executor(None, ssl_sock.recv, 1)
+            if extra:
+                raise TLSConnectionError(
+                    f"Response exceeds maximum size of {max_size} bytes"
+                )
+            return b"".join(chunks)
 
+        except TLSConnectionError:
+            raise
         except Exception as e:
             raise TLSConnectionError(f"Failed to receive data: {e}", e)
 

@@ -1,5 +1,6 @@
 """Gemini protocol client implementation."""
 
+import asyncio
 import time
 from collections import OrderedDict
 from typing import List, Optional, Tuple
@@ -322,9 +323,12 @@ class GeminiClient:
             # Send request
             await self.tls_client.send_data(ssl_sock, request_data)
 
-            # Receive response
-            raw_response = await self.tls_client.receive_data(
-                ssl_sock, self.max_response_size
+            # Receive response under an overall deadline. The per-recv socket
+            # timeout alone gives no total bound, so a server dripping one byte
+            # at a time could hold the connection open indefinitely (slow loris).
+            raw_response = await asyncio.wait_for(
+                self.tls_client.receive_data(ssl_sock, self.max_response_size),
+                timeout=self.timeout_seconds,
             )
 
             # Parse response

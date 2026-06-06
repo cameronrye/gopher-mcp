@@ -320,21 +320,15 @@ class TestGeminiTLSClient:
 
     @pytest.mark.asyncio
     async def test_receive_data(self):
-        """Test receiving data over TLS."""
+        """Test receiving data over TLS (chunks then EOF)."""
         mock_ssl_sock = Mock()
         client = GeminiTLSClient()
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
-            mock_loop = Mock()
-            # Simulate receiving data in chunks, then empty chunk (EOF)
-            mock_loop.run_in_executor = AsyncMock(
-                side_effect=[b"20 text/gemini\r\n", b"Hello", b""]
-            )
-            mock_get_loop.return_value = mock_loop
+        mock_ssl_sock.recv.side_effect = [b"20 text/gemini\r\n", b"Hello", b""]
 
-            data = await client.receive_data(mock_ssl_sock)
+        data = await client.receive_data(mock_ssl_sock)
 
-            assert data == b"20 text/gemini\r\nHello"
+        assert data == b"20 text/gemini\r\nHello"
 
     @pytest.mark.asyncio
     async def test_receive_data_error(self):
@@ -342,15 +336,22 @@ class TestGeminiTLSClient:
         mock_ssl_sock = Mock()
         client = GeminiTLSClient()
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
-            mock_loop = Mock()
-            mock_loop.run_in_executor = AsyncMock(
-                side_effect=Exception("Receive failed")
-            )
-            mock_get_loop.return_value = mock_loop
+        mock_ssl_sock.recv.side_effect = Exception("Receive failed")
 
-            with pytest.raises(TLSConnectionError, match="Failed to receive data"):
-                await client.receive_data(mock_ssl_sock)
+        with pytest.raises(TLSConnectionError, match="Failed to receive data"):
+            await client.receive_data(mock_ssl_sock)
+
+    @pytest.mark.asyncio
+    async def test_receive_data_rejects_oversize(self):
+        """An over-limit response is rejected, not silently truncated."""
+        mock_ssl_sock = Mock()
+        client = GeminiTLSClient()
+
+        # Fills the cap, and the over-limit probe still returns data.
+        mock_ssl_sock.recv.side_effect = [b"x" * 1024, b"more"]
+
+        with pytest.raises(TLSConnectionError, match="exceeds maximum size"):
+            await client.receive_data(mock_ssl_sock, max_size=1024)
 
     def test_get_connection_info(self):
         """Test extracting connection information."""
