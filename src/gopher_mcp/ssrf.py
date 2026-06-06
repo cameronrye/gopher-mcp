@@ -127,8 +127,10 @@ async def validate_target(
 
     # Hostname: resolve and validate every returned address (defeats DNS
     # rebinding to an internal IP for at least the connection we validate).
+    # Resolve the normalized host so the literal check and the resolution use
+    # the same value.
     try:
-        addresses = await resolve_host(host, port)
+        addresses = await resolve_host(norm, port)
     except OSError as e:  # socket.gaierror is a subclass of OSError
         raise SSRFError(f"Could not resolve host: {host}") from e
 
