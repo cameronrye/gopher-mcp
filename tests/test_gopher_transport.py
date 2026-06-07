@@ -104,7 +104,10 @@ async def test_fetch_gopher_connection_refused():
     server, port = await _serve(b"")
     server.close()
     await server.wait_closed()
-    with pytest.raises(GopherProtocolError, match="Connection failed"):
+    # A dead port surfaces as a GopherProtocolError. The exact message is
+    # platform-dependent: POSIX reports the connection refused immediately,
+    # while Windows can let the connect attempt run until it times out.
+    with pytest.raises(GopherProtocolError, match="Connection failed|timed out"):
         await fetch_gopher("127.0.0.1", port, "/", None, max_bytes=1024, timeout=2)
 
 
