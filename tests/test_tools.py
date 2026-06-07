@@ -2,7 +2,7 @@
 
 from mcp.types import Tool
 
-from gopher_mcp.tools import create_gopher_fetch_tool, create_gemini_fetch_tool
+from gopher_mcp.tools import create_gemini_fetch_tool, create_gopher_fetch_tool
 
 
 class TestCreateGopherFetchTool:

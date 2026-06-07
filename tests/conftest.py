@@ -1,6 +1,5 @@
 """Pytest configuration and shared fixtures for gopher-mcp tests."""
 
-from typing import List
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -19,7 +18,7 @@ def _stub_dns(monkeypatch: pytest.MonkeyPatch) -> None:
     IP-literal hosts are classified without resolution, so they bypass this.
     """
 
-    async def fake_resolve(host: str, port: int) -> List[str]:
+    async def fake_resolve(host: str, port: int) -> list[str]:
         h = host.strip().rstrip(".").lower()
         if h == "localhost":
             return ["127.0.0.1"]
@@ -30,6 +29,24 @@ def _stub_dns(monkeypatch: pytest.MonkeyPatch) -> None:
         return ["93.184.216.34"]
 
     monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", fake_resolve)
+
+
+@pytest.fixture(autouse=True)
+def _reset_client_manager_singleton():
+    """Reset the global client-manager singleton around every test.
+
+    The manager is a module/class-level singleton, so an instance created by one
+    test would otherwise leak into the next (an ordering dependency). This is the
+    safety net so a forgotten manual reset can't contaminate later tests.
+    """
+    import gopher_mcp.server
+    from gopher_mcp.server import ClientManager
+
+    gopher_mcp.server._client_manager = None
+    ClientManager._instance = None
+    yield
+    gopher_mcp.server._client_manager = None
+    ClientManager._instance = None
 
 
 @pytest.fixture

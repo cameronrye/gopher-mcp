@@ -10,17 +10,17 @@ __email__ = "team@gopher-mcp.dev"
 __license__ = "MIT"
 
 from .server import (
-    gopher_fetch,
+    gemini_batch_fetch,
     gemini_fetch,
     gopher_batch_fetch,
-    gemini_batch_fetch,
+    gopher_fetch,
     mcp,
 )
 
 __all__ = [
-    "mcp",
-    "gopher_fetch",
+    "gemini_batch_fetch",
     "gemini_fetch",
     "gopher_batch_fetch",
-    "gemini_batch_fetch",
+    "gopher_fetch",
+    "mcp",
 ]
