@@ -1,9 +1,10 @@
 """Centralized configuration management using Pydantic Settings."""
 
+import contextlib
 import logging
 import sys
 from pathlib import Path
-from typing import Any, List, Optional, Union
+from typing import Any
 
 import structlog
 from pydantic import Field, field_validator
@@ -41,7 +42,7 @@ class GopherConfig(BaseSettings):
         ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
-    allowed_hosts: Optional[List[str]] = Field(
+    allowed_hosts: list[str] | None = Field(
         default=None,
         description="List of allowed hostnames (None = allow all)",
     )
@@ -73,7 +74,7 @@ class GopherConfig(BaseSettings):
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod
-    def parse_allowed_hosts(cls, v: Optional[str]) -> Optional[List[str]]:
+    def parse_allowed_hosts(cls, v: str | None) -> list[str] | None:
         """Parse comma-separated allowed hosts from environment variable."""
         if v is None or v == "":
             return None
@@ -113,7 +114,7 @@ class GeminiConfig(BaseSettings):
         ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
-    allowed_hosts: Optional[List[str]] = Field(
+    allowed_hosts: list[str] | None = Field(
         default=None,
         description="List of allowed hostnames (None = allow all)",
     )
@@ -126,7 +127,7 @@ class GeminiConfig(BaseSettings):
         default=True,
         description="Enable TOFU (Trust-on-First-Use) certificate validation",
     )
-    tofu_storage_path: Optional[Path] = Field(
+    tofu_storage_path: Path | None = Field(
         default=None,
         description="TOFU storage file path",
     )
@@ -134,7 +135,7 @@ class GeminiConfig(BaseSettings):
         default=True,
         description="Enable client certificate support",
     )
-    client_certs_storage_path: Optional[Path] = Field(
+    client_certs_storage_path: Path | None = Field(
         default=None,
         description="Client certificates storage directory path",
     )
@@ -149,7 +150,7 @@ class GeminiConfig(BaseSettings):
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod
-    def parse_allowed_hosts(cls, v: Union[None, str, List[str]]) -> Optional[List[str]]:
+    def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
         """Parse comma-separated allowed hosts from environment variable."""
         if v is None or v == "":
             return None
@@ -169,7 +170,7 @@ class ServerConfig(BaseSettings):
         default=True,
         description="Enable structured logging",
     )
-    log_file_path: Optional[Path] = Field(
+    log_file_path: Path | None = Field(
         default=None,
         description="Log file path (optional, logs to stdout if not set)",
     )
@@ -179,6 +180,9 @@ class ServerConfig(BaseSettings):
     )
 
     model_config = SettingsConfigDict(
+        # Namespace server settings so common ambient vars (LOG_LEVEL,
+        # DEVELOPMENT_MODE, ...) set by other tooling don't silently bleed in.
+        env_prefix="GOPHER_MCP_",
         case_sensitive=False,
         env_file=".env",
         env_file_encoding="utf-8",
@@ -211,7 +215,7 @@ class AppConfig(BaseSettings):
 
 
 # Global configuration instance
-_config: Optional[AppConfig] = None
+_config: AppConfig | None = None
 
 
 def get_config() -> AppConfig:
@@ -249,15 +253,27 @@ class _TeeStream:
             stream.flush()
 
 
-def configure_logging(config: Optional[ServerConfig] = None) -> None:
+_log_file_handle: Any = None
+
+
+def configure_logging(config: ServerConfig | None = None) -> None:
     """Configure structlog/stdlib logging from the server configuration.
 
     Logs are written to STDERR, never stdout: the stdio MCP transport uses
     stdout for the protocol stream, so logging there would corrupt it. When
     ``log_file_path`` is set, the same records are mirrored to that file.
     """
+    global _log_file_handle
+
     config = config or ServerConfig()
     level = getattr(logging, config.log_level.upper(), logging.INFO)
+
+    # Close any handle opened by a previous call so reconfiguring doesn't leak
+    # file descriptors.
+    if _log_file_handle is not None:
+        with contextlib.suppress(Exception):
+            _log_file_handle.close()
+        _log_file_handle = None
 
     # Every module logs through structlog, whose PrintLogger writes to one
     # stream. A stdlib FileHandler would therefore never see those records, so
@@ -265,7 +281,11 @@ def configure_logging(config: Optional[ServerConfig] = None) -> None:
     # logging and structlog at that single stream.
     log_stream: Any = sys.stderr
     if config.log_file_path:
-        log_file = open(str(config.log_file_path), "a", encoding="utf-8")
+        # Long-lived handle: logging writes through it for the process lifetime,
+        # so it can't use a closing context manager. It's tracked module-wide
+        # and closed on the next reconfigure (above).
+        log_file = Path(config.log_file_path).open("a", encoding="utf-8")  # noqa: SIM115
+        _log_file_handle = log_file
         log_stream = _TeeStream(sys.stderr, log_file)
 
     logging.basicConfig(
@@ -275,7 +295,7 @@ def configure_logging(config: Optional[ServerConfig] = None) -> None:
         force=True,
     )
 
-    processors: List[Any] = [
+    processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),

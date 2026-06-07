@@ -116,7 +116,7 @@ class TestGeminiURLParsing:
 
     def test_invalid_port_range(self):
         """Test that invalid port numbers are rejected."""
-        with pytest.raises(ValueError, match="Invalid port number|Port out of range"):
+        with pytest.raises(ValueError, match=r"Invalid port number|Port out of range"):
             parse_gemini_url("gemini://example.org:70000/")
 
 
@@ -327,7 +327,7 @@ class TestGeminiUtilityFunctions:
 
             # Verify file exists and contains correct data
             assert file_path.exists()
-            with open(file_path, "r") as f:
+            with open(file_path) as f:
                 loaded_data = json.load(f)
             assert loaded_data == test_data
 
@@ -348,7 +348,7 @@ class TestGeminiUtilityFunctions:
 
             # Verify file exists and contains correct data
             assert nested_path.exists()
-            with open(nested_path, "r") as f:
+            with open(nested_path) as f:
                 loaded_data = json.load(f)
             assert loaded_data == test_data
 
@@ -468,3 +468,64 @@ class TestGeminiUtilityFunctions:
         # Test with image extension
         mime_type = guess_mime_type("9", "/images/photo.jpg")
         assert mime_type == "image/jpeg"
+
+
+class TestGeminiUrlPortHandling:
+    """Regression tests for Gemini URL port parsing fixes."""
+
+    def test_port_zero_is_rejected(self):
+        from gopher_mcp.utils import parse_gemini_url
+
+        with pytest.raises(ValueError, match=r"[Pp]ort"):
+            parse_gemini_url("gemini://example.org:0/")
+
+    def test_port_out_of_range_friendly_message(self):
+        from gopher_mcp.utils import parse_gemini_url
+
+        with pytest.raises(ValueError, match="Invalid port"):
+            parse_gemini_url("gemini://example.org:99999/")
+
+
+class TestGemtextParsingRobustness:
+    """Regression tests for gemtext line-splitting and preformat handling."""
+
+    def test_preformat_preserves_trailing_whitespace(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        content = "```\ncode with trailing   \n```"
+        document = parse_gemtext(content)
+        pre_contents = [
+            line.content for line in document.lines if line.type == "preformat"
+        ]
+        assert "code with trailing   " in pre_contents
+
+    def test_does_not_split_on_vertical_tab(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        # Vertical tab is not a gemtext line terminator; must stay one line.
+        document = parse_gemtext("line1\x0bstill line1")
+        assert len(document.lines) == 1
+
+    def test_does_not_split_on_form_feed(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("a\x0cb")
+        assert len(document.lines) == 1
+
+    def test_crlf_and_lf_both_split_lines(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("a\r\nb\nc")
+        assert len(document.lines) == 3
+
+
+class TestGeminiResponseErrorMessages:
+    """parse_gemini_response must not double-wrap its own validation errors."""
+
+    def test_validation_error_not_double_wrapped(self):
+        from gopher_mcp.utils import parse_gemini_response
+
+        # "2\r\n" -> status line "2" is too short; the message must be the
+        # original validation error, not "Failed to parse response: ...".
+        with pytest.raises(ValueError, match=r"^Status line too short$"):
+            parse_gemini_response(b"2\r\n")

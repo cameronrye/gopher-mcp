@@ -357,3 +357,34 @@ class TestValidateGopherResponse:
         """Test response at size limit."""
         content = b"x" * 1024
         validate_gopher_response(content, 1024)  # Should not raise
+
+
+class TestGopherUrlPortAndSelectorHandling:
+    """Regression tests for Gopher URL port/selector parsing fixes."""
+
+    def test_port_zero_is_rejected(self):
+        """An explicit :0 must be rejected, not silently coerced to 70."""
+        with pytest.raises(ValueError, match=r"[Pp]ort"):
+            parse_gopher_url("gopher://example.com:0/1/")
+
+    def test_port_out_of_range_is_rejected(self):
+        """An out-of-range port must raise a clear ValueError."""
+        with pytest.raises(ValueError, match=r"[Pp]ort"):
+            parse_gopher_url("gopher://example.com:99999/1/")
+
+    def test_selector_is_percent_decoded(self):
+        """Percent-encoded selectors must be decoded to on-wire bytes."""
+        result = parse_gopher_url("gopher://example.com/0/path%20with%20space")
+        assert result.selector == "/path with space"
+
+    def test_selector_tab_search_still_decoded(self):
+        """A %09 search embedded in the selector is split then decoded."""
+        result = parse_gopher_url("gopher://example.com/7/find%09a%20b")
+        assert result.selector == "/find"
+        assert result.search == "a b"
+
+    def test_menu_line_non_ascii_digit_port_defaults_to_70(self):
+        """A non-ASCII 'digit' port must default to 70, not drop the item."""
+        item = parse_menu_line("0Title\t/sel\texample.com\t²")
+        assert item is not None
+        assert item.port == 70

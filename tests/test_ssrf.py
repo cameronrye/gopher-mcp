@@ -93,3 +93,34 @@ class TestValidateTarget:
         monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", boom)
         with pytest.raises(SSRFError, match="Could not resolve"):
             await validate_target("nope.example", 70)
+
+
+@pytest.mark.asyncio
+class TestValidateTargetReturnsAddresses:
+    """validate_target returns the vetted IPs to pin the connection to."""
+
+    async def test_returns_resolved_addresses_for_hostname(self):
+        addrs = await validate_target("example.com", 70)
+        assert addrs == ["93.184.216.34"]
+
+    async def test_returns_ip_literal_unchanged(self):
+        addrs = await validate_target("8.8.8.8", 70)
+        assert addrs == ["8.8.8.8"]
+
+    async def test_allow_local_still_returns_addresses(self):
+        addrs = await validate_target("localhost", 70, allow_local=True)
+        assert addrs == ["127.0.0.1"]
+
+
+@pytest.mark.asyncio
+class TestValidateTargetPortPolicy:
+    """A dangerous-port denylist provides defense-in-depth against using the
+    fetcher as a cross-protocol probe."""
+
+    async def test_dangerous_port_is_blocked(self):
+        with pytest.raises(SSRFError, match="port"):
+            await validate_target("example.com", 6379)  # Redis
+
+    async def test_protocol_default_ports_allowed(self):
+        await validate_target("example.com", 70)  # Gopher
+        await validate_target("example.com", 1965)  # Gemini

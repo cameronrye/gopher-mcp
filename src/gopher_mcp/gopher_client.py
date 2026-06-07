@@ -3,12 +3,10 @@
 import re
 import time
 from collections import OrderedDict
-from typing import List, Optional, Set
 
 import structlog
 
 from .gopher_transport import GopherProtocolError, decode_gopher_text, fetch_gopher
-from .ssrf import SSRFError, normalize_host, validate_target
 from .models import (
     BinaryResult,
     CacheEntry,
@@ -18,6 +16,7 @@ from .models import (
     MenuResult,
     TextResult,
 )
+from .ssrf import SSRFError, normalize_host, validate_target
 from .utils import detect_binary_mime_type, parse_gopher_menu, parse_gopher_url
 
 logger = structlog.get_logger(__name__)
@@ -42,7 +41,7 @@ class GopherClient:
         cache_enabled: bool = True,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
-        allowed_hosts: Optional[List[str]] = None,
+        allowed_hosts: list[str] | None = None,
         allow_local_hosts: bool = False,
         max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
@@ -71,7 +70,7 @@ class GopherClient:
         self.allow_local_hosts = allow_local_hosts
 
         # Convert allowed hosts to a set for faster lookup
-        self.allowed_hosts: Optional[Set[str]] = (
+        self.allowed_hosts: set[str] | None = (
             set(allowed_hosts) if allowed_hosts else None
         )
 
@@ -142,7 +141,7 @@ class GopherClient:
             if self.cache_enabled:
                 cached_response = self._get_cached_response(url)
                 if cached_response:
-                    logger.info(
+                    logger.debug(
                         "Cache hit",
                         url=url,
                         cached=True,
@@ -170,7 +169,9 @@ class GopherClient:
             if self.cache_enabled:
                 self._cache_response(url, response)
 
-            logger.info(
+            # Full URL/selector/search are request metadata; keep them at DEBUG
+            # so default INFO logs don't record every browsed resource/query.
+            logger.debug(
                 "Gopher fetch successful",
                 url=url,
                 host=parsed_url.host,
@@ -228,8 +229,10 @@ class GopherClient:
         Returns:
             Appropriate response based on content type
         """
-        # SSRF guard: reject internal/loopback/link-local targets before connecting.
-        await validate_target(
+        # SSRF guard: reject internal/loopback/link-local targets before
+        # connecting, and pin the connection to the exact IPs we validated so
+        # the transport can't re-resolve to a rebinding answer.
+        connect_addresses = await validate_target(
             parsed_url.host,
             parsed_url.port,
             allow_local=self.allow_local_hosts,
@@ -242,6 +245,7 @@ class GopherClient:
             parsed_url.search,
             max_bytes=self.max_response_size,
             timeout=self.timeout_seconds,
+            connect_addresses=connect_addresses,
         )
 
         gopher_type = parsed_url.gopher_type
@@ -313,7 +317,7 @@ class GopherClient:
             mimeType=detect_binary_mime_type(raw),
         )
 
-    def _get_cached_response(self, url: str) -> Optional[GopherFetchResponse]:
+    def _get_cached_response(self, url: str) -> GopherFetchResponse | None:
         """Get cached response if available and not expired.
 
         Args:

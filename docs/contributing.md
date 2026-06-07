@@ -210,7 +210,7 @@ uv run task docs-build
 
 - Include security-focused tests
 - Use `bandit` for security linting (runs automatically)
-- Use `safety` for dependency vulnerability checking
+- Use `pip-audit` for dependency vulnerability checking
 
 ## Bug Reports
 

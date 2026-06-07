@@ -9,16 +9,16 @@ to ensure they are properly formatted and within acceptable ranges.
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 
 class ConfigValidator:
     """Validates configuration settings for the MCP server."""
 
     def __init__(self) -> None:
-        self.errors: List[str] = []
-        self.warnings: List[str] = []
-        self.config: Dict[str, Any] = {}
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
+        self.config: dict[str, Any] = {}
 
     def validate_all(self) -> bool:
         """Validate all configuration settings."""

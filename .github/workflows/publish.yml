@@ -50,7 +50,7 @@ jobs:
       - name: Run security checks
         run: |
           uv run bandit -r src/ -f json -o bandit-report.json
-          uv run safety check --save-json safety-report.json
+          uv run pip-audit --format json --output pip-audit-report.json
 
       - name: Build packages
         run: |
@@ -86,7 +86,9 @@ jobs:
           path: dist/
 
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+        # Pinned to a commit SHA (was the moving release/v1 branch) for
+        # supply-chain safety on this id-token:write job; Dependabot bumps it.
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
         with:
           repository-url: https://test.pypi.org/legacy/
           verbose: true

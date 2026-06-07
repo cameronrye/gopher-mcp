@@ -1,18 +1,18 @@
 """Client certificate management for Gemini protocol."""
 
+import contextlib
+import hashlib
 import json
 import os
 import time
-import hashlib
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta, timezone
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 import structlog
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from .models import GeminiCertificateInfo
 from .utils import atomic_write_json, get_home_directory
@@ -29,7 +29,7 @@ class ClientCertificateError(Exception):
 class ClientCertificateManager:
     """Manager for Gemini client certificates."""
 
-    def __init__(self, storage_path: Optional[str] = None):
+    def __init__(self, storage_path: str | None = None):
         """Initialize client certificate manager.
 
         Args:
@@ -44,14 +44,12 @@ class ClientCertificateManager:
         self.storage_path = Path(storage_path)
         self.storage_path.mkdir(parents=True, exist_ok=True)
         # Harden directory permissions (mkdir mode is subject to umask).
-        try:
-            os.chmod(self.storage_path, 0o700)
-        except OSError:  # pragma: no cover - non-POSIX or restricted FS
-            pass
+        with contextlib.suppress(OSError):  # non-POSIX or restricted FS
+            self.storage_path.chmod(0o700)
 
         # Certificate registry file
         self.registry_path = self.storage_path / "registry.json"
-        self._certificates: Dict[str, GeminiCertificateInfo] = {}
+        self._certificates: dict[str, GeminiCertificateInfo] = {}
         self._load_registry()
 
     def _get_cert_key(self, host: str, port: int, path: str) -> str:
@@ -59,23 +57,37 @@ class ClientCertificateManager:
         return f"{host}:{port}{path}"
 
     def _load_registry(self) -> None:
-        """Load certificate registry from storage."""
+        """Load certificate registry from storage.
+
+        Fails CLOSED: a present-but-corrupt registry raises rather than silently
+        resetting to empty. Silently emptying would orphan existing key files
+        and drop the client identities the user relies on (a later save would
+        then overwrite the registry). A missing file is the normal first run.
+        """
+        if not self.registry_path.exists():
+            logger.info("No existing certificate registry found")
+            return
+
         try:
-            if self.registry_path.exists():
-                with open(self.registry_path, "r") as f:
-                    data = json.load(f)
-                    for key, cert_data in data.items():
-                        self._certificates[key] = GeminiCertificateInfo(**cert_data)
-                logger.info(
-                    "Client certificate registry loaded",
-                    count=len(self._certificates),
-                    storage_path=str(self.storage_path),
-                )
-            else:
-                logger.info("No existing certificate registry found")
+            with self.registry_path.open() as f:
+                data = json.load(f)
+            certs = {
+                key: GeminiCertificateInfo(**cert_data)
+                for key, cert_data in data.items()
+            }
         except Exception as e:
-            logger.error("Failed to load certificate registry", error=str(e))
-            self._certificates = {}
+            logger.error("Client certificate registry is corrupt", error=str(e))
+            raise ClientCertificateError(
+                f"Certificate registry at {self.registry_path} is corrupt; refusing "
+                "to start with an empty registry (fix or remove the file)"
+            ) from e
+
+        self._certificates = certs
+        logger.info(
+            "Client certificate registry loaded",
+            count=len(self._certificates),
+            storage_path=str(self.storage_path),
+        )
 
     def _save_registry(self) -> None:
         """Save certificate registry to storage."""
@@ -98,10 +110,10 @@ class ClientCertificateManager:
         host: str,
         port: int = 1965,
         path: str = "/",
-        common_name: Optional[str] = None,
+        common_name: str | None = None,
         validity_days: int = 365,
         key_size: int = 2048,
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
         """Generate a new client certificate for a scope.
 
         Args:
@@ -154,10 +166,8 @@ class ClientCertificateManager:
                 .issuer_name(issuer)
                 .public_key(private_key.public_key())
                 .serial_number(x509.random_serial_number())
-                .not_valid_before(datetime.now(timezone.utc))
-                .not_valid_after(
-                    datetime.now(timezone.utc) + timedelta(days=validity_days)
-                )
+                .not_valid_before(datetime.now(UTC))
+                .not_valid_after(datetime.now(UTC) + timedelta(days=validity_days))
                 .add_extension(
                     x509.SubjectAlternativeName(
                         [
@@ -198,7 +208,7 @@ class ClientCertificateManager:
             key_path = self.storage_path / key_filename
 
             # Write certificate
-            with open(cert_path, "wb") as f:
+            with cert_path.open("wb") as f:
                 f.write(cert.public_bytes(serialization.Encoding.PEM))
 
             # Write the private key with owner-only permissions from creation.
@@ -249,11 +259,11 @@ class ClientCertificateManager:
 
         except Exception as e:
             logger.error("Failed to generate client certificate", error=str(e))
-            raise ClientCertificateError(f"Certificate generation failed: {e}")
+            raise ClientCertificateError(f"Certificate generation failed: {e}") from e
 
     def get_certificate_for_scope(
         self, host: str, port: int = 1965, path: str = "/"
-    ) -> Optional[Tuple[str, str]]:
+    ) -> tuple[str, str] | None:
         """Get certificate paths for a specific scope.
 
         Args:
@@ -285,7 +295,7 @@ class ClientCertificateManager:
         best_match = None
         best_path_len = 0
 
-        for stored_key, stored_cert in self._certificates.items():
+        for stored_cert in self._certificates.values():
             if (
                 stored_cert.host == host
                 and stored_cert.port == port
@@ -313,13 +323,13 @@ class ClientCertificateManager:
     def _extract_common_name(self, subject: str) -> str:
         """Extract common name from certificate subject."""
         # Parse RFC4514 string to extract CN
-        for part in subject.split(","):
-            part = part.strip()
+        for raw_part in subject.split(","):
+            part = raw_part.strip()
             if part.startswith("CN="):
                 return part[3:]
         return "unknown"
 
-    def list_certificates(self) -> List[GeminiCertificateInfo]:
+    def list_certificates(self) -> list[GeminiCertificateInfo]:
         """List all stored certificates.
 
         Returns:
@@ -370,7 +380,7 @@ class ClientCertificateManager:
         Returns:
             Number of certificates removed
         """
-        current_time = datetime.now(timezone.utc)
+        current_time = datetime.now(UTC)
         expired_keys = []
 
         for key, cert_info in self._certificates.items():
@@ -380,7 +390,7 @@ class ClientCertificateManager:
                 )
                 # Ensure timezone-aware comparison
                 if not_after.tzinfo is None:
-                    not_after = not_after.replace(tzinfo=timezone.utc)
+                    not_after = not_after.replace(tzinfo=UTC)
                 if not_after < current_time:
                     expired_keys.append(key)
             except ValueError:

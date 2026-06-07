@@ -1,15 +1,17 @@
 """Performance and load tests for Gopher and Gemini protocols."""
 
 import asyncio
-import time
-import pytest
-import psutil
 import gc
+import time
 from unittest.mock import AsyncMock, Mock, patch
 
+import psutil
+import pytest
+
 from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.gemini_tls import TLSConnectionError
 from gopher_mcp.gopher_client import GopherClient
-from gopher_mcp.models import GeminiSuccessResult, TextResult
+from gopher_mcp.models import GeminiErrorResult, GeminiSuccessResult, TextResult
 
 
 @pytest.mark.slow
@@ -258,30 +260,27 @@ class TestMemoryUsage:
 class TestScalability:
     """Test scalability and resource limits."""
 
-    def test_large_response_handling(self):
-        """Test handling of large responses."""
-        client = GeminiClient(max_response_size=10 * 1024 * 1024)  # 10MB limit
+    @pytest.mark.asyncio
+    async def test_large_response_handling(self):
+        """A large but under-limit response is fetched and returned intact."""
+        client = GeminiClient(max_response_size=10 * 1024 * 1024, tofu_enabled=False)
 
-        # Test with large but acceptable response
-        large_content = "A" * (5 * 1024 * 1024)  # 5MB
-        large_response = f"20 text/plain\r\n{large_content}".encode()
+        large_content = "A" * (5 * 1024 * 1024)  # 5MB, under the 10MB cap
+        large_response = f"20 text/plain; charset=utf-8\r\n{large_content}".encode()
 
-        start_time = time.time()
+        with (
+            patch.object(client.tls_client, "connect", return_value=(Mock(), {})),
+            patch.object(client.tls_client, "send_data"),
+            patch.object(
+                client.tls_client, "receive_data", return_value=large_response
+            ),
+            patch.object(client.tls_client, "close"),
+        ):
+            result = await client.fetch("gemini://example.com/")
 
-        with patch.object(client.tls_client, "connect", return_value=(Mock(), {})):
-            with patch.object(client.tls_client, "send_data"):
-                with patch.object(
-                    client.tls_client, "receive_data", return_value=large_response
-                ):
-                    with patch.object(client.tls_client, "close"):
-                        # This would be an async test in practice
-                        pass
-
-        end_time = time.time()
-        processing_time = end_time - start_time
-
-        # Should handle large responses efficiently
-        assert processing_time < 5.0  # Less than 5 seconds
+        assert not isinstance(result, GeminiErrorResult)
+        assert result.kind == "success"
+        assert result.size == len(large_content.encode("utf-8"))
 
     @pytest.mark.asyncio
     async def test_connection_pool_efficiency(self):
@@ -315,27 +314,39 @@ class TestScalability:
 class TestResourceLimits:
     """Test resource limit enforcement."""
 
-    def test_connection_timeout_enforcement(self):
-        """Test that connection timeouts are properly enforced."""
-        client = GeminiClient(timeout_seconds=1)
+    @pytest.mark.asyncio
+    async def test_connection_timeout_enforcement(self):
+        """A connection timeout surfaces as a sanitized TLS error."""
+        client = GeminiClient(timeout_seconds=1, tofu_enabled=False)
 
-        # This would test actual timeout enforcement
-        # In practice, would use real slow connections
-        assert client.timeout_seconds == 1
+        with patch.object(
+            client.tls_client,
+            "connect",
+            side_effect=TLSConnectionError("Connection timeout after 1 seconds"),
+        ):
+            result = await client.fetch("gemini://example.com/")
 
-    def test_response_size_limit_enforcement(self):
-        """Test response size limit enforcement."""
-        client = GeminiClient(max_response_size=1024)  # 1KB limit
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "TLS_ERROR"
 
-        # Test with oversized response
-        oversized_content = "A" * 2048  # 2KB
-        _ = (
-            f"20 text/plain\r\n{oversized_content}".encode()
-        )  # Create oversized response for testing
+    @pytest.mark.asyncio
+    async def test_response_size_limit_enforcement(self):
+        """The configured response-size cap actually rejects oversized data."""
+        client = GeminiClient(max_response_size=1024, tofu_enabled=False)
 
-        # Should reject oversized responses
-        # This would be tested with actual response processing
-        assert client.max_response_size == 1024
+        mock_sock = Mock()
+        mock_sock.recv.side_effect = [b"A" * 1024, b"A"]  # cap, then over-limit probe
+        mock_sock.gettimeout.return_value = 5.0
+
+        with (
+            patch.object(client.tls_client, "connect", return_value=(mock_sock, {})),
+            patch.object(client.tls_client, "send_data"),
+            patch.object(client.tls_client, "close"),
+        ):
+            result = await client.fetch("gemini://example.com/")
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "TLS_ERROR"
 
     def test_cache_size_limit_enforcement(self):
         """Test cache size limit enforcement."""

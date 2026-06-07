@@ -7,15 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from gopher_mcp.config import reset_config
 from gopher_mcp.server import (
-    cleanup,
-    get_client_manager,
     ClientManager,
-    gopher_fetch,
+    cleanup,
     gemini_fetch,
+    get_client_manager,
+    gopher_fetch,
     mcp,
 )
-from gopher_mcp.config import reset_config
 
 
 def clear_client_manager():
@@ -137,15 +137,13 @@ class TestGopherFetch:
 
     @pytest.mark.asyncio
     async def test_gopher_fetch_invalid_url(self):
-        """Test gopher fetch with invalid URL."""
-        with pytest.raises(
-            Exception
-        ):  # Should raise ValidationError from GopherFetchRequest
-            await gopher_fetch("http://example.com/")
+        """An invalid URL returns a sanitized error, not a raised exception."""
+        result = await gopher_fetch("http://example.com/")
+        assert result["error"]["code"] == "INVALID_REQUEST"
 
     @pytest.mark.asyncio
     async def test_gopher_fetch_client_error(self):
-        """Test gopher fetch when client raises an error."""
+        """A client failure is returned as a sanitized FETCH_ERROR, not raised."""
         mock_client = AsyncMock()
         mock_client.fetch.side_effect = Exception("Connection failed")
 
@@ -153,10 +151,10 @@ class TestGopherFetch:
         mock_manager.get_gopher_client.return_value = mock_client
 
         with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
-            with pytest.raises(Exception) as exc_info:
-                await gopher_fetch("gopher://example.com/0/test.txt")
+            result = await gopher_fetch("gopher://example.com/0/test.txt")
 
-            assert "Connection failed" in str(exc_info.value)
+        assert result["error"]["code"] == "FETCH_ERROR"
+        assert "Connection failed" in result["error"]["message"]
 
 
 class TestGopherBatchFetch:
@@ -248,11 +246,27 @@ class TestGopherBatchFetch:
     @pytest.mark.asyncio
     async def test_gopher_batch_fetch_too_many_urls(self):
         """A batch larger than MAX_BATCH_URLS is rejected."""
-        from gopher_mcp.server import gopher_batch_fetch, MAX_BATCH_URLS
+        from gopher_mcp.server import MAX_BATCH_URLS, gopher_batch_fetch
 
         urls = [f"gopher://example.com/0/{i}" for i in range(MAX_BATCH_URLS + 1)]
-        with pytest.raises(ValueError, match="Too many URLs"):
-            await gopher_batch_fetch(urls)
+        results = await gopher_batch_fetch(urls)
+        assert len(results) == 1
+        assert results[0]["error"]["code"] == "INVALID_REQUEST"
+        assert "Too many URLs" in results[0]["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_gopher_batch_fetch_setup_failure_returns_error(self):
+        """A client-setup failure (e.g. corrupt store) is a sanitized error, not a raise."""
+        from gopher_mcp.server import gopher_batch_fetch
+
+        with patch(
+            "gopher_mcp.server.get_client_manager",
+            side_effect=Exception("corrupt store"),
+        ):
+            results = await gopher_batch_fetch(["gopher://example.com/1/"])
+
+        assert len(results) == 1
+        assert results[0]["error"]["code"] == "FETCH_ERROR"
 
 
 class TestGeminiBatchFetch:
@@ -341,11 +355,27 @@ class TestGeminiBatchFetch:
     @pytest.mark.asyncio
     async def test_gemini_batch_fetch_too_many_urls(self):
         """A batch larger than MAX_BATCH_URLS is rejected."""
-        from gopher_mcp.server import gemini_batch_fetch, MAX_BATCH_URLS
+        from gopher_mcp.server import MAX_BATCH_URLS, gemini_batch_fetch
 
         urls = [f"gemini://example.org/{i}" for i in range(MAX_BATCH_URLS + 1)]
-        with pytest.raises(ValueError, match="Too many URLs"):
-            await gemini_batch_fetch(urls)
+        results = await gemini_batch_fetch(urls)
+        assert len(results) == 1
+        assert results[0]["error"]["code"] == "INVALID_REQUEST"
+        assert "Too many URLs" in results[0]["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_gemini_batch_fetch_setup_failure_returns_error(self):
+        """A client-setup failure (e.g. corrupt store) is a sanitized error, not a raise."""
+        from gopher_mcp.server import gemini_batch_fetch
+
+        with patch(
+            "gopher_mcp.server.get_client_manager",
+            side_effect=Exception("corrupt store"),
+        ):
+            results = await gemini_batch_fetch(["gemini://example.org/"])
+
+        assert len(results) == 1
+        assert results[0]["error"]["code"] == "FETCH_ERROR"
 
 
 class TestCleanup:
@@ -563,9 +593,9 @@ class TestGeminiFetch:
 
     @pytest.mark.asyncio
     async def test_gemini_fetch_invalid_url(self):
-        """Test gemini fetch with invalid URL."""
-        with pytest.raises(Exception):  # Should raise validation error
-            await gemini_fetch("http://example.com/")
+        """An invalid URL returns a sanitized error, not a raised exception."""
+        result = await gemini_fetch("http://example.com/")
+        assert result["error"]["code"] == "INVALID_REQUEST"
 
     @pytest.mark.asyncio
     async def test_gemini_fetch_client_error(self):
@@ -577,7 +607,7 @@ class TestGeminiFetch:
         mock_manager.get_gemini_client.return_value = mock_client
 
         with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
-            with pytest.raises(Exception) as exc_info:
-                await gemini_fetch("gemini://example.org/")
+            result = await gemini_fetch("gemini://example.org/")
 
-            assert "Connection failed" in str(exc_info.value)
+        assert result["error"]["code"] == "FETCH_ERROR"
+        assert "Connection failed" in result["error"]["message"]

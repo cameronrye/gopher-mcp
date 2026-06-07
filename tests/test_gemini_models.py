@@ -4,22 +4,22 @@ import pytest
 from pydantic import ValidationError
 
 from gopher_mcp.models import (
-    GeminiStatusCode,
-    GeminiMimeType,
-    GeminiResponse,
-    GeminiSuccessResult,
-    GeminiInputResult,
-    GeminiRedirectResult,
-    GeminiErrorResult,
+    GeminiCacheEntry,
+    GeminiCertificateInfo,
     GeminiCertificateResult,
+    GeminiErrorResult,
     GeminiGemtextResult,
+    GeminiInputResult,
+    GeminiMimeType,
+    GeminiRedirectResult,
+    GeminiResponse,
+    GeminiStatusCode,
+    GeminiSuccessResult,
+    GemtextDocument,
+    GemtextLine,
     GemtextLineType,
     GemtextLink,
-    GemtextLine,
-    GemtextDocument,
-    GeminiCertificateInfo,
     TOFUEntry,
-    GeminiCacheEntry,
 )
 
 
@@ -39,18 +39,18 @@ class TestGeminiStatusCode:
 
     def test_status_code_ranges(self):
         """Test status code ranges."""
-        # Input expected (10-19)
+        # Input expected: status codes 10 through 19
         assert 10 <= GeminiStatusCode.INPUT < 20
         assert 10 <= GeminiStatusCode.SENSITIVE_INPUT < 20
 
-        # Success (20-29)
+        # Success: status codes 20 through 29
         assert 20 <= GeminiStatusCode.SUCCESS < 30
 
-        # Redirection (30-39)
+        # Redirection: status codes 30 through 39
         assert 30 <= GeminiStatusCode.TEMPORARY_REDIRECT < 40
         assert 30 <= GeminiStatusCode.PERMANENT_REDIRECT < 40
 
-        # Temporary failure (40-49)
+        # Temporary failure: status codes 40 through 49
         assert 40 <= GeminiStatusCode.TEMPORARY_FAILURE < 50
 
         # Permanent failure (50-59)
@@ -313,6 +313,20 @@ class TestGemtextModels:
         with pytest.raises(ValidationError, match="Link URL cannot be empty"):
             GemtextLink(url="   ")
 
+    def test_relative_links_are_internal(self):
+        """Scheme-less/relative links are internal, not external."""
+        assert GemtextLink(url="foo.gmi").is_external is False
+        assert GemtextLink(url="./page.gmi").is_external is False
+        assert GemtextLink(url="../up.gmi").is_external is False
+        assert GemtextLink(url="/about").is_external is False
+
+    def test_scheme_links_are_external(self):
+        """Links carrying a scheme (or protocol-relative) are external."""
+        assert GemtextLink(url="gemini://other.example/").is_external is True
+        assert GemtextLink(url="https://example.com/").is_external is True
+        assert GemtextLink(url="mailto:user@example.com").is_external is True
+        assert GemtextLink(url="//example.com/x").is_external is True
+
     def test_gemtext_line_text(self):
         """Test text line."""
         line = GemtextLine(type=GemtextLineType.TEXT, content="This is a text line.")
@@ -470,8 +484,8 @@ class TestGemtextDocumentProperties:
         from gopher_mcp.models import (
             GemtextHeading,
             GemtextList,
-            GemtextQuote,
             GemtextPreformat,
+            GemtextQuote,
         )
 
         lines = [
@@ -565,8 +579,8 @@ class TestGemtextDocumentProperties:
         from gopher_mcp.models import (
             GemtextHeading,
             GemtextList,
-            GemtextQuote,
             GemtextPreformat,
+            GemtextQuote,
         )
 
         lines = [

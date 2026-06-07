@@ -82,7 +82,7 @@ class TestSecurityValidation:
         )
 
         with pytest.raises(
-            ValueError, match="Host 'forbidden.com' not in allowed hosts list"
+            ValueError, match=r"Host 'forbidden.com' not in allowed hosts list"
         ):
             client._validate_security(parsed_url)
 
@@ -480,7 +480,7 @@ class TestResponseProcessing:
     def test_process_text_response_with_control_chars(self):
         """Control characters are stripped except \\n, \\r and \\t."""
         client = GopherClient()
-        raw = "Hello\x00\x01\x02World\r\nTest\t".encode("utf-8")
+        raw = b"Hello\x00\x01\x02World\r\nTest\t"
 
         result = client._process_text_response(raw)
 
@@ -546,6 +546,7 @@ class TestFetchContentMethod:
             None,
             max_bytes=client.max_response_size,
             timeout=client.timeout_seconds,
+            connect_addresses=["93.184.216.34"],
         )
 
     @pytest.mark.asyncio
@@ -596,6 +597,7 @@ class TestFetchContentMethod:
             "python",
             max_bytes=client.max_response_size,
             timeout=client.timeout_seconds,
+            connect_addresses=["93.184.216.34"],
         )
 
     @pytest.mark.asyncio
@@ -644,9 +646,11 @@ class TestFetchContentMethod:
         parsed_url = GopherURL(
             host="example.com", port=70, gopherType="1", selector="", search=None
         )
-        with patch(
-            "gopher_mcp.gopher_client.fetch_gopher",
-            new=AsyncMock(side_effect=GopherProtocolError("Connection failed")),
+        with (
+            patch(
+                "gopher_mcp.gopher_client.fetch_gopher",
+                new=AsyncMock(side_effect=GopherProtocolError("Connection failed")),
+            ),
+            pytest.raises(GopherProtocolError, match="Connection failed"),
         ):
-            with pytest.raises(GopherProtocolError, match="Connection failed"):
-                await client._fetch_content(parsed_url)
+            await client._fetch_content(parsed_url)

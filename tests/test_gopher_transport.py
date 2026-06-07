@@ -6,7 +6,6 @@ latin-1 decode that replaced the unmaintained pituophis dependency.
 """
 
 import asyncio
-from typing import List, Optional, Tuple
 
 import pytest
 
@@ -27,7 +26,7 @@ def test_build_request_with_search():
 
 
 def test_decode_utf8():
-    assert decode_gopher_text("héllo".encode("utf-8")) == ("héllo", "utf-8")
+    assert decode_gopher_text("héllo".encode()) == ("héllo", "utf-8")
 
 
 def test_decode_latin1_fallback():
@@ -39,8 +38,8 @@ def test_decode_latin1_fallback():
 
 async def _serve(
     payload: bytes,
-    record: Optional[List[bytes]] = None,
-) -> Tuple[asyncio.AbstractServer, int]:
+    record: list[bytes] | None = None,
+) -> tuple[asyncio.AbstractServer, int]:
     """Start a one-shot loopback Gopher server returning ``payload``."""
 
     async def handle(
@@ -60,7 +59,7 @@ async def _serve(
 
 @pytest.mark.asyncio
 async def test_fetch_gopher_success():
-    record: List[bytes] = []
+    record: list[bytes] = []
     server, port = await _serve(b"hello menu\r\n.\r\n", record)
     async with server:
         data = await fetch_gopher(
@@ -72,7 +71,7 @@ async def test_fetch_gopher_success():
 
 @pytest.mark.asyncio
 async def test_fetch_gopher_search_sends_tab_query():
-    record: List[bytes] = []
+    record: list[bytes] = []
     server, port = await _serve(b"ok\r\n", record)
     async with server:
         await fetch_gopher(
@@ -107,7 +106,7 @@ async def test_fetch_gopher_connection_refused():
     # A dead port surfaces as a GopherProtocolError. The exact message is
     # platform-dependent: POSIX reports the connection refused immediately,
     # while Windows can let the connect attempt run until it times out.
-    with pytest.raises(GopherProtocolError, match="Connection failed|timed out"):
+    with pytest.raises(GopherProtocolError, match=r"Connection failed|timed out"):
         await fetch_gopher("127.0.0.1", port, "/", None, max_bytes=1024, timeout=2)
 
 
@@ -121,7 +120,7 @@ async def test_fetch_gopher_timeout():
         try:
             await reader.readline()
             await asyncio.wait_for(stop.wait(), timeout=5)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             pass
         finally:
             writer.close()
@@ -134,3 +133,20 @@ async def test_fetch_gopher_timeout():
                 "127.0.0.1", port, "/", None, max_bytes=1024, timeout=0.2
             )
         stop.set()
+
+
+@pytest.mark.asyncio
+async def test_fetch_gopher_connects_to_pinned_address():
+    """The connection must target the pinned IP, not re-resolve the host."""
+    server, port = await _serve(b"pinned\r\n")
+    async with server:
+        data = await fetch_gopher(
+            "host.that.never.resolves.invalid",
+            port,
+            "/sel",
+            None,
+            max_bytes=1024,
+            timeout=5,
+            connect_addresses=["127.0.0.1"],
+        )
+    assert data == b"pinned\r\n"

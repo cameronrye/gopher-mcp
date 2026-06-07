@@ -50,8 +50,7 @@ dev = [
     "ruff>=0.14.5",
     "pre-commit>=3.5.0",
     "bandit>=1.7.5",
-    "safety>=2.3.0,<3.0.0",
-    "typer<0.22.0",
+    "pip-audit>=2.7.0",
     "twine>=4.0.0",
 ]
 docs = [
@@ -110,16 +109,23 @@ select = [
 ]
 ignore = [
     "E501",    # line too long, handled by formatter
+    # Opinionated pylint complexity/style rules we deliberately opt out of.
+    "PLR0911", # too many return statements
+    "PLR0912", # too many branches
     "PLR0913", # too many arguments
     "PLR0915", # too many statements
+    "PLR2004", # magic value in comparison (noisy in protocol/status-code code)
+    "PLC0415", # import outside top-level (deliberate lazy imports to break cycles)
+    "PLW0603", # use of global statement (intentional module-level singletons)
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*" = [
-    "PLR2004",
-    "S101",
-    "ARG",
-] # Allow magic values and assert in tests
+    "S101",    # assert is the point of a test
+    "ARG",     # unused fixture args are common
+    "SIM117",  # nested `with` is fine for stacked mock patches
+    "PTH123",  # tests open fixture files directly
+] # Allow assert/magic values and pragmatic patterns in tests
 
 [tool.ruff.lint.isort]
 known-first-party = ["gopher_mcp"]
@@ -240,10 +246,3 @@ skips = ["B101"]         # Skip assert_used test
 dev = ["taskipy>=1.14.1"]
 
 # Additional tool configurations can be added here as needed
-
-[tool.uv]
-# setuptools is pulled in only by the `safety` dev scanner. Pin it to 81.x:
-# it vendors a patched wheel (>=0.46.2, clears CVE-2026-24049) while still
-# shipping pkg_resources, which safety 2.3.4 imports (removed in setuptools 82).
-# The project itself builds with hatchling, so this does not affect packaging.
-constraint-dependencies = ["setuptools>=81,<82"]

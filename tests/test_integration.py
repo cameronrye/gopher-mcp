@@ -14,10 +14,10 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from gopher_mcp.server import (
-    gopher_fetch,
+    ClientManager,
     gemini_fetch,
     get_client_manager,
-    ClientManager,
+    gopher_fetch,
 )
 
 
@@ -365,16 +365,16 @@ class TestErrorPaths:
 
     @pytest.mark.asyncio
     async def test_invalid_url_formats(self) -> None:
-        """Test handling of invalid URL formats."""
+        """Invalid URLs are returned as sanitized errors, not raised."""
         clear_client_manager()
 
-        # Test invalid Gopher URL
-        with pytest.raises(Exception):
-            await gopher_fetch("http://example.com/")
+        # Invalid Gopher URL -> structured INVALID_REQUEST error
+        gopher_result = await gopher_fetch("http://example.com/")
+        assert gopher_result["error"]["code"] == "INVALID_REQUEST"
 
-        # Test invalid Gemini URL
-        with pytest.raises(Exception):
-            await gemini_fetch("http://example.com/")
+        # Invalid Gemini URL -> structured INVALID_REQUEST error
+        gemini_result = await gemini_fetch("http://example.com/")
+        assert gemini_result["error"]["code"] == "INVALID_REQUEST"
 
 
 @pytest.mark.integration
