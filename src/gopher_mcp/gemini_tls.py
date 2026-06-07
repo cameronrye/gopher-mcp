@@ -1,11 +1,12 @@
 """TLS client implementation for Gemini protocol with SNI support."""
 
 import asyncio
+import contextlib
 import socket
 import ssl
 import time
-from typing import Optional, Tuple, Dict, Any
 from dataclasses import dataclass
+from typing import Any
 
 import structlog
 
@@ -18,8 +19,8 @@ class TLSConfig:
 
     min_version: str = "TLSv1.2"
     verify_mode: ssl.VerifyMode = ssl.CERT_NONE
-    client_cert_path: Optional[str] = None
-    client_key_path: Optional[str] = None
+    client_cert_path: str | None = None
+    client_key_path: str | None = None
     timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
@@ -40,7 +41,7 @@ class TLSConfig:
 class TLSConnectionError(Exception):
     """Exception raised for TLS connection errors."""
 
-    def __init__(self, message: str, original_error: Optional[Exception] = None):
+    def __init__(self, message: str, original_error: Exception | None = None):
         super().__init__(message)
         self.original_error = original_error
 
@@ -48,14 +49,14 @@ class TLSConnectionError(Exception):
 class GeminiTLSClient:
     """Async TLS client for Gemini protocol with mandatory SNI support."""
 
-    def __init__(self, config: Optional[TLSConfig] = None):
+    def __init__(self, config: TLSConfig | None = None):
         """Initialize TLS client with configuration.
 
         Args:
             config: TLS configuration (uses defaults if None)
         """
         self.config = config or TLSConfig()
-        self._ssl_context: Optional[ssl.SSLContext] = None
+        self._ssl_context: ssl.SSLContext | None = None
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context with secure defaults.
@@ -81,7 +82,7 @@ class GeminiTLSClient:
             return context
 
         except Exception as e:
-            raise TLSConnectionError(f"Failed to create SSL context: {e}", e)
+            raise TLSConnectionError(f"Failed to create SSL context: {e}", e) from e
 
     def _create_base_ssl_context(self) -> ssl.SSLContext:
         """Create the SSL context used for Gemini (TOFU, not CA validation)."""
@@ -123,14 +124,24 @@ class GeminiTLSClient:
         return self._ssl_context
 
     async def connect(
-        self, host: str, port: int = 1965, timeout: Optional[float] = None
-    ) -> Tuple[ssl.SSLSocket, Dict[str, Any]]:
+        self,
+        host: str,
+        port: int = 1965,
+        timeout: float | None = None,
+        *,
+        connect_ip: str | None = None,
+    ) -> tuple[ssl.SSLSocket, dict[str, Any]]:
         """Establish TLS connection with SNI support.
 
         Args:
-            host: Hostname to connect to
+            host: Hostname (used for SNI and TOFU; never re-resolved here).
             port: Port number (default: 1965)
             timeout: Connection timeout (uses config default if None)
+            connect_ip: Pre-validated IP to connect to. When given, the socket
+                targets this IP (with a matching address family) instead of
+                re-resolving ``host`` -- this pins the connection to the address
+                the SSRF guard vetted, closing the DNS-rebinding window, while
+                ``host`` is still sent as SNI so virtual hosting/TOFU work.
 
         Returns:
             Tuple of (SSL socket, connection info)
@@ -141,6 +152,7 @@ class GeminiTLSClient:
         # Host-level SSRF/allowlist validation is performed by the caller
         # (GeminiClient) before reaching the transport.
         timeout = timeout or self.config.timeout_seconds
+        target_ip = connect_ip or host
 
         logger.info(
             "Establishing TLS connection",
@@ -152,21 +164,25 @@ class GeminiTLSClient:
 
         start_time = time.time()
 
+        sock: socket.socket | None = None
+        ssl_sock: ssl.SSLSocket | None = None
         try:
-            # Create socket
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Match the socket family to the pinned IP so IPv6 targets work too
+            # (the old AF_INET-only socket silently failed on AAAA-only hosts).
+            family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
+            sock = socket.socket(family, socket.SOCK_STREAM)
             sock.settimeout(timeout)
 
-            # Connect to host
+            # Connect to the pinned IP (no DNS re-resolution).
             await asyncio.get_event_loop().run_in_executor(
-                None, sock.connect, (host, port)
+                None, sock.connect, (target_ip, port)
             )
 
-            # Wrap socket with TLS, including SNI (mandatory for Gemini)
-            server_hostname = host
+            # Wrap socket with TLS, sending the hostname as SNI (mandatory for
+            # Gemini); wrap_socket takes ownership of sock on success.
             ssl_sock = self.ssl_context.wrap_socket(
                 sock,
-                server_hostname=server_hostname,  # This enables SNI
+                server_hostname=host,  # This enables SNI
                 do_handshake_on_connect=False,
             )
 
@@ -188,20 +204,33 @@ class GeminiTLSClient:
 
             return ssl_sock, connection_info
 
-        except socket.timeout:
-            raise TLSConnectionError(f"Connection timeout after {timeout} seconds")
-        except socket.gaierror as e:
-            raise TLSConnectionError(f"DNS resolution failed for {host}: {e}", e)
-        except ConnectionRefusedError:
-            raise TLSConnectionError(f"Connection refused by {host}:{port}")
-        except ssl.SSLError as e:
-            raise TLSConnectionError(f"TLS handshake failed: {e}", e)
         except Exception as e:
-            raise TLSConnectionError(f"Connection failed: {e}", e)
+            # Close whatever we opened so a failed connect/handshake can't leak
+            # a file descriptor (repeated failures would otherwise exhaust FDs).
+            if ssl_sock is not None:
+                with contextlib.suppress(OSError):
+                    ssl_sock.close()
+            elif sock is not None:
+                with contextlib.suppress(OSError):
+                    sock.close()
+
+            if isinstance(e, TimeoutError):
+                raise TLSConnectionError(
+                    f"Connection timeout after {timeout} seconds"
+                ) from e
+            if isinstance(e, socket.gaierror):
+                raise TLSConnectionError(
+                    f"DNS resolution failed for {host}: {e}", e
+                ) from e
+            if isinstance(e, ConnectionRefusedError):
+                raise TLSConnectionError(f"Connection refused by {host}:{port}") from e
+            if isinstance(e, ssl.SSLError):
+                raise TLSConnectionError(f"TLS handshake failed: {e}", e) from e
+            raise TLSConnectionError(f"Connection failed: {e}", e) from e
 
     def _get_connection_info(
         self, ssl_sock: ssl.SSLSocket, connection_time: float
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Extract connection information from SSL socket.
 
         Args:
@@ -218,7 +247,7 @@ class GeminiTLSClient:
             peer_cert_info = self._parse_peer_cert(peer_cert)
             cipher = ssl_sock.cipher()
 
-            info: Dict[str, Any] = {
+            info: dict[str, Any] = {
                 "connection_time": connection_time,
                 "tls_version": ssl_sock.version(),
                 "cipher": cipher[0] if cipher else None,
@@ -242,7 +271,7 @@ class GeminiTLSClient:
             return {"connection_time": connection_time, "error": str(e)}
 
     @staticmethod
-    def _parse_peer_cert(peer_cert_der: Optional[bytes]) -> Dict[str, Any]:
+    def _parse_peer_cert(peer_cert_der: bytes | None) -> dict[str, Any]:
         """Extract certificate details from DER bytes.
 
         Works under CERT_NONE (where ssl.getpeercert() returns an empty dict),
@@ -295,7 +324,7 @@ class GeminiTLSClient:
         try:
             await asyncio.get_event_loop().run_in_executor(None, ssl_sock.sendall, data)
         except Exception as e:
-            raise TLSConnectionError(f"Failed to send data: {e}", e)
+            raise TLSConnectionError(f"Failed to send data: {e}", e) from e
 
     async def receive_data(
         self,
@@ -354,14 +383,14 @@ class GeminiTLSClient:
         except TLSConnectionError:
             raise
         except Exception as e:
-            raise TLSConnectionError(f"Failed to receive data: {e}", e)
+            raise TLSConnectionError(f"Failed to receive data: {e}", e) from e
 
 
 def create_tls_client(
     min_version: str = "TLSv1.2",
     timeout_seconds: float = 30.0,
-    client_cert_path: Optional[str] = None,
-    client_key_path: Optional[str] = None,
+    client_cert_path: str | None = None,
+    client_key_path: str | None = None,
     verify_mode: ssl.VerifyMode = ssl.CERT_NONE,
 ) -> GeminiTLSClient:
     """Create a configured TLS client for Gemini connections.

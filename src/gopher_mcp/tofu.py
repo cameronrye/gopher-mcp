@@ -1,21 +1,23 @@
 """Trust-on-First-Use (TOFU) certificate validation for Gemini protocol."""
 
+import contextlib
 import hmac
 import json
-import os
 import time
-from typing import Dict, List, Optional, Tuple, Any
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import structlog
 
 from .models import TOFUEntry
+from .ssrf import normalize_host
 from .utils import atomic_write_json, get_home_directory
 
 logger = structlog.get_logger(__name__)
 
 
-def _parse_expiry(cert_info: Optional[Dict[str, Any]]) -> Optional[float]:
+def _parse_expiry(cert_info: dict[str, Any] | None) -> float | None:
     """Extract a certificate expiry (UNIX timestamp) from cert info.
 
     Prefers ``not_after_timestamp`` (parsed from the DER by gemini_tls, which
@@ -33,7 +35,7 @@ def _parse_expiry(cert_info: Optional[Dict[str, Any]]) -> Optional[float]:
         try:
             return (
                 datetime.strptime(cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                .replace(tzinfo=timezone.utc)
+                .replace(tzinfo=UTC)
                 .timestamp()
             )
         except ValueError:
@@ -47,7 +49,7 @@ def _parse_expiry(cert_info: Optional[Dict[str, Any]]) -> Optional[float]:
 class TOFUValidationError(Exception):
     """Exception raised for TOFU validation failures."""
 
-    def __init__(self, message: str, entry: Optional[TOFUEntry] = None):
+    def __init__(self, message: str, entry: TOFUEntry | None = None):
         super().__init__(message)
         self.entry = entry
 
@@ -55,7 +57,7 @@ class TOFUValidationError(Exception):
 class TOFUManager:
     """Trust-on-First-Use certificate validation manager."""
 
-    def __init__(self, storage_path: Optional[str] = None):
+    def __init__(self, storage_path: str | None = None):
         """Initialize TOFU manager.
 
         Args:
@@ -69,19 +71,23 @@ class TOFUManager:
             gemini_dir.mkdir(exist_ok=True)
             # The trust store lives here; keep it owner-only (mkdir mode is
             # subject to umask).
-            try:
-                os.chmod(gemini_dir, 0o700)
-            except OSError:  # pragma: no cover - non-POSIX or restricted FS
-                pass
+            with contextlib.suppress(OSError):  # non-POSIX or restricted FS
+                gemini_dir.chmod(0o700)
             storage_path = str(gemini_dir / "tofu.json")
 
         self.storage_path = storage_path
-        self._entries: Dict[str, TOFUEntry] = {}
+        self._entries: dict[str, TOFUEntry] = {}
         self._load_entries()
 
     def _get_key(self, host: str, port: int) -> str:
-        """Get storage key for host:port combination."""
-        return f"{host}:{port}"
+        """Get storage key for host:port combination.
+
+        The host is normalized (lowercased, trailing dot / IPv6 brackets
+        stripped) so ``Example.com``, ``example.com`` and ``example.com.`` map
+        to a single pin -- otherwise a casing/trailing-dot variant would get a
+        fresh trust-on-first-use and silently bypass the established pin.
+        """
+        return f"{normalize_host(host)}:{port}"
 
     def _load_entries(self) -> None:
         """Load TOFU entries from storage.
@@ -91,12 +97,12 @@ class TOFUManager:
         re-arm blind trust-on-first-use for every previously pinned host. A
         missing file is the legitimate first-run case and starts empty.
         """
-        if not os.path.exists(self.storage_path):
+        if not Path(self.storage_path).exists():
             logger.info("No existing TOFU storage found, starting fresh")
             return
 
         try:
-            with open(self.storage_path, "r", encoding="utf-8") as f:
+            with Path(self.storage_path).open(encoding="utf-8") as f:
                 data = json.load(f)
             entries = {key: TOFUEntry(**entry_data) for key, entry_data in data.items()}
         except Exception as e:
@@ -134,8 +140,8 @@ class TOFUManager:
         host: str,
         port: int,
         cert_fingerprint: str,
-        cert_info: Optional[Dict[str, Any]] = None,
-    ) -> Tuple[bool, Optional[str]]:
+        cert_info: dict[str, Any] | None = None,
+    ) -> tuple[bool, str | None]:
         """Validate certificate using TOFU.
 
         Args:
@@ -231,7 +237,7 @@ class TOFUManager:
         host: str,
         port: int,
         cert_fingerprint: str,
-        cert_info: Optional[Dict[str, Any]] = None,
+        cert_info: dict[str, Any] | None = None,
         force: bool = False,
     ) -> None:
         """Update stored certificate for a host.
@@ -309,7 +315,7 @@ class TOFUManager:
 
         return False
 
-    def list_certificates(self) -> List[TOFUEntry]:
+    def list_certificates(self) -> list[TOFUEntry]:
         """List all stored certificates.
 
         Returns:

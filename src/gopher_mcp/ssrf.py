@@ -15,7 +15,7 @@ Gopher server on localhost) can opt in per protocol with
 import asyncio
 import ipaddress
 import socket
-from typing import Iterable, List, Optional
+from collections.abc import Iterable
 
 import structlog
 
@@ -24,6 +24,34 @@ logger = structlog.get_logger(__name__)
 
 class SSRFError(ValueError):
     """Raised when a target host/address is blocked by the SSRF policy."""
+
+
+# Ports for non-Gopher/Gemini services an SSRF could otherwise be steered to
+# poke. Blocked as defense-in-depth -- this complements (does not replace) the
+# internal-address checks. Gopher (70) and Gemini (1965) are deliberately absent.
+DANGEROUS_PORTS = frozenset(
+    {
+        22,  # SSH
+        23,  # Telnet
+        25,  # SMTP
+        110,  # POP3
+        143,  # IMAP
+        445,  # SMB
+        465,  # SMTPS
+        587,  # SMTP submission
+        993,  # IMAPS
+        995,  # POP3S
+        1433,  # MSSQL
+        3306,  # MySQL
+        3389,  # RDP
+        5432,  # PostgreSQL
+        5900,  # VNC
+        6379,  # Redis
+        9200,  # Elasticsearch
+        11211,  # Memcached
+        27017,  # MongoDB
+    }
+)
 
 
 def normalize_host(host: str) -> str:
@@ -41,7 +69,7 @@ def normalize_host(host: str) -> str:
     return h.lower()
 
 
-def classify_blocked_ip(value: str) -> Optional[str]:
+def classify_blocked_ip(value: str) -> str | None:
     """Return a reason string if ``value`` is a blocked IP literal, else ``None``.
 
     Returns ``None`` when ``value`` is not an IP literal at all (i.e. it is a
@@ -73,7 +101,7 @@ def classify_blocked_ip(value: str) -> Optional[str]:
     return None
 
 
-async def resolve_host(host: str, port: int) -> List[str]:
+async def resolve_host(host: str, port: int) -> list[str]:
     """Resolve ``host`` to a list of IP address strings.
 
     Isolated in its own function so tests can stub DNS deterministically.
@@ -88,9 +116,14 @@ async def validate_target(
     port: int,
     *,
     allow_local: bool = False,
-    allowed_hosts: Optional[Iterable[str]] = None,
-) -> None:
-    """Validate a connection target against the SSRF policy.
+    allowed_hosts: Iterable[str] | None = None,
+) -> list[str]:
+    """Validate a connection target and return the vetted IP(s) to connect to.
+
+    The returned addresses MUST be the ones the caller actually connects to.
+    Resolving here and then connecting to a re-resolved hostname would reopen a
+    DNS-rebinding hole (the validated answer and the connected answer could
+    differ), so callers pin the connection to these IPs.
 
     Args:
         host: Target hostname or IP literal.
@@ -99,20 +132,26 @@ async def validate_target(
         allowed_hosts: Optional iterable of permitted hostnames; when provided,
             ``host`` must normalize to one of them.
 
+    Returns:
+        The validated IP address strings to connect to, in resolution order.
+
     Raises:
         SSRFError: If the host is not allow-listed, cannot be resolved, or
             (unless ``allow_local``) resolves to an internal address.
     """
     norm = normalize_host(host)
 
-    if allowed_hosts is not None:
-        if norm not in {normalize_host(h) for h in allowed_hosts}:
-            raise SSRFError(f"Host not allowed: {host}")
+    if allowed_hosts is not None and norm not in {
+        normalize_host(h) for h in allowed_hosts
+    }:
+        raise SSRFError(f"Host not allowed: {host}")
 
-    if allow_local:
-        return
+    # Defense-in-depth: refuse well-known non-protocol service ports regardless
+    # of how the host resolves.
+    if port in DANGEROUS_PORTS:
+        raise SSRFError(f"Blocked dangerous port: {port}")
 
-    # IP-literal host: classify directly, no DNS needed.
+    # IP-literal host: no DNS needed; the literal IS the connect target.
     try:
         ipaddress.ip_address(norm)
         is_literal = True
@@ -120,15 +159,14 @@ async def validate_target(
         is_literal = False
 
     if is_literal:
-        reason = classify_blocked_ip(norm)
-        if reason is not None:
-            raise SSRFError(f"Blocked {reason} address: {host}")
-        return
+        if not allow_local:
+            reason = classify_blocked_ip(norm)
+            if reason is not None:
+                raise SSRFError(f"Blocked {reason} address: {host}")
+        return [norm]
 
-    # Hostname: resolve and validate every returned address (defeats DNS
-    # rebinding to an internal IP for at least the connection we validate).
-    # Resolve the normalized host so the literal check and the resolution use
-    # the same value.
+    # Hostname: resolve once and return the vetted addresses so the caller
+    # connects to exactly what we validated (defeating DNS rebinding).
     try:
         addresses = await resolve_host(norm, port)
     except OSError as e:  # socket.gaierror is a subclass of OSError
@@ -137,7 +175,10 @@ async def validate_target(
     if not addresses:
         raise SSRFError(f"Could not resolve host: {host}")
 
-    for addr in addresses:
-        reason = classify_blocked_ip(addr)
-        if reason is not None:
-            raise SSRFError(f"Blocked {reason} address for {host}: {addr}")
+    if not allow_local:
+        for addr in addresses:
+            reason = classify_blocked_ip(addr)
+            if reason is not None:
+                raise SSRFError(f"Blocked {reason} address for {host}: {addr}")
+
+    return addresses

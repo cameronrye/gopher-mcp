@@ -1,14 +1,15 @@
 """Tests for Gemini TLS client implementation."""
 
-import ssl
 import socket
-from unittest.mock import Mock, patch, AsyncMock
+import ssl
+from unittest.mock import AsyncMock, Mock, patch
+
 import pytest
 
 from gopher_mcp.gemini_tls import (
+    GeminiTLSClient,
     TLSConfig,
     TLSConnectionError,
-    GeminiTLSClient,
     create_tls_client,
 )
 
@@ -193,7 +194,7 @@ class TestGeminiTLSClient:
     async def test_connect_timeout(self, mock_socket):
         """Test connection timeout."""
         mock_sock = Mock()
-        mock_sock.connect.side_effect = socket.timeout()
+        mock_sock.connect.side_effect = TimeoutError()
         mock_socket.return_value = mock_sock
 
         client = GeminiTLSClient()
@@ -445,8 +446,8 @@ class TestGeminiTLSAdditionalCoverage:
         )
         client = GeminiTLSClient(config)
 
-        # This should handle the file not found error gracefully
-        with pytest.raises(Exception):
+        # A missing cert/key file is wrapped as a TLSConnectionError.
+        with pytest.raises(TLSConnectionError):
             client._create_ssl_context()
 
     @pytest.mark.asyncio
@@ -483,3 +484,21 @@ class TestGeminiTLSAdditionalCoverage:
         # Test with very high timeout
         config = TLSConfig(timeout_seconds=3600.0)
         assert config.timeout_seconds == 3600.0
+
+
+class TestConnectPinnedIp:
+    """connect() must use the pinned IP, never re-resolve the hostname."""
+
+    @pytest.mark.asyncio
+    async def test_connect_uses_pinned_ip_not_hostname(self):
+        client = GeminiTLSClient(TLSConfig())
+        # Unresolvable hostname, but pinned to loopback:closed-port. A refusal
+        # (not a DNS error) proves the pinned IP was used without re-resolving.
+        with pytest.raises(TLSConnectionError) as exc_info:
+            await client.connect(
+                "host.that.never.resolves.invalid",
+                1,
+                connect_ip="127.0.0.1",
+                timeout=2,
+            )
+        assert "DNS" not in str(exc_info.value)

@@ -1,6 +1,7 @@
 """Tests for client_certs module."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -115,18 +116,21 @@ class TestClientCertificateManager:
             assert cert_info.fingerprint == "sha256:abc123"
             assert cert_info.host == "example.com"
 
-    def test_load_registry_invalid_json(self):
-        """Test loading registry with invalid JSON."""
+    def test_load_registry_invalid_json_fails_closed(self):
+        """A corrupt registry must fail CLOSED, not silently reset to empty.
+
+        Silently emptying would orphan existing key files and drop the client
+        identities the user relies on (and a later save would overwrite the
+        registry). Mirrors the TOFU store's fail-closed behavior.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             # Create an invalid registry file
             registry_path = Path(temp_dir) / "registry.json"
             with open(registry_path, "w") as f:
                 f.write("invalid json")
 
-            manager = ClientCertificateManager(temp_dir)
-
-            # Should fall back to empty certificates dict
-            assert manager._certificates == {}
+            with pytest.raises(ClientCertificateError, match="corrupt"):
+                ClientCertificateManager(temp_dir)
 
     def test_save_registry(self):
         """Test saving registry to file."""
@@ -153,7 +157,7 @@ class TestClientCertificateManager:
             registry_path = Path(temp_dir) / "registry.json"
             assert registry_path.exists()
 
-            with open(registry_path, "r") as f:
+            with open(registry_path) as f:
                 data = json.load(f)
 
             assert "example.com:1965/" in data
@@ -165,12 +169,14 @@ class TestClientCertificateManager:
             manager = ClientCertificateManager(temp_dir)
 
             # Mock atomic_write_json to raise an error
-            with patch(
-                "gopher_mcp.client_certs.atomic_write_json",
-                side_effect=OSError("Permission denied"),
+            with (
+                patch(
+                    "gopher_mcp.client_certs.atomic_write_json",
+                    side_effect=OSError("Permission denied"),
+                ),
+                pytest.raises(OSError),
             ):
-                with pytest.raises(Exception):
-                    manager._save_registry()
+                manager._save_registry()
 
     def test_generate_certificate_invalid_host(self):
         """Test certificate generation with invalid host."""
@@ -351,7 +357,7 @@ class TestClientCertificateManager:
             manager = ClientCertificateManager(temp_dir)
 
             # Generate certificates for different paths
-            cert_path1, key_path1 = manager.generate_certificate(
+            _cert_path1, _key_path1 = manager.generate_certificate(
                 "example.com", 1965, "/"
             )
             cert_path2, key_path2 = manager.generate_certificate(
@@ -513,3 +519,23 @@ class TestClientCertificateManager:
 
                 assert count == 1
                 mock_remove.assert_called_once_with("invalid.com", 1965, "/")
+
+
+class TestCertificateFilePermissions:
+    """The private key and storage dir must be owner-only on POSIX."""
+
+    @pytest.mark.skipif(
+        os.name == "nt", reason="POSIX file-mode semantics not applicable on Windows"
+    )
+    def test_generated_key_and_dir_are_owner_only(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+            _cert_path, key_path = manager.generate_certificate(
+                "example.com", port=1965, path="/", validity_days=30
+            )
+
+            key_mode = Path(key_path).stat().st_mode & 0o777
+            assert key_mode == 0o600, f"private key mode is {oct(key_mode)}, want 0o600"
+
+            dir_mode = manager.storage_path.stat().st_mode & 0o777
+            assert dir_mode == 0o700, f"storage dir mode is {oct(dir_mode)}, want 0o700"

@@ -3,25 +3,24 @@
 import asyncio
 import time
 from collections import OrderedDict
-from typing import List, Optional, Tuple
 
 import structlog
 
-from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnectionError
-from .tofu import TOFUManager, TOFUValidationError
 from .client_certs import ClientCertificateManager
-from .ssrf import SSRFError, normalize_host, validate_target
+from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnectionError
 from .models import (
+    GeminiCacheEntry,
+    GeminiCertificateInfo,
+    GeminiErrorResult,
     GeminiFetchResponse,
     GeminiURL,
-    GeminiErrorResult,
-    GeminiCacheEntry,
     TOFUEntry,
-    GeminiCertificateInfo,
 )
+from .ssrf import SSRFError, normalize_host, validate_target
+from .tofu import TOFUManager, TOFUValidationError
 from .utils import (
-    parse_gemini_url,
     parse_gemini_response,
+    parse_gemini_url,
     process_gemini_response,
 )
 
@@ -45,13 +44,13 @@ class GeminiClient:
         cache_enabled: bool = True,
         cache_ttl_seconds: int = DEFAULT_CACHE_TTL_SECONDS,
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
-        allowed_hosts: Optional[List[str]] = None,
+        allowed_hosts: list[str] | None = None,
         allow_local_hosts: bool = False,
-        tls_config: Optional[TLSConfig] = None,
+        tls_config: TLSConfig | None = None,
         tofu_enabled: bool = True,
-        tofu_storage_path: Optional[str] = None,
+        tofu_storage_path: str | None = None,
         client_certs_enabled: bool = True,
-        client_certs_storage_path: Optional[str] = None,
+        client_certs_storage_path: str | None = None,
     ) -> None:
         """Initialize the Gemini client.
 
@@ -84,12 +83,12 @@ class GeminiClient:
         self.tls_client = GeminiTLSClient(tls_config)
 
         # Initialize TOFU manager
-        self.tofu_manager: Optional[TOFUManager] = None
+        self.tofu_manager: TOFUManager | None = None
         if self.tofu_enabled:
             self.tofu_manager = TOFUManager(tofu_storage_path)
 
         # Initialize client certificate manager
-        self.client_cert_manager: Optional[ClientCertificateManager] = None
+        self.client_cert_manager: ClientCertificateManager | None = None
         if self.client_certs_enabled:
             self.client_cert_manager = ClientCertificateManager(
                 client_certs_storage_path
@@ -138,7 +137,7 @@ class GeminiClient:
             if self.cache_enabled:
                 cached_response = self._get_cached_response(url)
                 if cached_response:
-                    logger.info(
+                    logger.debug(
                         "Cache hit",
                         url=url,
                         cached=True,
@@ -176,7 +175,9 @@ class GeminiClient:
             ):
                 self._cache_response(url, response)
 
-            logger.info(
+            # Full URL/path/query are request metadata; keep them at DEBUG so
+            # default INFO logs don't record every browsed resource/query.
+            logger.debug(
                 "Gemini fetch successful",
                 url=url,
                 host=parsed_url.host,
@@ -240,11 +241,17 @@ class GeminiClient:
         ssl_sock = None
         try:
             # SSRF guard: reject internal/loopback/link-local targets before
-            # opening the TLS connection.
-            await validate_target(
+            # opening the TLS connection, and pin the connection to a validated
+            # IP so the TLS layer can't re-resolve to a rebinding answer.
+            connect_addresses = await validate_target(
                 parsed_url.host,
                 parsed_url.port,
                 allow_local=self.allow_local_hosts,
+            )
+            # Prefer an IPv4 address (the historical behavior was AF_INET-only),
+            # but fall back to the first address so IPv6-only hosts still work.
+            connect_ip = next(
+                (a for a in connect_addresses if ":" not in a), connect_addresses[0]
             )
 
             # Check for client certificate
@@ -280,12 +287,18 @@ class GeminiClient:
                 # Create temporary TLS client with client certificate
                 temp_tls_client = GeminiTLSClient(tls_config)
                 ssl_sock, connection_info = await temp_tls_client.connect(
-                    parsed_url.host, parsed_url.port, timeout=self.timeout_seconds
+                    parsed_url.host,
+                    parsed_url.port,
+                    timeout=self.timeout_seconds,
+                    connect_ip=connect_ip,
                 )
             else:
                 # Use default TLS client
                 ssl_sock, connection_info = await self.tls_client.connect(
-                    parsed_url.host, parsed_url.port, timeout=self.timeout_seconds
+                    parsed_url.host,
+                    parsed_url.port,
+                    timeout=self.timeout_seconds,
+                    connect_ip=connect_ip,
                 )
 
             # Validate certificate using TOFU if enabled (fail CLOSED).
@@ -309,6 +322,15 @@ class GeminiClient:
                     cert_fingerprint,
                     connection_info.get("peer_cert_info"),
                 )
+                if not is_valid:
+                    # Defense-in-depth: a non-raising False result must still
+                    # reject (fail CLOSED), not merely warn -- so this gate is
+                    # robust regardless of how the validator signals failure.
+                    raise TOFUValidationError(
+                        warning
+                        or f"TOFU validation failed for "
+                        f"{parsed_url.host}:{parsed_url.port}"
+                    )
                 if warning:
                     tofu_warning = warning
                     logger.warning(
@@ -326,7 +348,7 @@ class GeminiClient:
             if parsed_url.query:
                 request_url += f"?{parsed_url.query}"
 
-            request_data = f"{request_url}\r\n".encode("utf-8")
+            request_data = f"{request_url}\r\n".encode()
 
             # Send request
             await self.tls_client.send_data(ssl_sock, request_data)
@@ -368,7 +390,7 @@ class GeminiClient:
             if ssl_sock:
                 await self.tls_client.close(ssl_sock)
 
-    def _get_cached_response(self, url: str) -> Optional[GeminiFetchResponse]:
+    def _get_cached_response(self, url: str) -> GeminiFetchResponse | None:
         """Get cached response if available and not expired.
 
         Args:
@@ -460,7 +482,7 @@ class GeminiClient:
 
         return self.tofu_manager.remove_certificate(host, port)
 
-    def list_tofu_certificates(self) -> List[TOFUEntry]:
+    def list_tofu_certificates(self) -> list[TOFUEntry]:
         """List all TOFU certificates.
 
         Returns:
@@ -479,9 +501,9 @@ class GeminiClient:
         host: str,
         port: int = 1965,
         path: str = "/",
-        common_name: Optional[str] = None,
+        common_name: str | None = None,
         validity_days: int = 365,
-    ) -> Tuple[str, str]:
+    ) -> tuple[str, str]:
         """Generate a new client certificate for a scope.
 
         Args:
@@ -506,7 +528,7 @@ class GeminiClient:
 
     def get_client_certificate_for_scope(
         self, host: str, port: int = 1965, path: str = "/"
-    ) -> Optional[Tuple[str, str]]:
+    ) -> tuple[str, str] | None:
         """Get client certificate paths for a scope.
 
         Args:
@@ -525,7 +547,7 @@ class GeminiClient:
 
         return self.client_cert_manager.get_certificate_for_scope(host, port, path)
 
-    def list_client_certificates(self) -> List[GeminiCertificateInfo]:
+    def list_client_certificates(self) -> list[GeminiCertificateInfo]:
         """List all client certificates.
 
         Returns:

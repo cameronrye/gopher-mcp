@@ -7,11 +7,11 @@ from unittest.mock import patch
 
 import pytest
 
-from gopher_mcp.tofu import (
-    TOFUValidationError,
-    TOFUManager,
-)
 from gopher_mcp.models import TOFUEntry
+from gopher_mcp.tofu import (
+    TOFUManager,
+    TOFUValidationError,
+)
 
 
 class TestTOFUValidationError:
@@ -141,7 +141,7 @@ class TestTOFUManager:
             # Verify file was created
             assert Path(storage_path).exists()
 
-            with open(storage_path, "r") as f:
+            with open(storage_path) as f:
                 data = json.load(f)
 
             assert "example.com:1965" in data
@@ -153,12 +153,14 @@ class TestTOFUManager:
             manager = TOFUManager("/invalid/path/tofu.json")
 
             # Mock atomic_write_json to raise an error
-            with patch(
-                "gopher_mcp.tofu.atomic_write_json",
-                side_effect=OSError("Permission denied"),
+            with (
+                patch(
+                    "gopher_mcp.tofu.atomic_write_json",
+                    side_effect=OSError("Permission denied"),
+                ),
+                pytest.raises(OSError),
             ):
-                with pytest.raises(Exception):
-                    manager._save_entries()
+                manager._save_entries()
 
     def test_validate_certificate_first_time(self):
         """Test validating certificate for first time (TOFU)."""
@@ -211,7 +213,7 @@ class TestTOFUManager:
             cert_info = {"notAfter": "invalid date format"}
 
             with patch("time.time", return_value=1234567890):
-                is_valid, warning = manager.validate_certificate(
+                is_valid, _warning = manager.validate_certificate(
                     "example.com", 1965, "abc123", cert_info
                 )
 
@@ -228,7 +230,7 @@ class TestTOFUManager:
             manager = TOFUManager(storage_path)
 
             with patch("time.time", return_value=1234567890):
-                is_valid, warning = manager.validate_certificate(
+                is_valid, _warning = manager.validate_certificate(
                     "example.com", 1965, "sha256:abc123"
                 )
 
@@ -564,3 +566,18 @@ class TestTOFUManager:
 
             with pytest.raises(TOFUValidationError, match="corrupt"):
                 TOFUManager(storage_path)
+
+
+class TestTOFUHostKeyNormalization:
+    """TOFU pins must key on a normalized host (case / trailing dot)."""
+
+    def test_host_variants_share_one_pin(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = str(Path(temp_dir) / "tofu.json")
+            mgr = TOFUManager(path)
+            # First use under a mixed-case host.
+            mgr.validate_certificate("Example.COM", 1965, "sha256:" + "a" * 64)
+            # A case/trailing-dot variant with a DIFFERENT fingerprint must be
+            # detected as a mismatch (same pin), not a fresh first-use.
+            with pytest.raises(TOFUValidationError):
+                mgr.validate_certificate("example.com.", 1965, "sha256:" + "b" * 64)

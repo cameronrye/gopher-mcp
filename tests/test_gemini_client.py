@@ -8,12 +8,12 @@ import pytest
 from gopher_mcp.gemini_client import GeminiClient
 from gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
 from gopher_mcp.models import (
+    GeminiErrorResult,
+    GeminiMimeType,
+    GeminiRedirectResult,
     GeminiResponse,
     GeminiStatusCode,
     GeminiSuccessResult,
-    GeminiErrorResult,
-    GeminiRedirectResult,
-    GeminiMimeType,
 )
 from gopher_mcp.tofu import TOFUValidationError
 
@@ -338,7 +338,9 @@ class TestGeminiClientFetchContent:
             assert result == mock_result
 
             # Verify TLS operations
-            mock_connect.assert_called_once_with("example.com", 1965, timeout=30.0)
+            mock_connect.assert_called_once_with(
+                "example.com", 1965, timeout=30.0, connect_ip="93.184.216.34"
+            )
             mock_send.assert_called_once()
             mock_receive.assert_called_once_with(mock_ssl_sock, 1024 * 1024)
             mock_close.assert_called_once_with(mock_ssl_sock)

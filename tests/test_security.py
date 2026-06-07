@@ -1,7 +1,8 @@
 """Security and penetration tests for Gopher and Gemini protocols."""
 
-import pytest
 from unittest.mock import Mock, patch
+
+import pytest
 
 from gopher_mcp.gemini_client import GeminiClient
 from gopher_mcp.models import GeminiErrorResult
@@ -23,7 +24,7 @@ class TestInputSanitization:
     )
     def test_malicious_url_rejection(self, malicious_url: str):
         """Test that malicious URLs are rejected."""
-        from gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
+        from gopher_mcp.models import GeminiFetchRequest, GopherFetchRequest
 
         # These should all be rejected due to wrong scheme
         with pytest.raises(ValueError):
@@ -34,7 +35,7 @@ class TestInputSanitization:
 
     def test_suspicious_port_detection(self):
         """Test detection of suspicious ports (this would be enforced by security policy)."""
-        from gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
+        from gopher_mcp.models import GeminiFetchRequest, GopherFetchRequest
 
         # These URLs are technically valid but would be blocked by security policy
         suspicious_urls = [
@@ -86,7 +87,7 @@ class TestInputSanitization:
 
     def test_url_length_limits(self):
         """Test URL length validation."""
-        from gopher_mcp.models import GopherFetchRequest, GeminiFetchRequest
+        from gopher_mcp.models import GeminiFetchRequest, GopherFetchRequest
 
         # Test extremely long URLs - only Gemini has length limits (1024 bytes)
         long_path = "A" * 2000
@@ -107,24 +108,30 @@ class TestResourceExhaustion:
 
     @pytest.mark.asyncio
     async def test_response_size_limits(self):
-        """Test that oversized responses are rejected."""
-        client = GeminiClient(max_response_size=1024, tofu_enabled=False)  # 1KB limit
+        """Oversized responses are rejected by the REAL receive_data cap.
 
-        # Mock a large response
-        large_response = b"A" * 2048  # 2KB response
+        The 1KB cap lives inside receive_data, so we drive the real method and
+        mock only the raw socket recv -- the previous version mocked
+        receive_data itself, which bypassed the very logic under test.
+        """
+        client = GeminiClient(max_response_size=1024, tofu_enabled=False)
 
-        with patch.object(
-            client.tls_client, "receive_data", return_value=large_response
+        mock_sock = Mock()
+        # Fill exactly to the cap, then a probe byte proves more data remained.
+        mock_sock.recv.side_effect = [b"A" * 1024, b"A"]
+        mock_sock.gettimeout.return_value = 5.0
+
+        with (
+            patch.object(client.tls_client, "connect", return_value=(mock_sock, {})),
+            patch.object(client.tls_client, "send_data"),
+            patch.object(client.tls_client, "close"),
         ):
-            with patch.object(client.tls_client, "connect", return_value=(Mock(), {})):
-                with patch.object(client.tls_client, "send_data"):
-                    with patch.object(client.tls_client, "close"):
-                        result = await client.fetch("gemini://example.com/")
+            result = await client.fetch("gemini://example.com/")
 
-                        # Should return error for oversized response
-                        assert isinstance(result, GeminiErrorResult)
-                        # Check for response parsing error instead of size limit error
-                        assert "response" in result.error["message"].lower()
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "TLS_ERROR"
+        # Proves the real loop ran: an initial read plus the over-limit probe.
+        assert mock_sock.recv.call_count >= 2
 
     @pytest.mark.asyncio
     async def test_timeout_protection(self):
@@ -155,7 +162,7 @@ class TestResourceExhaustion:
         client = GeminiClient(max_cache_entries=10)
 
         # Fill cache beyond limit
-        from gopher_mcp.models import GeminiSuccessResult, GeminiMimeType
+        from gopher_mcp.models import GeminiMimeType, GeminiSuccessResult
 
         for i in range(20):
             url = f"gemini://example{i}.com/"
@@ -253,11 +260,24 @@ class TestErrorHandling:
             assert "Internal error" not in error_msg
             assert result.error["code"] == "FETCH_ERROR"
 
-    def test_stack_trace_sanitization(self):
-        """Test that stack traces are sanitized in production."""
-        # This would test that detailed stack traces are not exposed
-        # in production error responses
-        pass
+    @pytest.mark.asyncio
+    async def test_stack_trace_sanitization(self):
+        """Error responses must not expose exception types or internal text."""
+        client = GeminiClient()
+
+        with patch.object(
+            client.tls_client,
+            "connect",
+            side_effect=RuntimeError("boom in module foo at line 42"),
+        ):
+            result = await client.fetch("gemini://example.com/")
+
+        assert isinstance(result, GeminiErrorResult)
+        msg = result.error["message"]
+        assert "RuntimeError" not in msg
+        assert "boom" not in msg
+        assert "Traceback" not in msg
+        assert result.error["code"] == "FETCH_ERROR"
 
 
 @pytest.mark.slow
@@ -287,3 +307,61 @@ class TestSecurityIntegration:
 
                         # Should succeed for allowed host
                         assert not isinstance(result, GeminiErrorResult)
+
+
+@pytest.mark.asyncio
+class TestSSRFEndToEnd:
+    """The SSRF guard must block internal targets end-to-end through the
+    public tool surface, returning a sanitized BLOCKED error code.
+
+    The autouse ``_stub_dns`` fixture resolves ``localhost`` -> 127.0.0.1 and
+    ``blocked.example`` -> 169.254.169.254 (cloud metadata), both blocked.
+    """
+
+    async def test_gopher_fetch_blocks_loopback(self):
+        from gopher_mcp.server import gopher_fetch
+
+        result = await gopher_fetch("gopher://localhost/1/")
+        assert result["error"]["code"] == "BLOCKED"
+
+    async def test_gemini_fetch_blocks_cloud_metadata(self):
+        from gopher_mcp.server import gemini_fetch
+
+        result = await gemini_fetch("gemini://blocked.example/")
+        assert result["error"]["code"] == "BLOCKED"
+
+    async def test_allow_local_hosts_permits_loopback(self):
+        # With the opt-in, the SSRF guard no longer blocks; the request fails
+        # later at connect time instead (proving the block was lifted).
+        from gopher_mcp.gopher_client import GopherClient
+
+        client = GopherClient(allow_local_hosts=True, timeout_seconds=1)
+        result = await client.fetch("gopher://localhost/1/")
+        assert result.error["code"] != "BLOCKED"
+
+
+@pytest.mark.asyncio
+class TestTOFUFailClosed:
+    """A non-raising False from TOFU validation must still reject (fail closed)."""
+
+    async def test_invalid_tofu_result_is_rejected(self):
+        client = GeminiClient(tofu_enabled=True)
+        mock_sock = Mock()
+        conn_info = {"cert_fingerprint": "abc123"}
+
+        with (
+            patch.object(
+                client.tls_client, "connect", return_value=(mock_sock, conn_info)
+            ),
+            patch.object(client.tls_client, "send_data"),
+            patch.object(client.tls_client, "close"),
+            patch.object(
+                client.tofu_manager,
+                "validate_certificate",
+                return_value=(False, "fabricated soft failure"),
+            ),
+        ):
+            result = await client.fetch("gemini://example.com/")
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CERTIFICATE_CHANGED"
