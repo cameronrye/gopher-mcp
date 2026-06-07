@@ -35,7 +35,7 @@ Use this checklist to ensure consistent, high-quality releases of the Gopher & G
 
 - [ ] **Security**
   - [ ] Security scan passes (`uv run bandit -r src/`)
-  - [ ] Dependency vulnerability scan passes (`uv run safety check`)
+  - [ ] Dependency vulnerability scan passes (`uv run pip-audit`)
   - [ ] No known security vulnerabilities
   - [ ] Security-sensitive changes reviewed
 

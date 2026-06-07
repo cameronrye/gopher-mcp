@@ -17,7 +17,6 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
 
 
 class ReleasePreparation:
@@ -25,8 +24,8 @@ class ReleasePreparation:
 
     def __init__(self):
         self.project_root = Path(__file__).parent.parent
-        self.errors: List[str] = []
-        self.warnings: List[str] = []
+        self.errors: list[str] = []
+        self.warnings: list[str] = []
 
     def _get_current_version(self) -> str:
         """Get the current version from pyproject.toml."""
@@ -68,7 +67,7 @@ class ReleasePreparation:
 
         # Check if version already exists
         if f"## [{version}]" in content:
-            print(f"ℹ️ Version {version} already exists in CHANGELOG.md")
+            print(f"Version {version} already exists in CHANGELOG.md")
             return
 
         # Find the unreleased section
@@ -101,13 +100,14 @@ class ReleasePreparation:
         else:
             self.warnings.append("Could not find unreleased section in CHANGELOG.md")
 
-    def _create_git_tag(self, version: str, message: Optional[str] = None) -> None:
+    def _create_git_tag(self, version: str, message: str | None = None) -> None:
         """Create and push git tag."""
         tag_name = f"v{version}"
 
         # Check if tag already exists
         result = subprocess.run(
             ["git", "tag", "-l", tag_name],
+            check=False,
             capture_output=True,
             text=True,
             cwd=self.project_root,
@@ -123,7 +123,7 @@ class ReleasePreparation:
         else:
             cmd.extend(["-m", f"Release {version}"])
 
-        result = subprocess.run(cmd, cwd=self.project_root)
+        result = subprocess.run(cmd, check=False, cwd=self.project_root)
         if result.returncode == 0:
             print(f"✅ Created tag {tag_name}")
 
@@ -131,7 +131,9 @@ class ReleasePreparation:
             response = input(f"Push tag {tag_name} to origin? (y/N): ")
             if response.lower() == "y":
                 push_result = subprocess.run(
-                    ["git", "push", "origin", tag_name], cwd=self.project_root
+                    ["git", "push", "origin", tag_name],
+                    check=False,
+                    cwd=self.project_root,
                 )
                 if push_result.returncode == 0:
                     print(f"✅ Pushed tag {tag_name} to origin")
@@ -186,6 +188,7 @@ class ReleasePreparation:
         try:
             result = subprocess.run(
                 [sys.executable, "scripts/validate-config.py"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -248,6 +251,7 @@ class ReleasePreparation:
             try:
                 result = subprocess.run(
                     ["git", "tag", "-l", f"v{current_version}"],
+                    check=False,
                     cwd=self.project_root,
                     capture_output=True,
                     text=True,
@@ -278,8 +282,9 @@ class ReleasePreparation:
                     "tests/",
                     "-v",
                     "--cov=src/gopher_mcp",
-                    "--cov-fail-under=50",
+                    "--cov-fail-under=85",
                 ],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -303,6 +308,7 @@ class ReleasePreparation:
                     "-m",
                     "not integration and not slow",
                 ],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -312,6 +318,7 @@ class ReleasePreparation:
             # Integration tests (if any)
             integration_result = subprocess.run(
                 [sys.executable, "-m", "pytest", "tests/", "-v", "-m", "integration"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -337,6 +344,7 @@ class ReleasePreparation:
             # Run ruff linting
             lint_result = subprocess.run(
                 [sys.executable, "-m", "ruff", "check", "src/", "tests/"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -345,6 +353,7 @@ class ReleasePreparation:
             # Run ruff formatting check
             format_result = subprocess.run(
                 [sys.executable, "-m", "ruff", "format", "--check", "src/", "tests/"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -353,6 +362,7 @@ class ReleasePreparation:
             # Run mypy type checking
             mypy_result = subprocess.run(
                 [sys.executable, "-m", "mypy", "src/"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -432,6 +442,7 @@ class ReleasePreparation:
             # Check for outdated dependencies
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "list", "--outdated"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -464,6 +475,7 @@ class ReleasePreparation:
             # Clean previous builds
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--upgrade", "build"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
             )
@@ -471,6 +483,7 @@ class ReleasePreparation:
             # Build package
             result = subprocess.run(
                 [sys.executable, "-m", "build"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
@@ -498,6 +511,7 @@ class ReleasePreparation:
             # Try to run bandit security scan
             result = subprocess.run(
                 [sys.executable, "-m", "bandit", "-r", "src/", "-f", "json"],
+                check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,

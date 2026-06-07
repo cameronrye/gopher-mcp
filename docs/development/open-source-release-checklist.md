@@ -19,7 +19,7 @@ This document provides a comprehensive checklist for preparing the Gopher MCP Se
 - [x] **SECURITY.md**: Security policy documented
 - [x] **Sensitive Data**: No secrets, API keys, or sensitive information in repository
 - [x] **Dependencies**: All dependencies reviewed for security vulnerabilities
-- [x] **Security Scanning**: Bandit and safety checks in CI/CD
+- [x] **Security Scanning**: Bandit and pip-audit checks in CI/CD
 
 ### 📚 Documentation
 - [x] **README.md**: Comprehensive, public-ready documentation

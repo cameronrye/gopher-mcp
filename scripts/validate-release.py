@@ -11,7 +11,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import List, Tuple
 
 
 class ReleaseValidator:
@@ -19,10 +18,10 @@ class ReleaseValidator:
 
     def __init__(self) -> None:
         self.project_root = Path(__file__).parent.parent
-        self.passed_checks: List[str] = []
-        self.failed_checks: List[str] = []
+        self.passed_checks: list[str] = []
+        self.failed_checks: list[str] = []
 
-    def run_command(self, command: str, description: str) -> Tuple[bool, str]:
+    def run_command(self, command: str, description: str) -> tuple[bool, str]:
         """Run a shell command and return success status and output."""
         print(f"🔍 {description}...")
         try:
@@ -32,6 +31,7 @@ class ReleaseValidator:
             command_list = shlex.split(command)
             result = subprocess.run(
                 command_list,
+                check=False,
                 shell=False,
                 cwd=self.project_root,
                 capture_output=True,
@@ -69,8 +69,8 @@ class ReleaseValidator:
         )
 
         # Check test coverage
-        coverage_success, coverage_output = self.run_command(
-            "python -m pytest --cov=src --cov-report=term-missing --cov-fail-under=80",
+        coverage_success, _coverage_output = self.run_command(
+            "python -m pytest --cov=src --cov-report=term-missing --cov-fail-under=85",
             "Test coverage check",
         )
 
@@ -105,11 +105,11 @@ class ReleaseValidator:
         )
 
         # Dependency security
-        safety_success, _ = self.run_command(
-            "uv run safety check --json", "Safety dependency check"
+        audit_success, _ = self.run_command(
+            "uv run pip-audit", "pip-audit dependency scan"
         )
 
-        return bandit_success and safety_success
+        return bandit_success and audit_success
 
     def validate_build(self) -> bool:
         """Validate package build."""
@@ -142,10 +142,11 @@ class ReleaseValidator:
         try:
             # Test client creation
             print("🔍 Testing client creation...")
-            from src.gopher_mcp.server import get_gopher_client, get_gemini_client
+            from gopher_mcp.server import get_client_manager
 
-            gopher_client = get_gopher_client()
-            gemini_client = get_gemini_client()
+            manager = await get_client_manager()
+            gopher_client = await manager.get_gopher_client()
+            gemini_client = await manager.get_gemini_client()
 
             print("✅ Both clients created successfully")
 

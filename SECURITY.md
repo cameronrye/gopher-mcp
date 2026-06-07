@@ -32,7 +32,7 @@ report vulnerabilities, and the measures we take to protect users.
 ### Dependencies
 
 - **Regular Updates**: Dependencies are regularly updated for security patches
-- **Vulnerability Scanning**: Automated scanning with `safety` and `bandit`
+- **Vulnerability Scanning**: Automated scanning with `pip-audit` and `bandit`
 - **Minimal Dependencies**: Only essential dependencies are included
 - **Trusted Sources**: All dependencies are from trusted PyPI sources
 

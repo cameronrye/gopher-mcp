@@ -154,7 +154,6 @@ jobs:
   security:
     name: Security checks
     runs-on: ubuntu-latest
-    # Retry after transient GitHub Actions infrastructure issues
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -176,8 +175,8 @@ jobs:
       - name: Run bandit security linting
         run: uv run bandit -r src/ -f json -o bandit-report.json
 
-      - name: Run safety dependency check
-        run: uv run safety check --save-json safety-report.json
+      - name: Run pip-audit dependency scan
+        run: uv run pip-audit --format json --output pip-audit-report.json
 
       - name: Upload security reports
         uses: actions/upload-artifact@v5
@@ -186,12 +185,11 @@ jobs:
           name: security-reports
           path: |
             bandit-report.json
-            safety-report.json
+            pip-audit-report.json
 
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
-    # Retry after transient GitHub Actions infrastructure issues
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
