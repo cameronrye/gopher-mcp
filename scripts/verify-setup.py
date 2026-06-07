@@ -6,7 +6,6 @@ Checks that all required files and configurations are in place.
 
 import sys
 from pathlib import Path
-from typing import List
 
 
 class SetupVerifier:
@@ -14,8 +13,8 @@ class SetupVerifier:
 
     def __init__(self):
         self.project_root = Path(__file__).parent.parent
-        self.issues: List[str] = []
-        self.warnings: List[str] = []
+        self.issues: list[str] = []
+        self.warnings: list[str] = []
 
     def verify_setup(self) -> bool:
         """Run all verification checks."""

@@ -9,7 +9,6 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
 
 
 class Colors:
@@ -200,7 +199,7 @@ class TaskRunner:
                 "*.egg-info .mypy_cache .ruff_cache"
             )
 
-    def run_task(self, task_name: str, extra_args: Optional[List[str]] = None) -> int:
+    def run_task(self, task_name: str, extra_args: list[str] | None = None) -> int:
         """Run a specific task."""
         if task_name not in self.tasks:
             error_msg = self._colorize(
@@ -238,11 +237,11 @@ class TaskRunner:
         if self.is_windows and not cmd.startswith("uv run"):
             # Use cmd for Windows-specific commands
             # shell=True is required for Windows batch files and complex commands  # nosec B602
-            result = subprocess.run(cmd, shell=True)  # nosec B602
+            result = subprocess.run(cmd, check=False, shell=True)  # nosec B602
         else:
             # Use shell for cross-platform commands
             # shell=True is required for pipes, redirects, and environment variables  # nosec B602
-            result = subprocess.run(cmd, shell=True)  # nosec B602
+            result = subprocess.run(cmd, check=False, shell=True)  # nosec B602
 
         return result.returncode
 
@@ -258,7 +257,7 @@ class TaskRunner:
         print()
 
         # Group tasks by category
-        categories: Dict[str, List[tuple[str, str]]] = {}
+        categories: dict[str, list[tuple[str, str]]] = {}
         for task_name, task_info in self.tasks.items():
             category = task_info["category"]
             if category not in categories:
