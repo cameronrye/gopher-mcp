@@ -2,11 +2,15 @@
 
 import argparse
 
+from .config import configure_logging, get_config
 from .server import mcp
 
 
 def main() -> None:
     """Run the main entry point."""
+    # Configure logging (to stderr) from ServerConfig before anything logs.
+    configure_logging(get_config().server)
+
     parser = argparse.ArgumentParser(description="Gopher MCP Server")
     parser.add_argument(
         "--transport",

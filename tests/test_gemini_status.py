@@ -64,6 +64,16 @@ class TestParseGeminiResponse:
         assert response.meta == meta
         assert response.body == b"Content"
 
+    def test_oversize_redirect_meta_rejected(self):
+        """An over-long meta (>1024 bytes) must be rejected, not silently
+        truncated. For a 3x redirect the meta is the target URL; truncating it
+        would hand back a corrupted URL pointing somewhere unintended."""
+        long_url = "gemini://example.org/" + "a" * 1100  # > 1024 bytes
+        raw_response = f"31 {long_url}\r\n".encode("utf-8")
+
+        with pytest.raises(ValueError, match="Meta field exceeds 1024 bytes"):
+            parse_gemini_response(raw_response)
+
     def test_all_status_codes(self):
         """Test parsing all valid status codes."""
         test_cases = [
@@ -505,7 +515,7 @@ class TestProcessGeminiResponse:
         result = process_gemini_response(response, "gemini://example.org/")
         assert isinstance(result, GeminiSuccessResult)
         # Should fallback to latin1 charset
-        assert result.mime_type.charset == "latin1"
+        assert result.mime_type.charset == "latin-1"
 
     def test_request_info_included(self):
         """Test that request info is included in results."""
@@ -547,7 +557,7 @@ class TestProcessGeminiResponse:
 
         assert isinstance(result, GeminiSuccessResult)
         assert result.content == "Café"
-        assert result.mime_type.charset == "latin1"  # Should fallback to latin1
+        assert result.mime_type.charset == "latin-1"  # Should fallback to latin1
 
     def test_success_response_binary_detection(self):
         """Test success response with binary content detection."""

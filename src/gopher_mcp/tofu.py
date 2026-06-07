@@ -1,5 +1,6 @@
 """Trust-on-First-Use (TOFU) certificate validation for Gemini protocol."""
 
+import hmac
 import json
 import os
 import time
@@ -12,6 +13,35 @@ from .models import TOFUEntry
 from .utils import atomic_write_json, get_home_directory
 
 logger = structlog.get_logger(__name__)
+
+
+def _parse_expiry(cert_info: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Extract a certificate expiry (UNIX timestamp) from cert info.
+
+    Prefers ``not_after_timestamp`` (parsed from the DER by gemini_tls, which
+    works under CERT_NONE where getpeercert() is empty), and falls back to the
+    getpeercert-style ``notAfter`` string for backward compatibility.
+    """
+    if not cert_info:
+        return None
+    if "not_after_timestamp" in cert_info:
+        try:
+            return float(cert_info["not_after_timestamp"])
+        except (TypeError, ValueError):
+            return None
+    if "notAfter" in cert_info:
+        try:
+            return (
+                datetime.strptime(cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z")
+                .replace(tzinfo=timezone.utc)
+                .timestamp()
+            )
+        except ValueError:
+            logger.warning(
+                "Failed to parse certificate expiry", not_after=cert_info["notAfter"]
+            )
+            return None
+    return None
 
 
 class TOFUValidationError(Exception):
@@ -37,6 +67,12 @@ class TOFUManager:
                 raise ValueError("Could not determine home directory")
             gemini_dir = home_dir / ".gemini"
             gemini_dir.mkdir(exist_ok=True)
+            # The trust store lives here; keep it owner-only (mkdir mode is
+            # subject to umask).
+            try:
+                os.chmod(gemini_dir, 0o700)
+            except OSError:  # pragma: no cover - non-POSIX or restricted FS
+                pass
             storage_path = str(gemini_dir / "tofu.json")
 
         self.storage_path = storage_path
@@ -48,23 +84,34 @@ class TOFUManager:
         return f"{host}:{port}"
 
     def _load_entries(self) -> None:
-        """Load TOFU entries from storage."""
+        """Load TOFU entries from storage.
+
+        Fails CLOSED: if the store exists but is corrupt/unparseable, we raise
+        rather than silently resetting to an empty trust store, which would
+        re-arm blind trust-on-first-use for every previously pinned host. A
+        missing file is the legitimate first-run case and starts empty.
+        """
+        if not os.path.exists(self.storage_path):
+            logger.info("No existing TOFU storage found, starting fresh")
+            return
+
         try:
-            if os.path.exists(self.storage_path):
-                with open(self.storage_path, "r") as f:
-                    data = json.load(f)
-                    for key, entry_data in data.items():
-                        self._entries[key] = TOFUEntry(**entry_data)
-                logger.info(
-                    "TOFU entries loaded",
-                    count=len(self._entries),
-                    storage_path=self.storage_path,
-                )
-            else:
-                logger.info("No existing TOFU storage found, starting fresh")
+            with open(self.storage_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entries = {key: TOFUEntry(**entry_data) for key, entry_data in data.items()}
         except Exception as e:
-            logger.error("Failed to load TOFU entries", error=str(e))
-            self._entries = {}
+            logger.error("TOFU storage is corrupt or unreadable", error=str(e))
+            raise TOFUValidationError(
+                f"TOFU storage at {self.storage_path} is corrupt; refusing to "
+                "start with an empty trust store (fix or remove the file)"
+            ) from e
+
+        self._entries = entries
+        logger.info(
+            "TOFU entries loaded",
+            count=len(self._entries),
+            storage_path=self.storage_path,
+        )
 
     def _save_entries(self) -> None:
         """Save TOFU entries to storage."""
@@ -114,20 +161,7 @@ class TOFUManager:
 
         if existing_entry is None:
             # First time seeing this host:port - trust on first use
-            expires = None
-            if cert_info and "notAfter" in cert_info:
-                try:
-                    # Parse certificate expiry
-                    expires = (
-                        datetime.strptime(cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                        .replace(tzinfo=timezone.utc)
-                        .timestamp()
-                    )
-                except ValueError:
-                    logger.warning(
-                        "Failed to parse certificate expiry",
-                        not_after=cert_info["notAfter"],
-                    )
+            expires = _parse_expiry(cert_info)
 
             new_entry = TOFUEntry(
                 host=host,
@@ -151,8 +185,8 @@ class TOFUManager:
             return True, f"New certificate for {host}:{port} trusted on first use"
 
         else:
-            # Check if certificate has changed
-            if existing_entry.fingerprint != cert_fingerprint:
+            # Check if certificate has changed (constant-time comparison)
+            if not hmac.compare_digest(existing_entry.fingerprint, cert_fingerprint):
                 # Certificate has changed - this is a security concern
                 warning = (
                     f"Certificate for {host}:{port} has changed!\n"
@@ -227,16 +261,7 @@ class TOFUManager:
             )
 
         # Parse expiry if available
-        expires = None
-        if cert_info and "notAfter" in cert_info:
-            try:
-                expires = (
-                    datetime.strptime(cert_info["notAfter"], "%b %d %H:%M:%S %Y %Z")
-                    .replace(tzinfo=timezone.utc)
-                    .timestamp()
-                )
-            except ValueError:
-                pass
+        expires = _parse_expiry(cert_info)
 
         # Create or update entry
         if existing_entry:

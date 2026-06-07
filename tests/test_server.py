@@ -234,11 +234,25 @@ class TestGopherBatchFetch:
 
     @pytest.mark.asyncio
     async def test_gopher_batch_fetch_invalid_url(self):
-        """Test batch fetch with invalid URL."""
+        """An invalid URL yields a per-item error, not a whole-batch failure."""
         from gopher_mcp.server import gopher_batch_fetch
 
-        with pytest.raises(Exception):  # Should raise validation error
-            await gopher_batch_fetch(["http://example.com/"])
+        mock_manager = AsyncMock()
+        mock_manager.get_gopher_client.return_value = AsyncMock()
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            results = await gopher_batch_fetch(["http://example.com/"])
+
+        assert len(results) == 1
+        assert results[0]["error"]["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
+    async def test_gopher_batch_fetch_too_many_urls(self):
+        """A batch larger than MAX_BATCH_URLS is rejected."""
+        from gopher_mcp.server import gopher_batch_fetch, MAX_BATCH_URLS
+
+        urls = [f"gopher://example.com/0/{i}" for i in range(MAX_BATCH_URLS + 1)]
+        with pytest.raises(ValueError, match="Too many URLs"):
+            await gopher_batch_fetch(urls)
 
 
 class TestGeminiBatchFetch:
@@ -313,11 +327,25 @@ class TestGeminiBatchFetch:
 
     @pytest.mark.asyncio
     async def test_gemini_batch_fetch_invalid_url(self):
-        """Test batch fetch with invalid URL."""
+        """An invalid URL yields a per-item error, not a whole-batch failure."""
         from gopher_mcp.server import gemini_batch_fetch
 
-        with pytest.raises(Exception):  # Should raise validation error
-            await gemini_batch_fetch(["http://example.com/"])
+        mock_manager = AsyncMock()
+        mock_manager.get_gemini_client.return_value = AsyncMock()
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            results = await gemini_batch_fetch(["http://example.com/"])
+
+        assert len(results) == 1
+        assert results[0]["error"]["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
+    async def test_gemini_batch_fetch_too_many_urls(self):
+        """A batch larger than MAX_BATCH_URLS is rejected."""
+        from gopher_mcp.server import gemini_batch_fetch, MAX_BATCH_URLS
+
+        urls = [f"gemini://example.org/{i}" for i in range(MAX_BATCH_URLS + 1)]
+        with pytest.raises(ValueError, match="Too many URLs"):
+            await gemini_batch_fetch(urls)
 
 
 class TestCleanup:

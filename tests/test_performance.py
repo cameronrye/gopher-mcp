@@ -5,11 +5,11 @@ import time
 import pytest
 import psutil
 import gc
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
-from src.gopher_mcp.gemini_client import GeminiClient
-from src.gopher_mcp.gopher_client import GopherClient
-from src.gopher_mcp.models import GeminiSuccessResult, TextResult
+from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.gopher_client import GopherClient
+from gopher_mcp.models import GeminiSuccessResult, TextResult
 
 
 @pytest.mark.slow
@@ -19,7 +19,7 @@ class TestPerformanceBaselines:
     @pytest.mark.asyncio
     async def test_gemini_client_response_time(self):
         """Test Gemini client response time baseline."""
-        client = GeminiClient()
+        client = GeminiClient(tofu_enabled=False)
 
         # Mock fast response
         mock_response = b"20 text/plain\r\nTest content"
@@ -49,12 +49,9 @@ class TestPerformanceBaselines:
         mock_response = b"Test content line 1\r\nTest content line 2\r\n.\r\n"
 
         with patch(
-            "src.gopher_mcp.gopher_client.pituophis.Request"
-        ) as mock_request_class:
-            mock_request = Mock()
-            mock_request.get.return_value = mock_response
-            mock_request_class.return_value = mock_request
-
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=mock_response),
+        ):
             start_time = time.time()
             result = await client.fetch("gopher://example.com/0/test.txt")
             end_time = time.time()
@@ -73,7 +70,7 @@ class TestPerformanceBaselines:
         start_time = time.time()
         for i in range(1000):
             url = f"gemini://example{i}.com/"
-            from src.gopher_mcp.models import GeminiMimeType
+            from gopher_mcp.models import GeminiMimeType
 
             mock_response = GeminiSuccessResult(
                 content="Test content",
@@ -111,25 +108,31 @@ class TestConcurrentLoad:
     @pytest.mark.asyncio
     async def test_concurrent_gemini_requests(self):
         """Test handling multiple concurrent Gemini requests."""
-        client = GeminiClient()
+        client = GeminiClient(tofu_enabled=False)
 
         # Mock responses
         mock_response = b"20 text/plain\r\nTest content"
 
-        async def mock_fetch(url: str):
-            with patch.object(client.tls_client, "connect", return_value=(Mock(), {})):
-                with patch.object(client.tls_client, "send_data"):
-                    with patch.object(
-                        client.tls_client, "receive_data", return_value=mock_response
-                    ):
-                        with patch.object(client.tls_client, "close"):
-                            return await client.fetch(url)
-
-        # Test concurrent requests
         urls = [f"gemini://example{i}.com/" for i in range(10)]
 
+        # Patch once around the whole gather; unittest.mock.patch is not
+        # safe to enter/exit concurrently from multiple coroutines.
         start_time = time.time()
-        results = await asyncio.gather(*[mock_fetch(url) for url in urls])
+        with (
+            patch.object(
+                client.tls_client,
+                "connect",
+                new=AsyncMock(return_value=(Mock(), {})),
+            ),
+            patch.object(client.tls_client, "send_data", new=AsyncMock()),
+            patch.object(
+                client.tls_client,
+                "receive_data",
+                new=AsyncMock(return_value=mock_response),
+            ),
+            patch.object(client.tls_client, "close", new=AsyncMock()),
+        ):
+            results = await asyncio.gather(*[client.fetch(url) for url in urls])
         end_time = time.time()
 
         total_time = end_time - start_time
@@ -149,20 +152,15 @@ class TestConcurrentLoad:
         # Mock responses
         mock_response = b"Test content\r\n.\r\n"
 
-        async def mock_fetch(url: str):
-            with patch(
-                "src.gopher_mcp.gopher_client.pituophis.Request"
-            ) as mock_request_class:
-                mock_request = Mock()
-                mock_request.get.return_value = mock_response
-                mock_request_class.return_value = mock_request
-                return await client.fetch(url)
-
-        # Test concurrent requests
         urls = [f"gopher://example{i}.com/0/test.txt" for i in range(10)]
 
+        # Patch once around the whole gather (mock.patch is not concurrency-safe).
         start_time = time.time()
-        results = await asyncio.gather(*[mock_fetch(url) for url in urls])
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=mock_response),
+        ):
+            results = await asyncio.gather(*[client.fetch(url) for url in urls])
         end_time = time.time()
 
         total_time = end_time - start_time
@@ -237,7 +235,7 @@ class TestMemoryUsage:
         for i in range(200):
             url = f"gemini://example{i}.com/"
             # Create a reasonably sized mock response
-            from src.gopher_mcp.models import GeminiMimeType
+            from gopher_mcp.models import GeminiMimeType
 
             mock_response = GeminiSuccessResult(
                 content="A" * 1000,  # 1KB per entry
@@ -346,7 +344,7 @@ class TestResourceLimits:
         # Add more entries than limit
         for i in range(20):
             url = f"gemini://example{i}.com/"
-            from src.gopher_mcp.models import GeminiMimeType
+            from gopher_mcp.models import GeminiMimeType
 
             mock_response = GeminiSuccessResult(
                 content="Test content",
@@ -365,7 +363,7 @@ class TestPerformanceRegression:
 
     def test_url_parsing_performance(self):
         """Test URL parsing performance."""
-        from src.gopher_mcp.utils import parse_gemini_url, parse_gopher_url
+        from gopher_mcp.utils import parse_gemini_url, parse_gopher_url
 
         # Test parsing many URLs
         gemini_urls = [f"gemini://example{i}.com/path{i}" for i in range(1000)]
@@ -389,7 +387,7 @@ class TestPerformanceRegression:
 
     def test_response_processing_performance(self):
         """Test response processing performance."""
-        from src.gopher_mcp.utils import parse_gemini_response, parse_gopher_menu
+        from gopher_mcp.utils import parse_gemini_response, parse_gopher_menu
 
         # Test processing many responses
         gemini_response = (
@@ -449,7 +447,7 @@ class TestLoadTesting:
         start_time = time.time()
         for i in range(100):
             url = f"gemini://example{i}.com/"
-            from src.gopher_mcp.models import GeminiMimeType
+            from gopher_mcp.models import GeminiMimeType
 
             mock_response = GeminiSuccessResult(
                 content="Test content",

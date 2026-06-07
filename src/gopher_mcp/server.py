@@ -16,6 +16,12 @@ logger = structlog.get_logger(__name__)
 # Initialize FastMCP server
 mcp = FastMCP("gopher-mcp")
 
+# Bounds for the batch tools: cap the list length and the number of in-flight
+# connections so a caller (or attacker-steered model) cannot fan out an
+# unbounded number of concurrent requests.
+MAX_BATCH_URLS = 50
+BATCH_CONCURRENCY = 5
+
 
 class ClientManager:
     """Singleton manager for Gopher and Gemini client instances."""
@@ -53,6 +59,7 @@ class ClientManager:
                     cache_ttl_seconds=gopher_config.cache_ttl_seconds,
                     max_cache_entries=gopher_config.max_cache_entries,
                     allowed_hosts=gopher_config.allowed_hosts,
+                    allow_local_hosts=gopher_config.allow_local_hosts,
                     max_selector_length=gopher_config.max_selector_length,
                     max_search_length=gopher_config.max_search_length,
                 )
@@ -90,6 +97,7 @@ class ClientManager:
                     cache_ttl_seconds=gemini_config.cache_ttl_seconds,
                     max_cache_entries=gemini_config.max_cache_entries,
                     allowed_hosts=gemini_config.allowed_hosts,
+                    allow_local_hosts=gemini_config.allow_local_hosts,
                     tofu_enabled=gemini_config.tofu_enabled,
                     tofu_storage_path=tofu_path,
                     client_certs_enabled=gemini_config.client_certs_enabled,
@@ -189,41 +197,38 @@ async def gopher_batch_fetch(urls: List[str]) -> List[Dict[str, Any]]:
 
     """
     try:
+        if len(urls) > MAX_BATCH_URLS:
+            raise ValueError(
+                f"Too many URLs in batch request: {len(urls)} (max {MAX_BATCH_URLS})"
+            )
+
         manager = await get_client_manager()
         client = await manager.get_gopher_client()
+        semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
 
-        # Validate all URLs first
-        requests = [GopherFetchRequest(url=url) for url in urls]
+        from .models import ErrorResult
 
-        # Fetch all URLs in parallel using asyncio.gather()
-        responses = await asyncio.gather(
-            *[client.fetch(req.url) for req in requests], return_exceptions=True
-        )
+        async def fetch_one(url: str) -> Dict[str, Any]:
+            async with semaphore:
+                try:
+                    request = GopherFetchRequest(url=url)
+                except Exception as e:
+                    return ErrorResult(
+                        error={"code": "INVALID_REQUEST", "message": str(e)},
+                        requestInfo={"url": url},
+                    ).model_dump()
+                try:
+                    response = await client.fetch(request.url)
+                    return response.model_dump()
+                except Exception as e:  # defensive: client.fetch normally never raises
+                    return ErrorResult(
+                        error={"code": "FETCH_ERROR", "message": str(e)},
+                        requestInfo={"url": url},
+                    ).model_dump()
 
-        # Convert responses to dicts, handling any exceptions
-        results = []
-        for i, response in enumerate(responses):
-            if isinstance(response, BaseException):
-                logger.error(
-                    "Gopher batch fetch failed for URL",
-                    url=urls[i],
-                    error=str(response),
-                )
-                # Return error result for this URL
-                from .models import ErrorResult
-
-                error_response = ErrorResult(
-                    error={
-                        "code": "FETCH_ERROR",
-                        "message": str(response),
-                    },
-                    requestInfo={"url": urls[i]},
-                )
-                results.append(error_response.model_dump())
-            else:
-                results.append(response.model_dump())
-
-        return results
+        # Bounded concurrency: at most BATCH_CONCURRENCY in-flight at once.
+        results = await asyncio.gather(*[fetch_one(url) for url in urls])
+        return list(results)
     except Exception as e:
         logger.error("Gopher batch fetch failed", error=str(e))
         raise
@@ -245,41 +250,38 @@ async def gemini_batch_fetch(urls: List[str]) -> List[Dict[str, Any]]:
 
     """
     try:
+        if len(urls) > MAX_BATCH_URLS:
+            raise ValueError(
+                f"Too many URLs in batch request: {len(urls)} (max {MAX_BATCH_URLS})"
+            )
+
         manager = await get_client_manager()
         client = await manager.get_gemini_client()
+        semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
 
-        # Validate all URLs first
-        requests = [GeminiFetchRequest(url=url) for url in urls]
+        from .models import GeminiErrorResult
 
-        # Fetch all URLs in parallel using asyncio.gather()
-        responses = await asyncio.gather(
-            *[client.fetch(req.url) for req in requests], return_exceptions=True
-        )
+        async def fetch_one(url: str) -> Dict[str, Any]:
+            async with semaphore:
+                try:
+                    request = GeminiFetchRequest(url=url)
+                except Exception as e:
+                    return GeminiErrorResult(
+                        error={"code": "INVALID_REQUEST", "message": str(e)},
+                        requestInfo={"url": url},
+                    ).model_dump()
+                try:
+                    response = await client.fetch(request.url)
+                    return response.model_dump()
+                except Exception as e:  # defensive: client.fetch normally never raises
+                    return GeminiErrorResult(
+                        error={"code": "FETCH_ERROR", "message": str(e)},
+                        requestInfo={"url": url},
+                    ).model_dump()
 
-        # Convert responses to dicts, handling any exceptions
-        results = []
-        for i, response in enumerate(responses):
-            if isinstance(response, BaseException):
-                logger.error(
-                    "Gemini batch fetch failed for URL",
-                    url=urls[i],
-                    error=str(response),
-                )
-                # Return error result for this URL
-                from .models import GeminiErrorResult
-
-                error_response = GeminiErrorResult(
-                    error={
-                        "code": "FETCH_ERROR",
-                        "message": str(response),
-                    },
-                    requestInfo={"url": urls[i]},
-                )
-                results.append(error_response.model_dump())
-            else:
-                results.append(response.model_dump())
-
-        return results
+        # Bounded concurrency: at most BATCH_CONCURRENCY in-flight at once.
+        results = await asyncio.gather(*[fetch_one(url) for url in urls])
+        return list(results)
     except Exception as e:
         logger.error("Gemini batch fetch failed", error=str(e))
         raise

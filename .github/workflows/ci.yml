@@ -8,6 +8,10 @@ on:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
+# Least-privilege default; jobs needing more must opt in explicitly.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -79,8 +83,11 @@ jobs:
         run: uv sync --all-extras
 
       - name: Run Gemini-specific tests
+        # --no-cov: this runs only the Gemini subset, so it cannot meet the
+        # project-wide --cov-fail-under gate in addopts. The full matrix job
+        # enforces coverage; here we only care that the subset passes.
         run: |
-          uv run pytest tests/test_gemini_client.py tests/test_gemini_models.py tests/test_gemini_status.py tests/test_gemini_tls.py tests/test_gemini_utils.py tests/test_security.py tests/test_performance.py -v --tb=short -m "not slow"
+          uv run pytest tests/test_gemini_client.py tests/test_gemini_models.py tests/test_gemini_status.py tests/test_gemini_tls.py tests/test_gemini_utils.py tests/test_security.py tests/test_performance.py -v --tb=short -m "not slow" --no-cov
 
       - name: Test Gemini client functionality
         run: |

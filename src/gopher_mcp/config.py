@@ -1,8 +1,11 @@
 """Centralized configuration management using Pydantic Settings."""
 
+import logging
+import sys
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
+import structlog
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -30,16 +33,22 @@ class GopherConfig(BaseSettings):
         default=300,  # 5 minutes
         description="Cache time-to-live in seconds",
         ge=0,
+        le=86400,  # at most one day
     )
     max_cache_entries: int = Field(
         default=1000,
         description="Maximum number of cache entries",
-        ge=0,
+        ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
     allowed_hosts: Optional[List[str]] = Field(
         default=None,
         description="List of allowed hostnames (None = allow all)",
+    )
+    allow_local_hosts: bool = Field(
+        default=False,
+        description="Allow connections to loopback/private/internal addresses "
+        "(disabled by default to prevent SSRF)",
     )
     max_selector_length: int = Field(
         default=1024,
@@ -96,16 +105,22 @@ class GeminiConfig(BaseSettings):
         default=300,
         description="Cache time-to-live in seconds",
         ge=0,
+        le=86400,  # at most one day
     )
     max_cache_entries: int = Field(
         default=1000,
         description="Maximum number of cache entries",
-        ge=0,
+        ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
     allowed_hosts: Optional[List[str]] = Field(
         default=None,
         description="List of allowed hostnames (None = allow all)",
+    )
+    allow_local_hosts: bool = Field(
+        default=False,
+        description="Allow connections to loopback/private/internal addresses "
+        "(disabled by default to prevent SSRF)",
     )
     tofu_enabled: bool = Field(
         default=True,
@@ -211,3 +226,68 @@ def reset_config() -> None:
     """Reset the global configuration instance (useful for testing)."""
     global _config
     _config = None
+
+
+class _TeeStream:
+    """Write-only text stream that fans each write out to several streams.
+
+    structlog's PrintLogger writes every rendered line to a single file
+    object; teeing stderr and a log file lets the configured file receive the
+    same records without a second open handle or a stdlib logging bridge.
+    """
+
+    def __init__(self, *streams: Any) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            stream.write(data)
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+
+def configure_logging(config: Optional[ServerConfig] = None) -> None:
+    """Configure structlog/stdlib logging from the server configuration.
+
+    Logs are written to STDERR, never stdout: the stdio MCP transport uses
+    stdout for the protocol stream, so logging there would corrupt it. When
+    ``log_file_path`` is set, the same records are mirrored to that file.
+    """
+    config = config or ServerConfig()
+    level = getattr(logging, config.log_level.upper(), logging.INFO)
+
+    # Every module logs through structlog, whose PrintLogger writes to one
+    # stream. A stdlib FileHandler would therefore never see those records, so
+    # mirror to the file by teeing stderr + the file and pointing both stdlib
+    # logging and structlog at that single stream.
+    log_stream: Any = sys.stderr
+    if config.log_file_path:
+        log_file = open(str(config.log_file_path), "a", encoding="utf-8")
+        log_stream = _TeeStream(sys.stderr, log_file)
+
+    logging.basicConfig(
+        level=level,
+        handlers=[logging.StreamHandler(log_stream)],
+        format="%(message)s",
+        force=True,
+    )
+
+    processors: List[Any] = [
+        structlog.contextvars.merge_contextvars,
+        structlog.processors.add_log_level,
+        structlog.processors.TimeStamper(fmt="iso"),
+    ]
+    if config.structured_logging:
+        processors.append(structlog.processors.JSONRenderer())
+    else:
+        processors.append(structlog.dev.ConsoleRenderer(colors=False))
+
+    structlog.configure(
+        processors=processors,
+        wrapper_class=structlog.make_filtering_bound_logger(level),
+        logger_factory=structlog.PrintLoggerFactory(file=log_stream),
+        cache_logger_on_first_use=True,
+    )

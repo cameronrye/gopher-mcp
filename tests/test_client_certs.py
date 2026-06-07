@@ -468,7 +468,7 @@ class TestClientCertificateManager:
                 subject="CN=valid-cert",
                 issuer="CN=valid-cert",
                 not_before="2023-01-01T00:00:00",
-                not_after="2025-12-31T23:59:59",  # Valid
+                not_after="2099-12-31T23:59:59",  # Valid (far future)
                 host="valid.com",
                 port=1965,
                 path="/",

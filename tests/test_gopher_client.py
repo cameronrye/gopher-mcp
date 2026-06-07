@@ -1,12 +1,12 @@
 """Tests for gopher_mcp.gopher_client module."""
 
-import asyncio
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from gopher_mcp.gopher_client import GopherClient
+from gopher_mcp.gopher_transport import GopherProtocolError
 from gopher_mcp.models import (
     BinaryResult,
     CacheEntry,
@@ -139,6 +139,24 @@ class TestSecurityValidation:
             gopherType="7",
             selector="/search",
             search="test\r\nmalicious",
+        )
+
+        with pytest.raises(
+            ValueError, match="Search query contains invalid control characters"
+        ):
+            client._validate_security(parsed_url)
+
+    def test_validate_security_search_tab_injection(self):
+        """Reject TAB in the search query: the transport joins selector and
+        search with a literal TAB, so an unescaped TAB would inject an extra
+        field into the single Gopher request line."""
+        client = GopherClient()
+        parsed_url = GopherURL(
+            host="example.com",
+            port=70,
+            gopherType="7",
+            selector="/search",
+            search="foo\textrafield",
         )
 
         with pytest.raises(
@@ -329,7 +347,7 @@ class TestFetchMethod:
 
             result = await client.fetch(url)
             assert isinstance(result, ErrorResult)
-            assert result.error["code"] == "FETCH_ERROR"
+            assert result.error["code"] == "INVALID_REQUEST"
             assert "not in allowed hosts list" in result.error["message"]
 
     @pytest.mark.asyncio
@@ -343,7 +361,7 @@ class TestFetchMethod:
 
             result = await client.fetch(url)
             assert isinstance(result, ErrorResult)
-            assert result.error["code"] == "FETCH_ERROR"
+            assert result.error["code"] == "INVALID_REQUEST"
             assert "URL must start with 'gopher://'" in result.error["message"]
 
     @pytest.mark.asyncio
@@ -364,7 +382,9 @@ class TestFetchMethod:
             result = await client.fetch(url)
             assert isinstance(result, ErrorResult)
             assert result.error["code"] == "FETCH_ERROR"
-            assert "Network error" in result.error["message"]
+            # Unexpected exceptions are sanitized -- the raw text must not leak.
+            assert "Network error" not in result.error["message"]
+            assert result.error["message"] == "Failed to fetch the requested resource"
 
     @pytest.mark.asyncio
     async def test_fetch_successful_with_caching(self):
@@ -392,40 +412,22 @@ class TestFetchMethod:
 
 
 class TestResponseProcessing:
-    """Test response processing methods."""
+    """Test response processing methods against real raw bytes."""
 
-    @pytest.mark.asyncio
-    async def test_process_menu_response_success(self):
-        """Test successful menu response processing."""
+    def test_process_menu_response_success(self):
+        """A real RFC 1436 menu is parsed into structured items."""
         client = GopherClient()
-        parsed_url = GopherURL(
-            host="example.com", port=70, gopherType="1", selector="/", search=None
+        raw = (
+            b"0Test File\t/test.txt\texample.com\t70\r\n"
+            b"1Test Directory\t/testdir/\texample.com\t70\r\n"
+            b".\r\n"
         )
 
-        # Mock pituophis response
-        mock_response = Mock()
-        mock_item1 = Mock()
-        mock_item1.itype = "0"
-        mock_item1.text = "Test File"
-        mock_item1.path = "/test.txt"
-        mock_item1.host = "example.com"
-        mock_item1.port = 70
-
-        mock_item2 = Mock()
-        mock_item2.itype = "1"
-        mock_item2.text = "Test Directory"
-        mock_item2.path = "/testdir/"
-        mock_item2.host = "example.com"
-        mock_item2.port = 70
-
-        mock_response.menu.return_value = [mock_item1, mock_item2]
-
-        result = await client._process_menu_response(mock_response, parsed_url)
+        result = client._process_menu_response(raw)
 
         assert isinstance(result, MenuResult)
         assert len(result.items) == 2
 
-        # Check first item
         item1 = result.items[0]
         assert item1.type == "0"
         assert item1.title == "Test File"
@@ -434,290 +436,121 @@ class TestResponseProcessing:
         assert item1.port == 70
         assert item1.next_url == "gopher://example.com:70/0/test.txt"
 
-        # Check second item
         item2 = result.items[1]
         assert item2.type == "1"
         assert item2.title == "Test Directory"
-        assert item2.selector == "/testdir/"
-        assert item2.host == "example.com"
-        assert item2.port == 70
         assert item2.next_url == "gopher://example.com:70/1/testdir/"
 
-    @pytest.mark.asyncio
-    async def test_process_menu_response_with_search(self):
-        """Test menu response processing with search query."""
+    def test_process_menu_response_skips_terminator_and_blanks(self):
+        """The '.' terminator and blank lines are not emitted as items."""
         client = GopherClient()
-        parsed_url = GopherURL(
-            host="example.com",
-            port=70,
-            gopherType="7",
-            selector="/search",
-            search="python",
+        raw = (
+            b"0Doc\tsel\texample.com\t70\r\n"
+            b"\r\n"  # blank line
+            b".\r\n"  # RFC 1436 terminator
+            b"0After terminator\tsel2\texample.com\t70\r\n"
         )
 
-        # Mock pituophis response
-        mock_response = Mock()
-        mock_item = Mock()
-        mock_item.itype = "7"
-        mock_item.text = "Search"
-        mock_item.path = "/search"
-        mock_item.host = "example.com"
-        mock_item.port = 70
+        result = client._process_menu_response(raw)
 
-        mock_response.menu.return_value = [mock_item]
+        # Only well-formed item lines are kept; '.' and blanks are skipped.
+        titles = [i.title for i in result.items]
+        assert "Doc" in titles
+        assert "." not in titles
 
-        result = await client._process_menu_response(mock_response, parsed_url)
-
-        assert isinstance(result, MenuResult)
-        assert len(result.items) == 1
-
-        item = result.items[0]
-        assert item.next_url == "gopher://example.com:70/7/search?python"
-
-    @pytest.mark.asyncio
-    async def test_process_menu_response_error(self):
-        """Test menu response processing with error."""
+    def test_process_menu_response_empty(self):
+        """An empty body yields an empty (not error) menu."""
         client = GopherClient()
-        parsed_url = GopherURL(
-            host="example.com", port=70, gopherType="1", selector="/", search=None
-        )
-
-        # Mock pituophis response that raises exception
-        mock_response = Mock()
-        mock_response.menu.side_effect = Exception("Parse error")
-
-        result = await client._process_menu_response(mock_response, parsed_url)
-
+        result = client._process_menu_response(b"")
         assert isinstance(result, MenuResult)
-        assert len(result.items) == 0  # Should return empty menu on error
+        assert result.items == []
 
-    @pytest.mark.asyncio
-    async def test_process_text_response_success(self):
-        """Test successful text response processing."""
+    def test_process_text_response_success(self):
+        """Text is decoded as UTF-8 and byte count reflects raw bytes."""
         client = GopherClient()
+        raw = b"Hello, World!\nThis is a test."
 
-        # Mock pituophis response
-        mock_response = Mock()
-        mock_response.text.return_value = "Hello, World!\nThis is a test."
-        mock_response.binary = b"Hello, World!\nThis is a test."
-
-        result = await client._process_text_response(mock_response)
+        result = client._process_text_response(raw)
 
         assert isinstance(result, TextResult)
         assert result.text == "Hello, World!\nThis is a test."
-        assert result.bytes == len(mock_response.binary)
+        assert result.bytes == len(raw)
         assert result.charset == "utf-8"
 
-    @pytest.mark.asyncio
-    async def test_process_text_response_with_control_chars(self):
-        """Test text response processing with control characters."""
+    def test_process_text_response_with_control_chars(self):
+        """Control characters are stripped except \\n, \\r and \\t."""
         client = GopherClient()
+        raw = "Hello\x00\x01\x02World\r\nTest\t".encode("utf-8")
 
-        # Mock pituophis response with control characters
-        mock_response = Mock()
-        text_with_controls = "Hello\x00\x01\x02World\r\nTest\t"
-        mock_response.text.return_value = text_with_controls
-        mock_response.binary = text_with_controls.encode("utf-8")
+        result = client._process_text_response(raw)
 
-        result = await client._process_text_response(mock_response)
-
-        assert isinstance(result, TextResult)
-        # Control characters should be removed except \n and \t
         assert result.text == "HelloWorld\r\nTest\t"
         assert result.charset == "utf-8"
 
-    @pytest.mark.asyncio
-    async def test_process_text_response_error(self):
-        """Test text response processing with error."""
+    def test_process_text_response_latin1_fallback(self):
+        """Non-UTF-8 (legacy latin-1) content decodes via fallback."""
         client = GopherClient()
+        raw = "Café déjà vu".encode("latin-1")  # invalid as UTF-8
 
-        # Mock pituophis response that raises exception
-        mock_response = Mock()
-        mock_response.text.side_effect = Exception("Text processing error")
+        result = client._process_text_response(raw)
 
-        result = await client._process_text_response(mock_response)
+        assert result.charset == "latin-1"
+        assert "Caf" in result.text
+        assert result.bytes == len(raw)
 
-        assert isinstance(result, TextResult)
-        assert "Error processing text" in result.text
-        assert result.charset == "utf-8"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_success(self):
-        """Test successful binary response processing."""
+    @pytest.mark.parametrize(
+        ("data", "expected_mime"),
+        [
+            (b"\x89PNG\r\n\x1a\n" + b"data", "image/png"),
+            (b"\xff\xd8\xff" + b"data", "image/jpeg"),
+            (b"GIF89a" + b"data", "image/gif"),
+            (b"%PDF-1.4" + b"data", "application/pdf"),
+            (b"PK\x03\x04" + b"data", "application/zip"),
+            (b"unknown binary data", "application/octet-stream"),
+            (b"", "application/octet-stream"),
+        ],
+    )
+    def test_process_binary_response(self, data, expected_mime):
+        """Binary responses return size + sniffed MIME, no bytes to the LLM."""
         client = GopherClient()
-
-        # Mock pituophis response with PNG data
-        mock_response = Mock()
-        png_header = b"\x89PNG\r\n\x1a\n" + b"test data"
-        mock_response.binary = png_header
-
-        result = await client._process_binary_response(mock_response)
-
+        result = client._process_binary_response(data)
         assert isinstance(result, BinaryResult)
-        assert result.bytes == len(png_header)
-        assert result.mime_type == "image/png"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_jpeg(self):
-        """Test binary response processing for JPEG."""
-        client = GopherClient()
-
-        # Mock pituophis response with JPEG data
-        mock_response = Mock()
-        jpeg_header = b"\xff\xd8\xff" + b"test data"
-        mock_response.binary = jpeg_header
-
-        result = await client._process_binary_response(mock_response)
-
-        assert isinstance(result, BinaryResult)
-        assert result.bytes == len(jpeg_header)
-        assert result.mime_type == "image/jpeg"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_gif(self):
-        """Test binary response processing for GIF."""
-        client = GopherClient()
-
-        # Mock pituophis response with GIF data
-        mock_response = Mock()
-        gif_header = b"GIF89a" + b"test data"
-        mock_response.binary = gif_header
-
-        result = await client._process_binary_response(mock_response)
-
-        assert isinstance(result, BinaryResult)
-        assert result.bytes == len(gif_header)
-        assert result.mime_type == "image/gif"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_pdf(self):
-        """Test binary response processing for PDF."""
-        client = GopherClient()
-
-        # Mock pituophis response with PDF data
-        mock_response = Mock()
-        pdf_header = b"%PDF-1.4" + b"test data"
-        mock_response.binary = pdf_header
-
-        result = await client._process_binary_response(mock_response)
-
-        assert isinstance(result, BinaryResult)
-        assert result.bytes == len(pdf_header)
-        assert result.mime_type == "application/pdf"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_zip(self):
-        """Test binary response processing for ZIP."""
-        client = GopherClient()
-
-        # Mock pituophis response with ZIP data
-        mock_response = Mock()
-        zip_header = b"PK\x03\x04" + b"test data"
-        mock_response.binary = zip_header
-
-        result = await client._process_binary_response(mock_response)
-
-        assert isinstance(result, BinaryResult)
-        assert result.bytes == len(zip_header)
-        assert result.mime_type == "application/zip"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_unknown(self):
-        """Test binary response processing for unknown type."""
-        client = GopherClient()
-
-        # Mock pituophis response with unknown data
-        mock_response = Mock()
-        unknown_data = b"unknown binary data"
-        mock_response.binary = unknown_data
-
-        result = await client._process_binary_response(mock_response)
-
-        assert isinstance(result, BinaryResult)
-        assert result.bytes == len(unknown_data)
-        assert result.mime_type == "application/octet-stream"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_empty(self):
-        """Test binary response processing for empty data."""
-        client = GopherClient()
-
-        # Mock pituophis response with empty data
-        mock_response = Mock()
-        mock_response.binary = b""
-
-        result = await client._process_binary_response(mock_response)
-
-        assert isinstance(result, BinaryResult)
-        assert result.bytes == 0
-        assert result.mime_type == "application/octet-stream"
-
-    @pytest.mark.asyncio
-    async def test_process_binary_response_error(self):
-        """Test binary response processing with error."""
-        client = GopherClient()
-
-        # Mock pituophis response that raises exception
-        mock_response = Mock()
-        mock_response.binary = property(
-            lambda self: (_ for _ in ()).throw(Exception("Binary error"))
-        )
-
-        result = await client._process_binary_response(mock_response)
-
-        assert isinstance(result, BinaryResult)
-        assert result.bytes == 0
-        assert result.mime_type == "application/octet-stream"
+        assert result.bytes == len(data)
+        assert result.mime_type == expected_mime
 
 
 class TestFetchContentMethod:
-    """Test the _fetch_content method for different content types."""
+    """Test _fetch_content dispatch over the native transport."""
 
     @pytest.mark.asyncio
     async def test_fetch_content_menu_type(self):
-        """Test fetching menu content (type 1)."""
+        """Type 1 dispatches to the menu parser."""
         client = GopherClient()
         parsed_url = GopherURL(
-            host="example.com", port=70, gopherType="1", selector="/", search=None
+            host="example.com", port=70, gopherType="1", selector="", search=None
         )
+        raw = b"0Doc\tsel\texample.com\t70\r\n.\r\n"
 
-        mock_response = Mock()
-        expected_result = MenuResult(items=[])
-
-        with (
-            patch("pituophis.Request") as mock_request_class,
-            patch.object(client, "_process_menu_response") as mock_process,
-            patch("asyncio.get_event_loop") as mock_get_loop,
-        ):
-            mock_request = Mock()
-            mock_request.get.return_value = mock_response
-            mock_request_class.return_value = mock_request
-            mock_process.return_value = expected_result
-
-            # Mock asyncio.get_event_loop().run_in_executor
-            mock_loop = Mock()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.run_in_executor.return_value = future
-            mock_get_loop.return_value = mock_loop
-
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=raw),
+        ) as mock_fetch:
             result = await client._fetch_content(parsed_url)
 
-            assert result == expected_result
-            mock_request_class.assert_called_once_with(
-                host="example.com",
-                port=70,
-                path="/",
-                query="",
-                itype="1",
-                tls=False,
-                tls_verify=True,
-            )
-            mock_process.assert_called_once_with(mock_response, parsed_url)
+        assert isinstance(result, MenuResult)
+        assert len(result.items) == 1
+        mock_fetch.assert_awaited_once_with(
+            "example.com",
+            70,
+            "",
+            None,
+            max_bytes=client.max_response_size,
+            timeout=client.timeout_seconds,
+        )
 
     @pytest.mark.asyncio
     async def test_fetch_content_text_type(self):
-        """Test fetching text content (type 0)."""
+        """Type 0 dispatches to the text processor."""
         client = GopherClient()
         parsed_url = GopherURL(
             host="example.com",
@@ -727,34 +560,18 @@ class TestFetchContentMethod:
             search=None,
         )
 
-        mock_response = Mock()
-        expected_result = TextResult(text="test", bytes=4, charset="utf-8")
-
-        with (
-            patch("pituophis.Request") as mock_request_class,
-            patch.object(client, "_process_text_response") as mock_process,
-            patch("asyncio.get_event_loop") as mock_get_loop,
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"hello"),
         ):
-            mock_request = Mock()
-            mock_request.get.return_value = mock_response
-            mock_request_class.return_value = mock_request
-            mock_process.return_value = expected_result
-
-            # Mock asyncio.get_event_loop().run_in_executor
-            mock_loop = Mock()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.run_in_executor.return_value = future
-            mock_get_loop.return_value = mock_loop
-
             result = await client._fetch_content(parsed_url)
 
-            assert result == expected_result
-            mock_process.assert_called_once_with(mock_response)
+        assert isinstance(result, TextResult)
+        assert result.text == "hello"
 
     @pytest.mark.asyncio
     async def test_fetch_content_search_type(self):
-        """Test fetching search content (type 7)."""
+        """Type 7 (search) is parsed as a menu and forwards the query."""
         client = GopherClient()
         parsed_url = GopherURL(
             host="example.com",
@@ -763,49 +580,29 @@ class TestFetchContentMethod:
             selector="/search",
             search="python",
         )
+        raw = b"0Result\tsel\texample.com\t70\r\n.\r\n"
 
-        mock_response = Mock()
-        expected_result = MenuResult(items=[])
-
-        with (
-            patch("pituophis.Request") as mock_request_class,
-            patch.object(client, "_process_menu_response") as mock_process,
-            patch("asyncio.get_event_loop") as mock_get_loop,
-        ):
-            mock_request = Mock()
-            mock_request.get.return_value = mock_response
-            mock_request_class.return_value = mock_request
-            mock_process.return_value = expected_result
-
-            # Mock asyncio.get_event_loop().run_in_executor
-            mock_loop = Mock()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.run_in_executor.return_value = future
-            mock_get_loop.return_value = mock_loop
-
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=raw),
+        ) as mock_fetch:
             result = await client._fetch_content(parsed_url)
 
-            assert result == expected_result
-            mock_request_class.assert_called_once_with(
-                host="example.com",
-                port=70,
-                path="/search",
-                query="python",
-                itype="7",
-                tls=False,
-                tls_verify=True,
-            )
-            mock_process.assert_called_once_with(mock_response, parsed_url)
+        assert isinstance(result, MenuResult)
+        mock_fetch.assert_awaited_once_with(
+            "example.com",
+            70,
+            "/search",
+            "python",
+            max_bytes=client.max_response_size,
+            timeout=client.timeout_seconds,
+        )
 
     @pytest.mark.asyncio
     async def test_fetch_content_binary_types(self):
-        """Test fetching binary content (types 4, 5, 6, 9, g, I)."""
+        """Binary types return metadata-only BinaryResult."""
         client = GopherClient()
-
-        binary_types = ["4", "5", "6", "9", "g", "I"]
-
-        for gopher_type in binary_types:
+        for gopher_type in ["4", "5", "6", "9", "g", "I"]:
             parsed_url = GopherURL(
                 host="example.com",
                 port=70,
@@ -813,93 +610,43 @@ class TestFetchContentMethod:
                 selector="/file.bin",
                 search=None,
             )
-
-            mock_response = Mock()
-            expected_result = BinaryResult(
-                bytes=100, mime_type="application/octet-stream"
-            )
-
-            with (
-                patch("pituophis.Request") as mock_request_class,
-                patch.object(client, "_process_binary_response") as mock_process,
-                patch("asyncio.get_event_loop") as mock_get_loop,
+            with patch(
+                "gopher_mcp.gopher_client.fetch_gopher",
+                new=AsyncMock(return_value=b"\x89PNG\r\n\x1a\nx"),
             ):
-                mock_request = Mock()
-                mock_request.get.return_value = mock_response
-                mock_request_class.return_value = mock_request
-                mock_process.return_value = expected_result
-
-                # Mock asyncio.get_event_loop().run_in_executor
-                mock_loop = Mock()
-                future = asyncio.Future()
-                future.set_result(mock_response)
-                mock_loop.run_in_executor.return_value = future
-                mock_get_loop.return_value = mock_loop
-
                 result = await client._fetch_content(parsed_url)
-
-                assert result == expected_result
-                mock_process.assert_called_once_with(mock_response)
+            assert isinstance(result, BinaryResult)
+            assert result.mime_type == "image/png"
 
     @pytest.mark.asyncio
     async def test_fetch_content_unknown_type(self):
-        """Test fetching unknown content type (defaults to text)."""
+        """Unknown types default to text handling."""
         client = GopherClient()
         parsed_url = GopherURL(
             host="example.com",
             port=70,
-            gopherType="X",  # Unknown type
+            gopherType="X",
             selector="/unknown",
             search=None,
         )
-
-        mock_response = Mock()
-        expected_result = TextResult(text="unknown content", bytes=15, charset="utf-8")
-
-        with (
-            patch("pituophis.Request") as mock_request_class,
-            patch.object(client, "_process_text_response") as mock_process,
-            patch("asyncio.get_event_loop") as mock_get_loop,
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"unknown content"),
         ):
-            mock_request = Mock()
-            mock_request.get.return_value = mock_response
-            mock_request_class.return_value = mock_request
-            mock_process.return_value = expected_result
-
-            # Mock asyncio.get_event_loop().run_in_executor
-            mock_loop = Mock()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.run_in_executor.return_value = future
-            mock_get_loop.return_value = mock_loop
-
             result = await client._fetch_content(parsed_url)
-
-            assert result == expected_result
-            mock_process.assert_called_once_with(mock_response)
+        assert isinstance(result, TextResult)
+        assert result.text == "unknown content"
 
     @pytest.mark.asyncio
-    async def test_fetch_content_pituophis_error(self):
-        """Test _fetch_content with pituophis error."""
+    async def test_fetch_content_transport_error_propagates(self):
+        """Transport errors propagate to be mapped by fetch()."""
         client = GopherClient()
         parsed_url = GopherURL(
-            host="example.com", port=70, gopherType="1", selector="/", search=None
+            host="example.com", port=70, gopherType="1", selector="", search=None
         )
-
-        with (
-            patch("pituophis.Request") as mock_request_class,
-            patch("asyncio.get_event_loop") as mock_get_loop,
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(side_effect=GopherProtocolError("Connection failed")),
         ):
-            mock_request = Mock()
-            mock_request.get.side_effect = Exception("Connection failed")
-            mock_request_class.return_value = mock_request
-
-            # Mock asyncio.get_event_loop().run_in_executor
-            mock_loop = Mock()
-            future = asyncio.Future()
-            future.set_exception(Exception("Connection failed"))
-            mock_loop.run_in_executor.return_value = future
-            mock_get_loop.return_value = mock_loop
-
-            with pytest.raises(Exception, match="Connection failed"):
+            with pytest.raises(GopherProtocolError, match="Connection failed"):
                 await client._fetch_content(parsed_url)

@@ -8,8 +8,8 @@ These tests verify end-to-end functionality including:
 """
 
 import asyncio
-from unittest.mock import Mock, patch
 from typing import Any
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -29,6 +29,14 @@ def clear_client_manager():
     ClientManager._instance = None
 
 
+def patch_gopher(raw: bytes) -> Any:
+    """Patch the Gopher transport to return canned raw bytes."""
+    return patch(
+        "gopher_mcp.gopher_client.fetch_gopher",
+        new=AsyncMock(return_value=raw),
+    )
+
+
 @pytest.mark.integration
 class TestGopherIntegration:
     """Integration tests for complete Gopher fetch workflow."""
@@ -38,30 +46,8 @@ class TestGopherIntegration:
         """Test complete workflow for fetching a Gopher menu."""
         clear_client_manager()
 
-        # Mock the Pituophis response
-        mock_menu_item = Mock()
-        mock_menu_item.itype = "0"
-        mock_menu_item.text = "Test Document"
-        mock_menu_item.path = "/test.txt"
-        mock_menu_item.host = "example.com"
-        mock_menu_item.port = 70
-
-        mock_response = Mock()
-        mock_response.menu.return_value = [mock_menu_item]
-
-        mock_request = Mock()
-        mock_request.get.return_value = mock_response
-
-        with (
-            patch("pituophis.Request", return_value=mock_request),
-            patch("asyncio.get_event_loop") as mock_loop,
-        ):
-            # Mock event loop executor
-            asyncio.get_event_loop()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.return_value.run_in_executor.return_value = future
-
+        raw = b"0Test Document\t/test.txt\texample.com\t70\r\n.\r\n"
+        with patch_gopher(raw):
             result = await gopher_fetch("gopher://example.com/1/")
 
             assert result["kind"] == "menu"
@@ -74,22 +60,7 @@ class TestGopherIntegration:
         """Test complete workflow for fetching Gopher text."""
         clear_client_manager()
 
-        mock_response = Mock()
-        mock_response.text = Mock(return_value="Hello, Gopher!")
-        mock_response.binary = b"Hello, Gopher!"
-
-        mock_request = Mock()
-        mock_request.get.return_value = mock_response
-
-        with (
-            patch("pituophis.Request", return_value=mock_request),
-            patch("asyncio.get_event_loop") as mock_loop,
-        ):
-            asyncio.get_event_loop()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.return_value.run_in_executor.return_value = future
-
+        with patch_gopher(b"Hello, Gopher!"):
             result = await gopher_fetch("gopher://example.com/0/test.txt")
 
             assert result["kind"] == "text"
@@ -101,22 +72,7 @@ class TestGopherIntegration:
         """Test complete workflow for fetching Gopher binary content."""
         clear_client_manager()
 
-        mock_response = Mock()
-        mock_response.size = Mock(return_value=1024)
-        mock_response.binary = b"x" * 1024
-
-        mock_request = Mock()
-        mock_request.get.return_value = mock_response
-
-        with (
-            patch("pituophis.Request", return_value=mock_request),
-            patch("asyncio.get_event_loop") as mock_loop,
-        ):
-            asyncio.get_event_loop()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.return_value.run_in_executor.return_value = future
-
+        with patch_gopher(b"x" * 1024):
             result = await gopher_fetch("gopher://example.com/9/file.bin")
 
             assert result["kind"] == "binary"
@@ -127,34 +83,19 @@ class TestGopherIntegration:
         """Test that caching works across multiple requests."""
         clear_client_manager()
 
-        mock_response = Mock()
-        mock_response.text = Mock(return_value="Cached content")
-        mock_response.binary = b"Cached content"
-
-        mock_request = Mock()
-        mock_request.get.return_value = mock_response
-
-        with (
-            patch("pituophis.Request", return_value=mock_request),
-            patch("asyncio.get_event_loop") as mock_loop,
-        ):
-            asyncio.get_event_loop()
-            future = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.return_value.run_in_executor.return_value = future
-
+        with patch_gopher(b"Cached content") as mock_fetch:
             # First fetch - should hit the network
             result1 = await gopher_fetch("gopher://example.com/0/cached.txt")
             assert result1["kind"] == "text"
             assert result1["text"] == "Cached content"
 
-            # Second fetch - should use cache
+            # Second fetch - should use cache (transport called only once)
             result2 = await gopher_fetch("gopher://example.com/0/cached.txt")
             assert result2["kind"] == "text"
             assert result2["text"] == "Cached content"
 
-            # Both results should be identical (from cache)
             assert result1 == result2
+            assert mock_fetch.await_count == 1
 
 
 @pytest.mark.integration
@@ -171,6 +112,7 @@ class TestGeminiIntegration:
         mock_connection_info = {
             "peer_cert": Mock(),
             "cipher": ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
         }
 
         raw_response = b"20 text/gemini\r\n# Test Page\nHello, Gemini!"
@@ -184,7 +126,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None  # No TOFU errors
+            mock_tofu.return_value = (True, None)  # No TOFU errors
 
             result = await gemini_fetch("gemini://example.com/")
 
@@ -201,7 +143,11 @@ class TestGeminiIntegration:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
 
         # Redirect response
         raw_response = b"30 gemini://example.com/new-location\r\n"
@@ -215,7 +161,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             result = await gemini_fetch("gemini://example.com/old-location")
 
@@ -228,7 +174,11 @@ class TestGeminiIntegration:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
 
         # Error response
         raw_response = b"40 Not Found\r\n"
@@ -242,7 +192,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             result = await gemini_fetch("gemini://example.com/notfound")
 
@@ -255,7 +205,11 @@ class TestGeminiIntegration:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
         raw_response = b"20 text/gemini\r\n# Cached\nCached content"
 
         with (
@@ -267,7 +221,7 @@ class TestGeminiIntegration:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             # First fetch
             result1 = await gemini_fetch("gemini://example.com/cached")
@@ -290,26 +244,32 @@ class TestErrorPaths:
         """Test handling of network timeout errors."""
         clear_client_manager()
 
-        with patch("pituophis.Request") as mock_request_class:
-            mock_request = Mock()
-            mock_request.get.side_effect = TimeoutError("Connection timeout")
-            mock_request_class.return_value = mock_request
+        from gopher_mcp.gopher_transport import GopherProtocolError
 
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(
+                side_effect=GopherProtocolError("Request timed out after 30 seconds")
+            ),
+        ):
             result = await gopher_fetch("gopher://timeout.example.com/1/")
 
             assert "error" in result
-            assert "timeout" in result["error"]["message"].lower()
+            assert "timed out" in result["error"]["message"].lower()
 
     @pytest.mark.asyncio
     async def test_gopher_connection_refused(self) -> None:
         """Test handling of connection refused errors."""
         clear_client_manager()
 
-        with patch("pituophis.Request") as mock_request_class:
-            mock_request = Mock()
-            mock_request.get.side_effect = ConnectionRefusedError("Connection refused")
-            mock_request_class.return_value = mock_request
+        from gopher_mcp.gopher_transport import GopherProtocolError
 
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(
+                side_effect=GopherProtocolError("Connection failed: refused")
+            ),
+        ):
             result = await gopher_fetch("gopher://refused.example.com/1/")
 
             assert "error" in result
@@ -320,24 +280,11 @@ class TestErrorPaths:
         """Test handling of malformed Gopher responses."""
         clear_client_manager()
 
-        mock_response = Mock()
-        mock_response.menu.side_effect = ValueError("Malformed menu")
-
-        mock_request = Mock()
-        mock_request.get.return_value = mock_response
-
-        with (
-            patch("pituophis.Request", return_value=mock_request),
-            patch("asyncio.get_event_loop") as mock_loop,
-        ):
-            asyncio.get_event_loop()
-            future: asyncio.Future[Any] = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.return_value.run_in_executor.return_value = future
-
+        # Malformed lines (too few fields) are skipped, yielding an empty menu
+        # rather than raising; a genuinely empty directory looks the same.
+        with patch_gopher(b"garbage-with-no-tabs\r\nalso bad\r\n.\r\n"):
             result = await gopher_fetch("gopher://example.com/1/")
 
-            # Should return empty menu on parse error
             assert result["kind"] == "menu"
             assert result["items"] == []
 
@@ -392,7 +339,11 @@ class TestErrorPaths:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
 
         # Invalid response (missing CRLF)
         raw_response = b"20 text/gemini"
@@ -406,7 +357,7 @@ class TestErrorPaths:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             result = await gemini_fetch("gemini://example.com/malformed")
 
@@ -435,22 +386,7 @@ class TestConcurrency:
         """Test multiple concurrent Gopher requests."""
         clear_client_manager()
 
-        mock_response = Mock()
-        mock_response.text = Mock(return_value="Concurrent content")
-        mock_response.binary = b"Concurrent content"
-
-        mock_request = Mock()
-        mock_request.get.return_value = mock_response
-
-        with (
-            patch("pituophis.Request", return_value=mock_request),
-            patch("asyncio.get_event_loop") as mock_loop,
-        ):
-            asyncio.get_event_loop()
-            future: asyncio.Future[Any] = asyncio.Future()
-            future.set_result(mock_response)
-            mock_loop.return_value.run_in_executor.return_value = future
-
+        with patch_gopher(b"Concurrent content"):
             # Make 10 concurrent requests
             tasks = [
                 gopher_fetch(f"gopher://example.com/0/file{i}.txt") for i in range(10)
@@ -469,7 +405,11 @@ class TestConcurrency:
         clear_client_manager()
 
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
         raw_response = b"20 text/gemini\r\n# Concurrent\nContent"
 
         with (
@@ -481,7 +421,7 @@ class TestConcurrency:
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             # Make 10 concurrent requests
             tasks = [gemini_fetch(f"gemini://example.com/page{i}") for i in range(10)]
@@ -511,34 +451,26 @@ class TestConcurrency:
         """Test concurrent requests to both Gopher and Gemini."""
         clear_client_manager()
 
-        # Mock Gopher
-        mock_gopher_response = Mock()
-        mock_gopher_response.text.return_value = "Gopher content"
-        mock_gopher_request = Mock()
-        mock_gopher_request.get.return_value = mock_gopher_response
-
         # Mock Gemini
         mock_ssl_sock = Mock()
-        mock_connection_info = {"peer_cert": Mock(), "cipher": ("TLS", "TLSv1.3", 256)}
+        mock_connection_info = {
+            "peer_cert": Mock(),
+            "cipher": ("TLS", "TLSv1.3", 256),
+            "cert_fingerprint": "sha256:testfp",
+        }
         raw_gemini_response = b"20 text/gemini\r\n# Gemini\nContent"
 
         with (
-            patch("pituophis.Request", return_value=mock_gopher_request),
-            patch("asyncio.get_event_loop") as mock_loop,
+            patch_gopher(b"Gopher content"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.close"),
             patch("gopher_mcp.tofu.TOFUManager.validate_certificate") as mock_tofu,
         ):
-            asyncio.get_event_loop()
-            future: asyncio.Future[Any] = asyncio.Future()
-            future.set_result(mock_gopher_response)
-            mock_loop.return_value.run_in_executor.return_value = future
-
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = raw_gemini_response
-            mock_tofu.return_value = None
+            mock_tofu.return_value = (True, None)
 
             # Mix of Gopher and Gemini requests
             tasks = [

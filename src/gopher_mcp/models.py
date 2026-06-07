@@ -1,9 +1,10 @@
 """Pydantic models for Gopher MCP data validation."""
 
+import base64
 from typing import Any, Dict, List, Literal, Optional, Union
 from enum import IntEnum, Enum
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator
 
 
 class GopherFetchRequest(BaseModel):
@@ -24,6 +25,8 @@ class GopherFetchRequest(BaseModel):
         """Validate that the URL is a proper Gopher URL."""
         if not v.startswith("gopher://"):
             raise ValueError("URL must start with 'gopher://'")
+        if len(v.encode("utf-8")) > 8192:
+            raise ValueError("URL must not exceed 8192 bytes")
         return v
 
 
@@ -336,6 +339,19 @@ class GeminiSuccessResult(BaseModel):
     )
     content: Union[str, bytes] = Field(..., description="Response content")
     size: int = Field(..., description="Content size in bytes")
+
+    @field_serializer("content")
+    def _serialize_content(self, v: Union[str, bytes]) -> str:
+        """Base64-encode binary content so model_dump() stays JSON-serializable.
+
+        A status-20 binary response would otherwise carry raw bytes that fail
+        to serialize at the MCP boundary. ``content_encoding`` in request_info
+        signals when the content has been base64-encoded.
+        """
+        if isinstance(v, bytes):
+            return base64.b64encode(v).decode("ascii")
+        return v
+
     request_info: Dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",

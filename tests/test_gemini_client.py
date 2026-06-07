@@ -5,16 +5,17 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from src.gopher_mcp.gemini_client import GeminiClient
-from src.gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
-from src.gopher_mcp.models import (
+from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
+from gopher_mcp.models import (
     GeminiResponse,
     GeminiStatusCode,
     GeminiSuccessResult,
     GeminiErrorResult,
+    GeminiRedirectResult,
     GeminiMimeType,
 )
-from src.gopher_mcp.tofu import TOFUValidationError
+from gopher_mcp.tofu import TOFUValidationError
 
 
 class TestGeminiClientInit:
@@ -129,7 +130,7 @@ class TestGeminiClientFetch:
         )
 
         with (
-            patch("src.gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
             patch.object(client, "_fetch_content") as mock_fetch,
         ):
             mock_parse.return_value = mock_parsed_url
@@ -168,13 +169,13 @@ class TestGeminiClientFetch:
         """Test fetch error handling."""
         client = GeminiClient()
 
-        with patch("src.gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
+        with patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
             mock_parse.side_effect = ValueError("Invalid URL")
 
             result = await client.fetch("invalid://url")
 
             assert isinstance(result, GeminiErrorResult)
-            assert result.error["code"] == "FETCH_ERROR"
+            assert result.error["code"] == "INVALID_REQUEST"
             assert "Invalid URL" in result.error["message"]
 
     @pytest.mark.asyncio
@@ -186,13 +187,102 @@ class TestGeminiClientFetch:
         mock_parsed_url.host = "forbidden.com"
         mock_parsed_url.port = 1965
 
-        with patch("src.gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
+        with patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
             mock_parse.return_value = mock_parsed_url
 
             result = await client.fetch("gemini://forbidden.com/")
 
             assert isinstance(result, GeminiErrorResult)
             assert "Host not allowed" in result.error["message"]
+
+    @pytest.mark.asyncio
+    async def test_fetch_does_not_cache_error_result(self):
+        """A transient error result must not be cached, or a momentary server
+        failure would be served stale for the full cache TTL."""
+        client = GeminiClient(cache_enabled=True)
+
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "example.com"
+        mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
+        mock_parsed_url.query = None
+
+        error_response = GeminiErrorResult(
+            error={"code": "TEMPORARY_FAILURE", "message": "Server unavailable"},
+            requestInfo={},
+        )
+
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = mock_parsed_url
+            mock_fetch.return_value = error_response
+
+            result = await client.fetch("gemini://example.com/")
+
+            assert result == error_response
+            assert client._get_cached_response("gemini://example.com/") is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_does_not_cache_redirect_result(self):
+        """A redirect result must not be cached: the target can change and a
+        stale redirect would keep sending the client to the old location."""
+        client = GeminiClient(cache_enabled=True)
+
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "example.com"
+        mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
+        mock_parsed_url.query = None
+
+        redirect_response = GeminiRedirectResult(
+            newUrl="gemini://example.com/new", requestInfo={}
+        )
+
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = mock_parsed_url
+            mock_fetch.return_value = redirect_response
+
+            result = await client.fetch("gemini://example.com/")
+
+            assert result == redirect_response
+            assert client._get_cached_response("gemini://example.com/") is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_caches_success_result(self):
+        """A successful response is still cached."""
+        client = GeminiClient(cache_enabled=True)
+
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "example.com"
+        mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
+        mock_parsed_url.query = None
+
+        success_response = GeminiSuccessResult(
+            content="Hello",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=5,
+            requestInfo={},
+        )
+
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = mock_parsed_url
+            mock_fetch.return_value = success_response
+
+            result = await client.fetch("gemini://example.com/")
+
+            assert result == success_response
+            assert (
+                client._get_cached_response("gemini://example.com/") == success_response
+            )
 
 
 class TestGeminiClientFetchContent:
@@ -235,12 +325,8 @@ class TestGeminiClientFetchContent:
             patch.object(client.tls_client, "send_data") as mock_send,
             patch.object(client.tls_client, "receive_data") as mock_receive,
             patch.object(client.tls_client, "close") as mock_close,
-            patch(
-                "src.gopher_mcp.gemini_client.parse_gemini_response"
-            ) as mock_parse_resp,
-            patch(
-                "src.gopher_mcp.gemini_client.process_gemini_response"
-            ) as mock_process,
+            patch("gopher_mcp.gemini_client.parse_gemini_response") as mock_parse_resp,
+            patch("gopher_mcp.gemini_client.process_gemini_response") as mock_process,
         ):
             mock_connect.return_value = (mock_ssl_sock, mock_connection_info)
             mock_receive.return_value = mock_raw_response
@@ -274,13 +360,14 @@ class TestGeminiClientFetchContent:
         with patch.object(client.tls_client, "connect") as mock_connect:
             mock_connect.side_effect = TLSConnectionError("Connection failed")
 
-            with pytest.raises(ValueError, match="TLS connection failed"):
+            # The typed error now propagates (fetch() maps it to TLS_ERROR).
+            with pytest.raises(TLSConnectionError, match="Connection failed"):
                 await client._fetch_content(mock_parsed_url)
 
     @pytest.mark.asyncio
     async def test_fetch_content_cleanup_on_error(self):
         """Test that TLS connection is cleaned up on error."""
-        client = GeminiClient()
+        client = GeminiClient(tofu_enabled=False)
 
         mock_parsed_url = Mock()
         mock_parsed_url.host = "example.com"
@@ -551,6 +638,7 @@ class TestGeminiClientAdvancedFeatures:
                 with patch.object(client.tls_client, "close") as _mock_close:
                     result = await client.fetch("gemini://example.com/test")
 
-                    # Should return error result
+                    # Should return a distinct, sanitized certificate error
                     assert isinstance(result, GeminiErrorResult)
-                    assert "Certificate validation failed" in result.error["message"]
+                    assert result.error["code"] == "CERTIFICATE_CHANGED"
+                    assert "TOFU" in result.error["message"]

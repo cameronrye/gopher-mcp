@@ -109,8 +109,8 @@ Add to your `claude_desktop_config.json`:
       "command": "uv",
       "args": ["--directory", "/path/to/gopher-mcp", "run", "task", "serve"],
       "env": {
-        "MAX_RESPONSE_SIZE": "1048576",
-        "TIMEOUT_SECONDS": "30"
+        "GOPHER_MAX_RESPONSE_SIZE": "1048576",
+        "GOPHER_TIMEOUT_SECONDS": "30"
       }
     }
   }
@@ -132,8 +132,8 @@ Add to your `claude_desktop_config.json`:
         "serve"
       ],
       "env": {
-        "MAX_RESPONSE_SIZE": "1048576",
-        "TIMEOUT_SECONDS": "30"
+        "GOPHER_MAX_RESPONSE_SIZE": "1048576",
+        "GOPHER_TIMEOUT_SECONDS": "30"
       }
     }
   }
@@ -184,7 +184,9 @@ uv run task <command>       # Direct taskipy usage
 
 ## Usage
 
-The server provides two powerful MCP tools for exploring alternative internet protocols:
+The server provides four MCP tools for exploring alternative internet protocols:
+`gopher_fetch` and `gemini_fetch` for single resources, plus `gopher_batch_fetch`
+and `gemini_batch_fetch` for fetching several URLs at once (bounded concurrency, capped list length).
 
 ### `gopher_fetch` Tool
 
@@ -343,6 +345,7 @@ The server can be configured through environment variables for both protocols:
 | `GOPHER_CACHE_ENABLED`     | Enable response caching        | `true`          | `false`                |
 | `GOPHER_CACHE_TTL_SECONDS` | Cache time-to-live in seconds  | `300`           | `600`                  |
 | `GOPHER_ALLOWED_HOSTS`     | Comma-separated allowed hosts  | `None` (all)    | `example.com,test.com` |
+| `GOPHER_ALLOW_LOCAL_HOSTS` | Permit loopback/private hosts  | `false`         | `true`                 |
 
 ### Gemini Configuration
 
@@ -353,8 +356,14 @@ The server can be configured through environment variables for both protocols:
 | `GEMINI_CACHE_ENABLED`        | Enable response caching            | `true`          | `false`                |
 | `GEMINI_CACHE_TTL_SECONDS`    | Cache time-to-live in seconds      | `300`           | `600`                  |
 | `GEMINI_ALLOWED_HOSTS`        | Comma-separated allowed hosts      | `None` (all)    | `example.org,test.org` |
+| `GEMINI_ALLOW_LOCAL_HOSTS`    | Permit loopback/private hosts      | `false`         | `true`                 |
 | `GEMINI_TOFU_ENABLED`         | Enable TOFU certificate validation | `true`          | `false`                |
 | `GEMINI_CLIENT_CERTS_ENABLED` | Enable client certificate support  | `true`          | `false`                |
+
+> **SSRF protection:** by default both tools reject targets that resolve to loopback,
+> link-local (including cloud metadata `169.254.169.254`), or private/RFC1918 addresses.
+> Set `GOPHER_ALLOW_LOCAL_HOSTS` / `GEMINI_ALLOW_LOCAL_HOSTS` to `true` only when you
+> deliberately need to reach local hosts (e.g. testing a server on localhost).
 
 ### Example Configuration
 
@@ -408,7 +417,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **[Model Context Protocol](https://modelcontextprotocol.io/)** by Anthropic - The foundation that makes this integration possible
 - **[FastMCP](https://github.com/jlowin/fastmcp)** - High-level Python framework for building MCP servers
-- **[Pituophis](https://github.com/dotcomboom/pituophis)** - Excellent Python Gopher client library
 - **The Gopher Protocol Community** - Keeping the spirit of the early internet alive
 
 ## Related Projects

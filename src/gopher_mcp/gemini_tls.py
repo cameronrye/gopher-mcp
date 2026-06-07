@@ -9,8 +9,6 @@ from dataclasses import dataclass
 
 import structlog
 
-from .security import TLSSecurityManager, TLSSecurityConfig
-
 logger = structlog.get_logger(__name__)
 
 
@@ -23,7 +21,6 @@ class TLSConfig:
     client_cert_path: Optional[str] = None
     client_key_path: Optional[str] = None
     timeout_seconds: float = 30.0
-    security_config: Optional[TLSSecurityConfig] = None
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -60,9 +57,6 @@ class GeminiTLSClient:
         self.config = config or TLSConfig()
         self._ssl_context: Optional[ssl.SSLContext] = None
 
-        # Initialize security manager
-        self.security_manager = TLSSecurityManager(self.config.security_config)
-
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context with secure defaults.
 
@@ -73,12 +67,7 @@ class GeminiTLSClient:
             TLSConnectionError: If SSL context creation fails
         """
         try:
-            # Use security manager to create context if available
-            if self.config.security_config:
-                context = self.security_manager.create_ssl_context()
-            else:
-                # Fallback to legacy configuration
-                context = self._create_legacy_ssl_context()
+            context = self._create_base_ssl_context()
 
             # Load client certificate if provided
             if self.config.client_cert_path and self.config.client_key_path:
@@ -94,8 +83,8 @@ class GeminiTLSClient:
         except Exception as e:
             raise TLSConnectionError(f"Failed to create SSL context: {e}", e)
 
-    def _create_legacy_ssl_context(self) -> ssl.SSLContext:
-        """Create SSL context using legacy configuration for backward compatibility."""
+    def _create_base_ssl_context(self) -> ssl.SSLContext:
+        """Create the SSL context used for Gemini (TOFU, not CA validation)."""
         # Create default context with secure settings
         context = ssl.create_default_context()
 
@@ -149,12 +138,9 @@ class GeminiTLSClient:
         Raises:
             TLSConnectionError: If connection fails
         """
-        # Validate host against security policy
-        if not self.security_manager.validate_host(host):
-            raise TLSConnectionError(f"Host {host} blocked by security policy")
-
-        # Use security manager timeout if available
-        timeout = timeout or self.security_manager.get_connection_timeout()
+        # Host-level SSRF/allowlist validation is performed by the caller
+        # (GeminiClient) before reaching the transport.
+        timeout = timeout or self.config.timeout_seconds
 
         logger.info(
             "Establishing TLS connection",
@@ -176,8 +162,8 @@ class GeminiTLSClient:
                 None, sock.connect, (host, port)
             )
 
-            # Wrap socket with TLS, including SNI
-            server_hostname = host if self.security_manager.requires_sni() else None
+            # Wrap socket with TLS, including SNI (mandatory for Gemini)
+            server_hostname = host
             ssl_sock = self.ssl_context.wrap_socket(
                 sock,
                 server_hostname=server_hostname,  # This enables SNI
@@ -227,10 +213,12 @@ class GeminiTLSClient:
         """
         try:
             peer_cert = ssl_sock.getpeercert(binary_form=True)
-            peer_cert_info = ssl_sock.getpeercert()
+            # Under CERT_NONE getpeercert() returns {}, so derive cert details
+            # from the DER instead (this is where the expiry actually lives).
+            peer_cert_info = self._parse_peer_cert(peer_cert)
             cipher = ssl_sock.cipher()
 
-            info = {
+            info: Dict[str, Any] = {
                 "connection_time": connection_time,
                 "tls_version": ssl_sock.version(),
                 "cipher": cipher[0] if cipher else None,
@@ -252,6 +240,29 @@ class GeminiTLSClient:
         except Exception as e:
             logger.warning("Failed to extract connection info", error=str(e))
             return {"connection_time": connection_time, "error": str(e)}
+
+    @staticmethod
+    def _parse_peer_cert(peer_cert_der: Optional[bytes]) -> Dict[str, Any]:
+        """Extract certificate details from DER bytes.
+
+        Works under CERT_NONE (where ssl.getpeercert() returns an empty dict),
+        so the certificate's validity window is actually available to TOFU.
+        """
+        if not peer_cert_der:
+            return {}
+        try:
+            from cryptography import x509
+
+            cert = x509.load_der_x509_certificate(peer_cert_der)
+            return {
+                "subject": cert.subject.rfc4514_string(),
+                "issuer": cert.issuer.rfc4514_string(),
+                "not_before_timestamp": cert.not_valid_before_utc.timestamp(),
+                "not_after_timestamp": cert.not_valid_after_utc.timestamp(),
+            }
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Failed to parse peer certificate", error=str(e))
+            return {}
 
     async def close(self, ssl_sock: ssl.SSLSocket) -> None:
         """Close TLS connection gracefully with close_notify.
@@ -301,20 +312,47 @@ class GeminiTLSClient:
             Received data
 
         Raises:
-            TLSConnectionError: If receive fails
+            TLSConnectionError: If receive fails or the response exceeds max_size.
         """
+        loop = asyncio.get_running_loop()
         try:
-            data = b""
-            while len(data) < max_size:
-                chunk = await asyncio.get_event_loop().run_in_executor(
-                    None, ssl_sock.recv, min(4096, max_size - len(data))
+            chunks: list[bytes] = []
+            total = 0
+            while total < max_size:
+                chunk = await loop.run_in_executor(
+                    None, ssl_sock.recv, min(4096, max_size - total)
                 )
                 if not chunk:
-                    break
-                data += chunk
+                    return b"".join(chunks)
+                chunks.append(chunk)
+                total += len(chunk)
 
-            return data
+            # Hit the cap without EOF: probe one more byte so an over-limit
+            # response is REJECTED rather than silently truncated (which would
+            # hand the model a corrupted, incomplete document as if complete).
+            #
+            # Use a short timeout for the probe: a server that sent a body of
+            # exactly max_size bytes and then holds the connection open
+            # (delayed or absent close_notify) would otherwise block this
+            # recv until the socket deadline and turn a complete, valid
+            # response into a spurious error. A probe timeout means "no more
+            # data is forthcoming", so treat the response as complete.
+            prev_timeout = ssl_sock.gettimeout()
+            ssl_sock.settimeout(1.0)
+            try:
+                extra = await loop.run_in_executor(None, ssl_sock.recv, 1)
+            except (TimeoutError, ssl.SSLError, OSError):
+                extra = b""
+            finally:
+                ssl_sock.settimeout(prev_timeout)
+            if extra:
+                raise TLSConnectionError(
+                    f"Response exceeds maximum size of {max_size} bytes"
+                )
+            return b"".join(chunks)
 
+        except TLSConnectionError:
+            raise
         except Exception as e:
             raise TLSConnectionError(f"Failed to receive data: {e}", e)
 

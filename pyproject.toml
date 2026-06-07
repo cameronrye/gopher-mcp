@@ -32,7 +32,6 @@ classifiers = [
 requires-python = ">=3.11"
 dependencies = [
     "mcp>=1.0.0",
-    "pituophis>=1.0.0",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.0.0",
     "structlog>=23.2.0",
@@ -150,7 +149,7 @@ strict_equality = true
 show_error_codes = true
 
 [[tool.mypy.overrides]]
-module = ["pituophis.*", "mcp.*"]
+module = ["mcp.*"]
 ignore_missing_imports = true
 
 # Pytest configuration
@@ -163,7 +162,7 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=50",
+    "--cov-fail-under=85",
 ]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -241,3 +240,10 @@ skips = ["B101"]         # Skip assert_used test
 dev = ["taskipy>=1.14.1"]
 
 # Additional tool configurations can be added here as needed
+
+[tool.uv]
+# setuptools is pulled in only by the `safety` dev scanner. Pin it to 81.x:
+# it vendors a patched wheel (>=0.46.2, clears CVE-2026-24049) while still
+# shipping pkg_resources, which safety 2.3.4 imports (removed in setuptools 82).
+# The project itself builds with hatchling, so this does not affect packaging.
+constraint-dependencies = ["setuptools>=81,<82"]
