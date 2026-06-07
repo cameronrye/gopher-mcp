@@ -1,33 +1,35 @@
 """Utility functions for Gopher protocol operations."""
 
+import contextlib
 import json
 import os
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Union
+from typing import Any, Optional, Union
 from urllib.parse import unquote, urlparse
 
 from .models import (
-    GopherMenuItem,
-    GopherURL,
+    GeminiCertificateResult,
+    GeminiErrorResult,
+    GeminiFetchResponse,
+    GeminiGemtextResult,
+    GeminiInputResult,
+    GeminiMimeType,
+    GeminiRedirectResult,
+    GeminiResponse,
+    GeminiStatusCode,
+    GeminiSuccessResult,
     GeminiURL,
     GemtextDocument,
-    GeminiResponse,
-    GeminiMimeType,
-    GeminiFetchResponse,
-    GeminiInputResult,
-    GeminiSuccessResult,
-    GeminiGemtextResult,
-    GeminiRedirectResult,
-    GeminiErrorResult,
-    GeminiCertificateResult,
+    GemtextHeading,
+    GemtextLine,
     GemtextLineType,
     GemtextLink,
-    GemtextHeading,
     GemtextList,
-    GemtextQuote,
     GemtextPreformat,
-    GemtextLine,
+    GemtextQuote,
+    GopherMenuItem,
+    GopherURL,
 )
 
 
@@ -62,16 +64,20 @@ def atomic_write_json(file_path: str, data: Any) -> None:
 
         # Rename temporary file to target
         Path(temp_path).rename(file_path)
+        # Make the destination owner-only. These files (TOFU store, client-cert
+        # registry) are integrity-sensitive, so don't rely solely on the parent
+        # dir's 0700 (whose chmod is best-effort). No-op / harmless on Windows.
+        with contextlib.suppress(OSError):
+            Path(file_path).chmod(0o600)
     except Exception:
-        # Clean up temporary file if rename fails
-        try:
+        # Clean up temporary file if rename fails (ignore cleanup failures so
+        # the original error is preserved).
+        with contextlib.suppress(Exception):
             Path(temp_path).unlink()
-        except Exception:  # nosec B110
-            pass  # Ignore cleanup failures to preserve original error
         raise
 
 
-def get_home_directory() -> Optional[Path]:
+def get_home_directory() -> Path | None:
     """Get the user's home directory with fallback handling.
 
     Returns:
@@ -103,13 +109,25 @@ def parse_gopher_url(url: str) -> GopherURL:
     if not url.startswith("gopher://"):
         raise ValueError("URL must start with 'gopher://'")
 
-    parsed = urlparse(url)
+    # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
+    # accessed, so the access must live inside the try block.
+    try:
+        parsed = urlparse(url)
+        port = parsed.port if parsed.port is not None else 70
+    except ValueError as e:
+        if "Port out of range" in str(e):
+            raise ValueError("Invalid port number: port out of range") from e
+        raise
 
     if not parsed.hostname:
         raise ValueError("URL must contain a hostname")
 
+    # Reject an explicit invalid port instead of silently coercing it (``0`` is
+    # falsy, so the old ``parsed.port or 70`` rewrote it to the default).
+    if not 1 <= port <= 65535:
+        raise ValueError(f"Invalid port number: {port}")
+
     host = parsed.hostname
-    port = parsed.port or 70
 
     # Parse the path to extract gopher type and selector
     path = parsed.path or "/"
@@ -117,22 +135,25 @@ def parse_gopher_url(url: str) -> GopherURL:
     if len(path) <= 1:
         # Empty path or just "/", default to directory listing
         gopher_type = "1"
-        selector = ""
+        raw_selector = ""
     else:
         # First character after "/" is the gopher type
         gopher_type = path[1]
-        selector = path[2:] if len(path) > 2 else ""
+        raw_selector = path[2:] if len(path) > 2 else ""
 
-    # Handle search queries (type 7)
+    # Decode the selector to its on-wire form. Split any embedded %09 search
+    # BEFORE decoding so a literal tab in the decoded text can't be confused
+    # with the field separator.
     search = None
     if parsed.query:
-        # URL-decode the query
         search = unquote(parsed.query)
-    elif "%09" in selector:
-        # Handle tab-separated search in selector
-        parts = selector.split("%09", 1)
-        selector = parts[0]
-        search = unquote(parts[1]) if len(parts) > 1 else ""
+        selector = unquote(raw_selector)
+    elif "%09" in raw_selector:
+        sel_part, _, search_part = raw_selector.partition("%09")
+        selector = unquote(sel_part)
+        search = unquote(search_part)
+    else:
+        selector = unquote(raw_selector)
 
     return GopherURL(
         host=host,
@@ -143,7 +164,7 @@ def parse_gopher_url(url: str) -> GopherURL:
     )
 
 
-def parse_menu_line(line: str) -> Optional[GopherMenuItem]:
+def parse_menu_line(line: str) -> GopherMenuItem | None:
     """Parse a single Gopher menu line.
 
     Args:
@@ -171,7 +192,10 @@ def parse_menu_line(line: str) -> Optional[GopherMenuItem]:
         display = parts[0][1:] if len(parts[0]) > 1 else ""
         selector = parts[1]
         host = parts[2]
-        port = int(parts[3]) if parts[3].isdigit() else 70
+        # ``str.isdigit()`` accepts unicode digits (e.g. "²") that ``int()``
+        # rejects; require ASCII so a bad port degrades to the default rather
+        # than dropping the whole menu item.
+        port = int(parts[3]) if parts[3].isascii() and parts[3].isdigit() else 70
 
         # Construct the next URL
         next_url = f"gopher://{host}:{port}/{item_type}{selector}"
@@ -188,7 +212,7 @@ def parse_menu_line(line: str) -> Optional[GopherMenuItem]:
         return None
 
 
-def parse_gopher_menu(content: str) -> List[GopherMenuItem]:
+def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
     """Parse a complete Gopher menu response.
 
     Args:
@@ -226,7 +250,7 @@ def sanitize_selector(selector: str) -> str:
 
     for char in forbidden_chars:
         if char in selector:
-            raise ValueError(f"Selector contains forbidden character: {repr(char)}")
+            raise ValueError(f"Selector contains forbidden character: {char!r}")
 
     # Limit length
     if len(selector) > 255:
@@ -240,7 +264,7 @@ def format_gopher_url(
     port: int = 70,
     gopher_type: str = "1",
     selector: str = "",
-    search: Optional[str] = None,
+    search: str | None = None,
 ) -> str:
     """Format a Gopher URL from components.
 
@@ -364,12 +388,16 @@ def parse_gemini_url(url: str) -> GeminiURL:
     if len(url.encode("utf-8")) > 1024:
         raise ValueError("URL must not exceed 1024 bytes")
 
+    # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
+    # accessed, so the access must live inside the try block for the friendly
+    # message to be reachable.
     try:
         parsed = urlparse(url)
+        port = parsed.port if parsed.port is not None else 1965  # Default port
     except ValueError as e:
         # Handle port parsing errors from urllib
         if "Port out of range" in str(e):
-            raise ValueError("Invalid port number: port out of range")
+            raise ValueError("Invalid port number: port out of range") from e
         raise
 
     if not parsed.hostname:
@@ -383,11 +411,11 @@ def parse_gemini_url(url: str) -> GeminiURL:
         raise ValueError("URL must not contain fragment")
 
     host = parsed.hostname
-    port = parsed.port or 1965  # Default Gemini port
     path = parsed.path or "/"  # Default to root path
     query = parsed.query or None  # Query string for user input
 
-    # Validate port range (additional check in case urllib didn't catch it)
+    # Reject an explicit invalid port instead of silently coercing it (``0`` is
+    # falsy, so the old ``parsed.port or 1965`` rewrote it to the default).
     if not 1 <= port <= 65535:
         raise ValueError(f"Invalid port number: {port}")
 
@@ -403,7 +431,7 @@ def format_gemini_url(
     host: str,
     port: int = 1965,
     path: str = "/",
-    query: Optional[str] = None,
+    query: str | None = None,
 ) -> str:
     """Format a Gemini URL from components.
 
@@ -436,7 +464,7 @@ def format_gemini_url(
     return url
 
 
-def _detect_language_from_alt_text(alt_text: Optional[str]) -> Optional[str]:
+def _detect_language_from_alt_text(alt_text: str | None) -> str | None:
     """Detect programming language from preformat alt-text.
 
     Args:
@@ -493,9 +521,7 @@ def _detect_language_from_alt_text(alt_text: Optional[str]) -> Optional[str]:
     return language_map.get(alt_lower)
 
 
-def _extract_preformat_metadata(
-    alt_text: Optional[str], content: str
-) -> Dict[str, Any]:
+def _extract_preformat_metadata(alt_text: str | None, content: str) -> dict[str, Any]:
     """Extract metadata from preformat block.
 
     Args:
@@ -542,7 +568,7 @@ def _extract_preformat_metadata(
     return metadata
 
 
-def _parse_gemtext_link_line(line: str) -> Optional[Dict[str, Optional[str]]]:
+def _parse_gemtext_link_line(line: str) -> dict[str, str | None] | None:
     """Parse a gemtext link line.
 
     Format: =>[whitespace]<URL>[whitespace]<link-text>
@@ -588,8 +614,8 @@ def _create_gemtext_line(
     list_item: Optional["GemtextList"] = None,
     quote: Optional["GemtextQuote"] = None,
     preformat: Optional["GemtextPreformat"] = None,
-    level: Optional[int] = None,
-    alt_text: Optional[str] = None,
+    level: int | None = None,
+    alt_text: str | None = None,
 ) -> "GemtextLine":
     """Create a GemtextLine object with the given parameters.
 
@@ -607,7 +633,6 @@ def _create_gemtext_line(
     Returns:
         GemtextLine object
     """
-    from .models import GemtextLine
 
     return GemtextLine(
         type=line_type,
@@ -631,7 +656,6 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
     Returns:
         GemtextLine object if this is a heading, None otherwise
     """
-    from .models import GemtextHeading, GemtextLineType
 
     if line_content.startswith("###"):
         heading_text = line_content[3:].strip()
@@ -663,7 +687,7 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
 
 def _parse_link(
     line_content: str,
-) -> Optional[tuple["GemtextLine", Optional["GemtextLink"]]]:
+) -> tuple["GemtextLine", Optional["GemtextLink"]] | None:
     """Parse a link line.
 
     Args:
@@ -672,7 +696,6 @@ def _parse_link(
     Returns:
         Tuple of (GemtextLine, GemtextLink) if this is a valid link, (GemtextLine as text, None) if invalid link syntax, None if not a link
     """
-    from .models import GemtextLink, GemtextLineType
 
     if not line_content.startswith("=>"):
         return None
@@ -697,7 +720,6 @@ def _parse_list_item(line_content: str) -> Optional["GemtextLine"]:
     Returns:
         GemtextLine object if this is a list item, None otherwise
     """
-    from .models import GemtextList, GemtextLineType
 
     if line_content.startswith("* "):
         list_text = line_content[2:].strip()
@@ -718,7 +740,6 @@ def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
     Returns:
         GemtextLine object if this is a quote, None otherwise
     """
-    from .models import GemtextQuote, GemtextLineType
 
     if line_content.startswith(">"):
         quote_text = line_content[1:].strip()
@@ -739,7 +760,6 @@ def _parse_text(line_content: str) -> "GemtextLine":
     Returns:
         GemtextLine object for text
     """
-    from .models import GemtextLineType
 
     return _create_gemtext_line(GemtextLineType.TEXT, line_content)
 
@@ -754,23 +774,25 @@ def parse_gemtext(content: str) -> "GemtextDocument":
         Parsed gemtext document
 
     """
-    # Import here to avoid circular imports
-    from .models import (
-        GemtextDocument,
-        GemtextLineType,
-        GemtextPreformat,
-    )
 
     lines = []
     links = []
     in_preformat = False
     current_alt_text = None
 
-    # Split content into lines, preserving line endings
-    raw_lines = content.splitlines()
+    # Split on CRLF/LF only. ``str.splitlines()`` also breaks on \v, \f, NEL,
+    # U+2028/U+2029 etc., which are NOT gemtext line terminators and would
+    # corrupt line structure. Drop a single trailing empty element so a final
+    # newline doesn't synthesize an extra blank line (matching splitlines).
+    normalized = content.replace("\r\n", "\n")
+    raw_lines = normalized.split("\n")
+    if raw_lines and raw_lines[-1] == "":
+        raw_lines.pop()
 
     for raw_line in raw_lines:
-        line_content = raw_line.rstrip()  # Remove trailing whitespace
+        # Preformatted content must be preserved verbatim; only rstrip lines we
+        # are about to classify in normal mode.
+        line_content = raw_line if in_preformat else raw_line.rstrip()
 
         # Handle preformat mode
         if in_preformat:
@@ -868,7 +890,7 @@ def validate_gemini_url_components(
     host: str,
     port: int = 1965,
     path: str = "/",
-    query: Optional[str] = None,
+    query: str | None = None,
 ) -> None:
     """Validate Gemini URL components.
 
@@ -953,12 +975,9 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         if not (10 <= status_code <= 69):
             raise ValueError(f"Status code out of range: {status_code}")
 
-        # Import here to avoid circular imports
-        from .models import GeminiStatusCode, GeminiResponse
-
         # Convert to enum
         try:
-            status_enum: Union[GeminiStatusCode, int] = GeminiStatusCode(status_code)
+            status_enum: GeminiStatusCode | int = GeminiStatusCode(status_code)
         except ValueError:
             # Handle unknown status codes within valid range
             status_enum = status_code
@@ -966,9 +985,12 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         return GeminiResponse(status=status_enum, meta=meta, body=body)
 
     except UnicodeDecodeError as e:
-        raise ValueError(f"Invalid UTF-8 in status line: {e}")
+        raise ValueError(f"Invalid UTF-8 in status line: {e}") from e
+    except ValueError:
+        # Re-raise our own validation errors unchanged (don't double-wrap).
+        raise
     except Exception as e:
-        raise ValueError(f"Failed to parse response: {e}")
+        raise ValueError(f"Failed to parse response: {e}") from e
 
 
 def parse_gemini_mime_type(mime_string: str) -> "GeminiMimeType":
@@ -983,7 +1005,6 @@ def parse_gemini_mime_type(mime_string: str) -> "GeminiMimeType":
     Raises:
         ValueError: If MIME type format is invalid
     """
-    from .models import GeminiMimeType
 
     if not mime_string.strip():
         raise ValueError("Empty MIME type")
@@ -1014,16 +1035,18 @@ def parse_gemini_mime_type(mime_string: str) -> "GeminiMimeType":
     charset = "utf-8"  # Default
     lang = None
 
-    for param in parts[1:]:
-        param = param.strip()
+    for raw_param in parts[1:]:
+        param = raw_param.strip()
         if "=" in param:
             key, value = param.split("=", 1)
             key = key.strip().lower()
             value = value.strip().strip("\"'")  # Remove quotes
 
-            if key == "charset":
+            # Ignore empty values (e.g. "charset=") so they fall back to the
+            # default rather than propagating an empty string downstream.
+            if key == "charset" and value:
                 charset = value
-            elif key == "lang":
+            elif key == "lang" and value:
                 lang = value
             # Note: content-encoding not supported in Gemini protocol
 
@@ -1038,7 +1061,6 @@ def get_default_gemini_mime_type() -> "GeminiMimeType":
     Returns:
         Default GeminiMimeType (text/gemini; charset=utf-8)
     """
-    from .models import GeminiMimeType
 
     return GeminiMimeType(type="text", subtype="gemini", charset="utf-8", lang=None)
 
@@ -1137,7 +1159,7 @@ def validate_gemini_mime_type(mime_type: "GeminiMimeType") -> bool:
 
 
 def process_gemini_response(
-    response: "GeminiResponse", request_url: str, request_time: Optional[float] = None
+    response: "GeminiResponse", request_url: str, request_time: float | None = None
 ) -> "GeminiFetchResponse":
     """Process Gemini response based on status code.
 
@@ -1153,9 +1175,6 @@ def process_gemini_response(
         ValueError: If status code is unsupported or response is invalid
     """
     import time
-    from .models import (
-        GeminiErrorResult,
-    )
 
     if request_time is None:
         request_time = time.time()
@@ -1176,11 +1195,11 @@ def process_gemini_response(
     if 10 <= status_code <= 19:
         return _process_input_response(status_code, meta, request_info)
 
-    # Success (20-29)
+    # Success: status codes 20 through 29
     elif 20 <= status_code <= 29:
         return _process_success_response(meta, body, request_info)
 
-    # Redirect (30-39)
+    # Redirect: status codes 30 through 39
     elif 30 <= status_code <= 39:
         return _process_redirect_response(status_code, meta, request_info)
 
@@ -1194,7 +1213,7 @@ def process_gemini_response(
 
     # Client certificate required (60-69)
     elif 60 <= status_code <= 69:
-        return _process_certificate_response(status_code, meta, request_info)
+        return _process_certificate_response(meta, request_info)
 
     else:
         # This shouldn't happen due to validation in parse_gemini_response
@@ -1209,7 +1228,7 @@ def process_gemini_response(
 
 
 def _process_input_response(
-    status_code: int, meta: str, request_info: Dict[str, Any]
+    status_code: int, meta: str, request_info: dict[str, Any]
 ) -> "GeminiInputResult":
     """Process input request response (status 10-11).
 
@@ -1221,7 +1240,6 @@ def _process_input_response(
     Returns:
         GeminiInputResult object
     """
-    from .models import GeminiInputResult, GeminiStatusCode
 
     sensitive = status_code == GeminiStatusCode.SENSITIVE_INPUT.value
 
@@ -1233,7 +1251,7 @@ def _process_input_response(
 
 
 def _process_success_response(
-    meta: str, body: Optional[bytes], request_info: Dict[str, Any]
+    meta: str, body: bytes | None, request_info: dict[str, Any]
 ) -> Union["GeminiSuccessResult", "GeminiGemtextResult"]:
     """Process success response (status 20-29).
 
@@ -1248,7 +1266,6 @@ def _process_success_response(
     Raises:
         ValueError: If MIME type is invalid or body is missing
     """
-    from .models import GeminiSuccessResult
 
     if body is None or len(body) == 0:
         # Allow empty body for success responses
@@ -1288,9 +1305,6 @@ def _process_success_response(
         # Parse gemtext into structured format
         document = parse_gemtext(content)
 
-        # Import here to avoid circular imports
-        from .models import GeminiGemtextResult
-
         return GeminiGemtextResult(
             document=document,
             rawContent=content,
@@ -1318,10 +1332,9 @@ def _process_success_response(
             # Try to detect a more specific MIME type
             detected_type = detect_binary_mime_type(body)
             if detected_type != "application/octet-stream":
-                try:
+                # Keep the original mime_type if the detected one won't parse.
+                with contextlib.suppress(ValueError):
                     mime_type = parse_gemini_mime_type(detected_type)
-                except ValueError:
-                    pass  # Keep original mime_type
 
         # Binary content is base64-encoded on serialization; flag it so the
         # consumer knows how to interpret the content field.
@@ -1352,7 +1365,7 @@ def _decode_with_fallback(body: bytes, charset: str) -> tuple[str, str]:
 
 
 def _process_redirect_response(
-    status_code: int, meta: str, request_info: Dict[str, Any]
+    status_code: int, meta: str, request_info: dict[str, Any]
 ) -> "GeminiRedirectResult":
     """Process redirect response (status 30-31).
 
@@ -1364,7 +1377,6 @@ def _process_redirect_response(
     Returns:
         GeminiRedirectResult object
     """
-    from .models import GeminiRedirectResult, GeminiStatusCode
 
     permanent = status_code == GeminiStatusCode.PERMANENT_REDIRECT.value
 
@@ -1376,7 +1388,7 @@ def _process_redirect_response(
 
 
 def _process_error_response(
-    status_code: int, meta: str, request_info: Dict[str, Any], temporary: bool = True
+    status_code: int, meta: str, request_info: dict[str, Any], temporary: bool = True
 ) -> "GeminiErrorResult":
     """Process error response (status 40-59).
 
@@ -1389,7 +1401,6 @@ def _process_error_response(
     Returns:
         GeminiErrorResult object
     """
-    from .models import GeminiErrorResult
 
     error_type = "TEMPORARY_ERROR" if temporary else "PERMANENT_ERROR"
 
@@ -1405,19 +1416,17 @@ def _process_error_response(
 
 
 def _process_certificate_response(
-    status_code: int, meta: str, request_info: Dict[str, Any]
+    meta: str, request_info: dict[str, Any]
 ) -> "GeminiCertificateResult":
     """Process certificate request response (status 60-62).
 
     Args:
-        status_code: Gemini status code
         meta: Certificate-related message
         request_info: Request information
 
     Returns:
         GeminiCertificateResult object
     """
-    from .models import GeminiCertificateResult
 
     return GeminiCertificateResult(
         message=meta,

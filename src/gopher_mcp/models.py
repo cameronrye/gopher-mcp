@@ -1,8 +1,9 @@
 """Pydantic models for Gopher MCP data validation."""
 
 import base64
-from typing import Any, Dict, List, Literal, Optional, Union
-from enum import IntEnum, Enum
+from enum import Enum, IntEnum
+from typing import Any, Generic, Literal, TypeVar
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_serializer, field_validator
 
@@ -37,7 +38,8 @@ class GopherMenuItem(BaseModel):
     title: str = Field(..., description="Human-readable item title")
     selector: str = Field(..., description="Selector string for this item")
     host: str = Field(..., description="Hostname where item resides")
-    port: int = Field(..., description="Port number (typically 70)")
+    # Info ('i') lines conventionally carry port 0, so 0 is permitted here.
+    port: int = Field(..., ge=0, le=65535, description="Port number (typically 70)")
     next_url: str = Field(
         ..., alias="nextUrl", description="Fully formed gopher:// URL for this item"
     )
@@ -47,8 +49,8 @@ class MenuResult(BaseModel):
     """Result model for Gopher menu responses."""
 
     kind: Literal["menu"] = "menu"
-    items: List[GopherMenuItem] = Field(..., description="List of menu items")
-    request_info: Dict[str, Any] = Field(
+    items: list[GopherMenuItem] = Field(..., description="List of menu items")
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -60,9 +62,9 @@ class TextResult(BaseModel):
 
     kind: Literal["text"] = "text"
     charset: str = Field(default="utf-8", description="Character encoding")
-    bytes: int = Field(..., description="Size of content in bytes")
+    bytes: int = Field(..., ge=0, description="Size of content in bytes")
     text: str = Field(..., description="Text content")
-    request_info: Dict[str, Any] = Field(
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -73,15 +75,15 @@ class BinaryResult(BaseModel):
     """Result model for Gopher binary responses."""
 
     kind: Literal["binary"] = "binary"
-    bytes: int = Field(..., description="Size of content in bytes")
-    mime_type: Optional[str] = Field(
+    bytes: int = Field(..., ge=0, description="Size of content in bytes")
+    mime_type: str | None = Field(
         None, alias="mimeType", description="Guessed MIME type"
     )
     note: str = Field(
         default="Binary content not returned to preserve context",
         description="Note about binary handling",
     )
-    request_info: Dict[str, Any] = Field(
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -91,8 +93,8 @@ class BinaryResult(BaseModel):
 class ErrorResult(BaseModel):
     """Result model for error responses."""
 
-    error: Dict[str, str] = Field(..., description="Error information")
-    request_info: Dict[str, Any] = Field(
+    error: dict[str, str] = Field(..., description="Error information")
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -100,7 +102,22 @@ class ErrorResult(BaseModel):
 
 
 # Union type for all possible response types
-GopherFetchResponse = Union[MenuResult, TextResult, BinaryResult, ErrorResult]
+GopherFetchResponse = MenuResult | TextResult | BinaryResult | ErrorResult
+
+_CacheValueT = TypeVar("_CacheValueT")
+
+
+class _BaseCacheEntry(BaseModel, Generic[_CacheValueT]):
+    """Shared base for protocol cache entries (TTL-based expiry)."""
+
+    key: str = Field(..., description="Cache key")
+    value: _CacheValueT = Field(..., description="Cached response")
+    timestamp: float = Field(..., description="Cache entry timestamp")
+    ttl: int = Field(..., description="Time to live in seconds")
+
+    def is_expired(self, current_time: float) -> bool:
+        """Check if cache entry is expired."""
+        return current_time - self.timestamp > self.ttl
 
 
 class GopherURL(BaseModel):
@@ -112,7 +129,7 @@ class GopherURL(BaseModel):
         default="1", alias="gopherType", description="Gopher item type"
     )
     selector: str = Field(default="", description="Selector string")
-    search: Optional[str] = Field(None, description="Search string for type 7 items")
+    search: str | None = Field(None, description="Search string for type 7 items")
 
     @field_validator("port")
     @classmethod
@@ -131,17 +148,8 @@ class GopherURL(BaseModel):
         return v
 
 
-class CacheEntry(BaseModel):
-    """Model for cache entries."""
-
-    key: str = Field(..., description="Cache key")
-    value: GopherFetchResponse = Field(..., description="Cached response")
-    timestamp: float = Field(..., description="Cache entry timestamp")
-    ttl: int = Field(..., description="Time to live in seconds")
-
-    def is_expired(self, current_time: float) -> bool:
-        """Check if cache entry is expired."""
-        return current_time - self.timestamp > self.ttl
+class CacheEntry(_BaseCacheEntry[GopherFetchResponse]):
+    """Model for Gopher cache entries."""
 
 
 # ============================================================================
@@ -158,7 +166,7 @@ class GeminiURL(BaseModel):
     host: str = Field(..., description="Hostname or IP address")
     port: int = Field(default=1965, description="Port number (default: 1965)")
     path: str = Field(default="/", description="Resource path")
-    query: Optional[str] = Field(None, description="Query string for user input")
+    query: str | None = Field(None, description="Query string for user input")
 
     @field_validator("port")
     @classmethod
@@ -203,32 +211,32 @@ class GeminiFetchRequest(BaseModel):
 class GeminiStatusCode(IntEnum):
     """Gemini protocol status codes."""
 
-    # Input expected (10-19)
+    # Input expected: status codes 10 through 19
     INPUT = 10
     SENSITIVE_INPUT = 11
 
-    # Success (20-29)
+    # Success: status codes 20 through 29
     SUCCESS = 20
 
-    # Redirection (30-39)
+    # Redirection: status codes 30 through 39
     TEMPORARY_REDIRECT = 30
     PERMANENT_REDIRECT = 31
 
-    # Temporary failure (40-49)
+    # Temporary failure: status codes 40 through 49
     TEMPORARY_FAILURE = 40
     SERVER_UNAVAILABLE = 41
     CGI_ERROR = 42
     PROXY_ERROR = 43
     SLOW_DOWN = 44
 
-    # Permanent failure (50-59)
+    # Permanent failure: status codes 50 through 59
     PERMANENT_FAILURE = 50
     NOT_FOUND = 51
     GONE = 52
     PROXY_REQUEST_REFUSED = 53
     BAD_REQUEST = 59
 
-    # Client certificates (60-69)
+    # Client certificates: status codes 60 through 69
     CERTIFICATE_REQUIRED = 60
     CERTIFICATE_NOT_AUTHORIZED = 61
     CERTIFICATE_NOT_VALID = 62
@@ -240,7 +248,7 @@ class GeminiMimeType(BaseModel):
     type: str = Field(..., description="Main MIME type (e.g., 'text')")
     subtype: str = Field(..., description="MIME subtype (e.g., 'gemini')")
     charset: str = Field(default="utf-8", description="Character encoding")
-    lang: Optional[str] = Field(None, description="Language tag (BCP47)")
+    lang: str | None = Field(None, description="Language tag (BCP47)")
 
     @property
     def full_type(self) -> str:
@@ -316,9 +324,9 @@ class GeminiMimeType(BaseModel):
 class GeminiResponse(BaseModel):
     """Base model for Gemini protocol responses."""
 
-    status: Union[GeminiStatusCode, int] = Field(..., description="Gemini status code")
+    status: GeminiStatusCode | int = Field(..., description="Gemini status code")
     meta: str = Field(..., description="Status-dependent metadata")
-    body: Optional[bytes] = Field(None, description="Response body (if any)")
+    body: bytes | None = Field(None, description="Response body (if any)")
 
     @field_validator("meta")
     @classmethod
@@ -337,11 +345,11 @@ class GeminiSuccessResult(BaseModel):
     mime_type: GeminiMimeType = Field(
         ..., alias="mimeType", description="Content MIME type"
     )
-    content: Union[str, bytes] = Field(..., description="Response content")
-    size: int = Field(..., description="Content size in bytes")
+    content: str | bytes = Field(..., description="Response content")
+    size: int = Field(..., ge=0, description="Content size in bytes")
 
     @field_serializer("content")
-    def _serialize_content(self, v: Union[str, bytes]) -> str:
+    def _serialize_content(self, v: str | bytes) -> str:
         """Base64-encode binary content so model_dump() stays JSON-serializable.
 
         A status-20 binary response would otherwise carry raw bytes that fail
@@ -352,7 +360,7 @@ class GeminiSuccessResult(BaseModel):
             return base64.b64encode(v).decode("ascii")
         return v
 
-    request_info: Dict[str, Any] = Field(
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -365,7 +373,7 @@ class GeminiInputResult(BaseModel):
     kind: Literal["input"] = "input"
     prompt: str = Field(..., description="Input prompt text")
     sensitive: bool = Field(default=False, description="Whether input is sensitive")
-    request_info: Dict[str, Any] = Field(
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -378,7 +386,7 @@ class GeminiRedirectResult(BaseModel):
     kind: Literal["redirect"] = "redirect"
     new_url: str = Field(..., alias="newUrl", description="Redirect target URL")
     permanent: bool = Field(default=False, description="Whether redirect is permanent")
-    request_info: Dict[str, Any] = Field(
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -389,8 +397,8 @@ class GeminiErrorResult(BaseModel):
     """Result model for error responses."""
 
     kind: Literal["error"] = "error"
-    error: Dict[str, Any] = Field(..., description="Error information")
-    request_info: Dict[str, Any] = Field(
+    error: dict[str, Any] = Field(..., description="Error information")
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -403,7 +411,7 @@ class GeminiCertificateResult(BaseModel):
     kind: Literal["certificate"] = "certificate"
     message: str = Field(..., description="Certificate-related message")
     required: bool = Field(default=True, description="Whether certificate is required")
-    request_info: Dict[str, Any] = Field(
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
@@ -428,7 +436,7 @@ class GemtextLink(BaseModel):
     """Model for gemtext link lines."""
 
     url: str = Field(..., description="Link URL (absolute or relative)")
-    text: Optional[str] = Field(None, description="Link text (optional)")
+    text: str | None = Field(None, description="Link text (optional)")
 
     @field_validator("url")
     @classmethod
@@ -437,6 +445,16 @@ class GemtextLink(BaseModel):
         if not v.strip():
             raise ValueError("Link URL cannot be empty")
         return v.strip()
+
+    @property
+    def is_external(self) -> bool:
+        """Whether the link points outside the current capsule.
+
+        External links carry a URL scheme (``gemini://``, ``https://``,
+        ``mailto:`` ...) or are protocol-relative (``//host/...``). Scheme-less
+        relative links (``foo.gmi``, ``/abs``, ``./page``) are internal.
+        """
+        return bool(urlparse(self.url).scheme) or self.url.startswith("//")
 
 
 class GemtextHeading(BaseModel):
@@ -465,12 +483,12 @@ class GemtextPreformat(BaseModel):
     """Model for gemtext preformat content."""
 
     content: str = Field(..., description="Preformat content")
-    alt_text: Optional[str] = Field(None, description="Alt text for accessibility")
+    alt_text: str | None = Field(None, description="Alt text for accessibility")
     is_toggle: bool = Field(
         default=False, description="Whether this is a toggle line (```)"
     )
-    language: Optional[str] = Field(None, description="Detected programming language")
-    metadata: Dict[str, Any] = Field(
+    language: str | None = Field(None, description="Detected programming language")
+    metadata: dict[str, Any] = Field(
         default_factory=dict, description="Additional metadata"
     )
 
@@ -480,21 +498,19 @@ class GemtextLine(BaseModel):
 
     type: GemtextLineType = Field(..., description="Type of gemtext line")
     content: str = Field(..., description="Line content")
-    link: Optional[GemtextLink] = Field(None, description="Link data (for link lines)")
-    level: Optional[int] = Field(None, description="Heading level (1-3, for headings)")
-    alt_text: Optional[str] = Field(None, description="Alt text (for preformat blocks)")
+    link: GemtextLink | None = Field(None, description="Link data (for link lines)")
+    level: int | None = Field(None, description="Heading level (1-3, for headings)")
+    alt_text: str | None = Field(None, description="Alt text (for preformat blocks)")
 
     # Structured content for specific line types
-    heading: Optional[GemtextHeading] = Field(
+    heading: GemtextHeading | None = Field(
         None, description="Heading data (for heading lines)"
     )
-    list_item: Optional[GemtextList] = Field(
+    list_item: GemtextList | None = Field(
         None, description="List data (for list lines)"
     )
-    quote: Optional[GemtextQuote] = Field(
-        None, description="Quote data (for quote lines)"
-    )
-    preformat: Optional[GemtextPreformat] = Field(
+    quote: GemtextQuote | None = Field(None, description="Quote data (for quote lines)")
+    preformat: GemtextPreformat | None = Field(
         None, description="Preformat data (for preformat lines)"
     )
 
@@ -502,8 +518,8 @@ class GemtextLine(BaseModel):
 class GemtextDocument(BaseModel):
     """Model for parsed gemtext document."""
 
-    lines: List[GemtextLine] = Field(..., description="Document lines")
-    links: List[GemtextLink] = Field(
+    lines: list[GemtextLine] = Field(..., description="Document lines")
+    links: list[GemtextLink] = Field(
         default_factory=list, description="Extracted links"
     )
 
@@ -523,7 +539,7 @@ class GemtextDocument(BaseModel):
         return len(self.lines)
 
     @property
-    def content_summary(self) -> Dict[str, int]:
+    def content_summary(self) -> dict[str, int]:
         """Get summary of content types for LLM consumption."""
         summary = {
             "text_lines": 0,
@@ -546,18 +562,21 @@ class GemtextDocument(BaseModel):
                 summary["list_items"] += 1
             elif line.type == GemtextLineType.QUOTE:
                 summary["quotes"] += 1
-            elif line.type == GemtextLineType.PREFORMAT:
-                if line.preformat and line.preformat.is_toggle:
-                    if not in_preformat:
-                        summary["preformat_blocks"] += 1
-                        in_preformat = True
-                    else:
-                        in_preformat = False
+            elif (
+                line.type == GemtextLineType.PREFORMAT
+                and line.preformat
+                and line.preformat.is_toggle
+            ):
+                if not in_preformat:
+                    summary["preformat_blocks"] += 1
+                    in_preformat = True
+                else:
+                    in_preformat = False
 
         return summary
 
     @property
-    def heading_hierarchy(self) -> List[Dict[str, Any]]:
+    def heading_hierarchy(self) -> list[dict[str, Any]]:
         """Get document heading structure for navigation."""
         headings = []
         for i, line in enumerate(self.lines):
@@ -601,16 +620,16 @@ class GeminiGemtextResult(BaseModel):
     document: GemtextDocument = Field(..., description="Parsed gemtext document")
     raw_content: str = Field(..., alias="rawContent", description="Raw gemtext content")
     charset: str = Field(default="utf-8", description="Character encoding")
-    lang: Optional[str] = Field(None, description="Language tag")
+    lang: str | None = Field(None, description="Language tag")
     size: int = Field(..., description="Content size in bytes")
-    request_info: Dict[str, Any] = Field(
+    request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
     )
 
     @property
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         """Get LLM-optimized summary of the gemtext content."""
         return {
             "content_type": "gemtext",
@@ -630,7 +649,7 @@ class GeminiGemtextResult(BaseModel):
         return self.document.text_content
 
     @property
-    def structured_content(self) -> Dict[str, Any]:
+    def structured_content(self) -> dict[str, Any]:
         """Get structured content optimized for LLM consumption."""
         return {
             "summary": self.summary,
@@ -639,7 +658,7 @@ class GeminiGemtextResult(BaseModel):
                 {
                     "url": link.url,
                     "text": link.text,
-                    "type": "internal" if link.url.startswith("/") else "external",
+                    "type": "external" if link.is_external else "internal",
                 }
                 for link in self.document.links
             ],
@@ -686,14 +705,14 @@ class GeminiGemtextResult(BaseModel):
 
 
 # Union type for all possible Gemini fetch responses
-GeminiFetchResponse = Union[
-    GeminiSuccessResult,
-    GeminiGemtextResult,
-    GeminiInputResult,
-    GeminiRedirectResult,
-    GeminiErrorResult,
-    GeminiCertificateResult,
-]
+GeminiFetchResponse = (
+    GeminiSuccessResult
+    | GeminiGemtextResult
+    | GeminiInputResult
+    | GeminiRedirectResult
+    | GeminiErrorResult
+    | GeminiCertificateResult
+)
 
 
 # Certificate and security models
@@ -718,21 +737,12 @@ class TOFUEntry(BaseModel):
     fingerprint: str = Field(..., description="Certificate SHA-256 fingerprint")
     first_seen: float = Field(..., description="Timestamp of first connection")
     last_seen: float = Field(..., description="Timestamp of last connection")
-    expires: Optional[float] = Field(None, description="Certificate expiry timestamp")
+    expires: float | None = Field(None, description="Certificate expiry timestamp")
 
     def is_expired(self, current_time: float) -> bool:
         """Check if certificate is expired."""
         return self.expires is not None and current_time > self.expires
 
 
-class GeminiCacheEntry(BaseModel):
+class GeminiCacheEntry(_BaseCacheEntry[GeminiFetchResponse]):
     """Model for Gemini cache entries."""
-
-    key: str = Field(..., description="Cache key")
-    value: GeminiFetchResponse = Field(..., description="Cached response")
-    timestamp: float = Field(..., description="Cache entry timestamp")
-    ttl: int = Field(..., description="Time to live in seconds")
-
-    def is_expired(self, current_time: float) -> bool:
-        """Check if cache entry is expired."""
-        return current_time - self.timestamp > self.ttl

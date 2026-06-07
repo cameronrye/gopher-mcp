@@ -2,25 +2,25 @@
 
 import pytest
 
-from gopher_mcp.utils import (
-    parse_gemini_response,
-    parse_gemini_mime_type,
-    process_gemini_response,
-    get_default_gemini_mime_type,
-    detect_binary_mime_type,
-    validate_gemini_mime_type,
-)
 from gopher_mcp.models import (
-    GeminiStatusCode,
-    GeminiResponse,
-    GeminiMimeType,
-    GeminiInputResult,
-    GeminiSuccessResult,
-    GeminiRedirectResult,
-    GeminiErrorResult,
     GeminiCertificateResult,
+    GeminiErrorResult,
     GeminiGemtextResult,
+    GeminiInputResult,
+    GeminiMimeType,
+    GeminiRedirectResult,
+    GeminiResponse,
+    GeminiStatusCode,
+    GeminiSuccessResult,
     GemtextLineType,
+)
+from gopher_mcp.utils import (
+    detect_binary_mime_type,
+    get_default_gemini_mime_type,
+    parse_gemini_mime_type,
+    parse_gemini_response,
+    process_gemini_response,
+    validate_gemini_mime_type,
 )
 
 
@@ -57,7 +57,7 @@ class TestParseGeminiResponse:
     def test_response_with_long_meta(self):
         """Test response with long meta field."""
         meta = "text/gemini; charset=utf-8; lang=en-US"
-        raw_response = f"20 {meta}\r\nContent".encode("utf-8")
+        raw_response = f"20 {meta}\r\nContent".encode()
         response = parse_gemini_response(raw_response)
 
         assert response.status == GeminiStatusCode.SUCCESS
@@ -69,7 +69,7 @@ class TestParseGeminiResponse:
         truncated. For a 3x redirect the meta is the target URL; truncating it
         would hand back a corrupted URL pointing somewhere unintended."""
         long_url = "gemini://example.org/" + "a" * 1100  # > 1024 bytes
-        raw_response = f"31 {long_url}\r\n".encode("utf-8")
+        raw_response = f"31 {long_url}\r\n".encode()
 
         with pytest.raises(ValueError, match="Meta field exceeds 1024 bytes"):
             parse_gemini_response(raw_response)
@@ -98,7 +98,7 @@ class TestParseGeminiResponse:
         ]
 
         for status_code, _ in test_cases:
-            raw_response = f"{status_code} Test meta\r\n".encode("utf-8")
+            raw_response = f"{status_code} Test meta\r\n".encode()
             response = parse_gemini_response(raw_response)
             assert response.status.value == status_code
 
