@@ -240,3 +240,10 @@ skips = ["B101"]         # Skip assert_used test
 dev = ["taskipy>=1.14.1"]
 
 # Additional tool configurations can be added here as needed
+
+[tool.uv]
+# setuptools is pulled in only by the `safety` dev scanner. Pin it to 81.x:
+# it vendors a patched wheel (>=0.46.2, clears CVE-2026-24049) while still
+# shipping pkg_resources, which safety 2.3.4 imports (removed in setuptools 82).
+# The project itself builds with hatchling, so this does not affect packaging.
+constraint-dependencies = ["setuptools>=81,<82"]
