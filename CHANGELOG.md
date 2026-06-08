@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Made the published documentation site the single source of truth: consolidated
+  six overlapping release/PyPI/testing docs into one `development/releasing`
+  guide, surfaced the previously-orphaned Configuration and Architecture pages in
+  the nav, added a general Troubleshooting page, and corrected the docs against
+  the v0.4.0 source — all four MCP tools (plus the `gemini_fetch` `input`
+  parameter and the batch-fetch tools) and PyPI install are now documented,
+  server/logging environment variables carry the `GOPHER_MCP_` prefix, TOFU and
+  certificate paths point to `~/.gemini`, and the Gemini specification is
+  standardized to v0.24.1.
+- Added an auto-generated Data Models reference page (via mkdocstrings) rendered
+  directly from the Pydantic models, replacing the hand-written response-type
+  interfaces in the API reference so they can no longer drift from the code.
+- Enabled markdownlint on the `docs/` tree in pre-commit/CI.
+
+### Removed
+
+- Deleted the duplicate `wiki-content/` documentation tree (its unique
+  general/Claude Desktop troubleshooting and per-OS config paths were migrated
+  into `docs/`) and dropped the internal Gemini planning drafts (project
+  timeline, API contracts, security architecture) from the public site.
+
+### Fixed
+
+- Removed fabricated `GEMINI_TLS_*`, `DEBUG_COMPONENTS`, and `MCP_SERVER_*`
+  environment variables and stale single-tool / source-only / Pituophis /
+  `tools.py` / `GopherMCPServer` claims from the documentation, and corrected the
+  documented response-model fields to match the code.
+
 ## [0.4.0] - 2026-06-08
 
 ### Security

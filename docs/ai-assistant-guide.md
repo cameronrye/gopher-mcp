@@ -170,7 +170,9 @@ Regular paragraph text.
 > Quoted text
 
 ```
+
 Preformatted text block
+
 ```
 
 => gemini://example.org/ Link with text

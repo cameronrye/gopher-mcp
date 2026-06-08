@@ -70,6 +70,7 @@ Client connects via TLS → Sends URL + CRLF → Server responds with status + m
 ```
 
 **Requirements:**
+
 - URI MUST NOT exceed 1024 bytes
 - MUST be absolute URI (no relative URIs)
 - MUST NOT include userinfo portion
@@ -83,6 +84,7 @@ Client connects via TLS → Sends URL + CRLF → Server responds with status + m
 ```
 
 **Components:**
+
 - **status**: Two-digit code (10-69)
 - **meta**: Additional information (depends on status)
 - **body**: Optional content (depends on status and MIME type)
@@ -144,11 +146,13 @@ gemini://<host>[:<port>][/<path>][?<query>]
 **Format**: `1x <prompt>`
 
 **Status 10 - Input**
+
 - Server needs user input
 - Client MUST prompt user with provided text
 - Resubmit request with input as query string
 
 **Status 11 - Sensitive Input**
+
 - Same as 10 but for passwords/sensitive data
 - Client SHOULD NOT echo input to screen
 
@@ -157,6 +161,7 @@ gemini://<host>[:<port>][/<path>][?<query>]
 **Format**: `2x <mimetype>`
 
 **Status 20 - Success**
+
 - Request successful
 - Meta field contains MIME type
 - Body contains requested content
@@ -166,10 +171,12 @@ gemini://<host>[:<port>][/<path>][?<query>]
 **Format**: `3x <new-URI>`
 
 **Status 30 - Temporary Redirect**
+
 - Content temporarily moved
 - Continue using original URI for future requests
 
 **Status 31 - Permanent Redirect**
+
 - Content permanently moved
 - Update bookmarks to new URI
 
@@ -208,6 +215,7 @@ gemini://<host>[:<port>][/<path>][?<query>]
 ### Required Support
 
 **Clients MUST support:**
+
 - `text/gemini; charset=utf-8` (native hypertext format)
 - `text/plain; charset=utf-8` (plain text)
 - `text/plain; charset=us-ascii` (ASCII text)
@@ -223,10 +231,12 @@ gemini://<host>[:<port>][/<path>][?<query>]
 ### MIME Parameters
 
 **For text/gemini:**
+
 - `charset`: Character encoding (default: UTF-8)
 - `lang`: Language tag per BCP47 (optional)
 
 **Examples:**
+
 ```
 text/gemini
 text/gemini; charset=utf-8
@@ -250,22 +260,26 @@ Gemtext is the native hypertext format for Gemini, designed for simplicity and a
 1. **Text lines** (default)
 2. **Link lines** (`=>`)
 3. **Heading lines** (`#`, `##`, `###`)
-4. **List items** (`* `)
+4. **List items** (`*`)
 5. **Quote lines** (`>`)
 6. **Preformat toggle** (` ``` `)
 
 ### Core Line Types (MUST Support)
 
 **Text Lines**
+
 - Default line type (no special prefix)
 - Rendered as flowing text with wrapping
 - Empty lines create vertical space
 
 **Link Lines**
+
 ```
 =>[<whitespace>]<URL>[<whitespace><link-text>]
 ```
+
 Examples:
+
 ```
 => gemini://example.org/
 => gemini://example.org/ Example Site
@@ -274,9 +288,11 @@ Examples:
 ```
 
 **Preformat Toggle Lines**
+
 ```
 ```[<alt-text>]
 ```
+
 - Toggles between normal and preformatted mode
 - Alt text optional (for accessibility/syntax highlighting)
 - Content between toggles rendered in monospace
@@ -284,6 +300,7 @@ Examples:
 ### Optional Line Types (MAY Support)
 
 **Heading Lines**
+
 ```
 # Heading Level 1
 ## Heading Level 2
@@ -291,6 +308,7 @@ Examples:
 ```
 
 **List Items**
+
 ```
 * First item
 * Second item
@@ -298,6 +316,7 @@ Examples:
 ```
 
 **Quote Lines**
+
 ```
 > This is a quote
 > from another source
@@ -323,12 +342,14 @@ Examples:
 ### Certificate Validation
 
 **Trust on First Use (TOFU) - Strongly Recommended:**
+
 1. Accept any certificate on first connection
 2. Store certificate fingerprint and expiry
 3. Verify fingerprint matches on subsequent connections
 4. Warn user if fingerprint changes before expiry
 
 **Alternative approaches:**
+
 - Traditional CA validation
 - DANE (DNS-Based Authentication of Named Entities)
 - Manual certificate pinning
@@ -336,11 +357,13 @@ Examples:
 ### Client Certificates
 
 **Usage scenarios:**
+
 - Access control to protected resources
 - Maintaining server-side state
 - User authentication
 
 **Scope limitations:**
+
 - Limited to specific host, port, and path
 - MUST NOT be reused across different hosts
 - User MUST be involved in certificate generation
@@ -359,6 +382,7 @@ Examples:
 ### Client Requirements
 
 **MUST:**
+
 - Support TLS 1.2+
 - Include SNI in TLS handshake
 - Limit URI length to 1024 bytes
@@ -367,12 +391,14 @@ Examples:
 - Limit redirections to 5 maximum
 
 **SHOULD:**
+
 - Implement TOFU certificate validation
 - Warn users about TLS 1.2 certificate exposure
 - Display error messages to users
 - Support client certificate generation
 
 **MAY:**
+
 - Support additional MIME types
 - Implement proxy support
 - Provide certificate management UI
@@ -380,6 +406,7 @@ Examples:
 ### Server Requirements
 
 **MUST:**
+
 - Support TLS 1.2+
 - Use TLS close_notify to close connections
 - Reject URIs exceeding 1024 bytes
@@ -388,12 +415,14 @@ Examples:
 - Handle both empty path and "/" equivalently
 
 **SHOULD:**
+
 - Support client certificates for access control
 - Provide meaningful error messages
 - Implement rate limiting (status 44)
 - Log security events
 
 **MAY:**
+
 - Support dynamic content generation
 - Implement proxy functionality
 - Provide server-side state management
@@ -412,11 +441,13 @@ Examples:
 ### Basic Content Request
 
 **Client Request:**
+
 ```
 gemini://example.org/document.gmi
 ```
 
 **Server Response:**
+
 ```
 20 text/gemini
 # Welcome to Example.org
@@ -430,21 +461,25 @@ This is a sample gemtext document.
 ### User Input Example
 
 **Initial Request:**
+
 ```
 gemini://example.org/search
 ```
 
 **Server Response:**
+
 ```
 10 Enter search terms
 ```
 
 **Follow-up Request:**
+
 ```
 gemini://example.org/search?gemini%20protocol
 ```
 
 **Server Response:**
+
 ```
 20 text/gemini
 # Search Results
@@ -456,21 +491,25 @@ gemini://example.org/search?gemini%20protocol
 ### Client Certificate Example
 
 **Initial Request:**
+
 ```
 gemini://example.org/private/
 ```
 
 **Server Response:**
+
 ```
 60 Certificate required for access
 ```
 
 **Subsequent Request (with certificate):**
+
 ```
 gemini://example.org/private/
 ```
 
 **Server Response:**
+
 ```
 20 text/gemini
 # Private Area
@@ -481,21 +520,25 @@ Welcome to the protected section.
 ### Redirection Example
 
 **Client Request:**
+
 ```
 gemini://example.org/old-path
 ```
 
 **Server Response:**
+
 ```
 31 /new-path
 ```
 
 **Follow-up Request:**
+
 ```
 gemini://example.org/new-path
 ```
 
 **Server Response:**
+
 ```
 20 text/gemini
 # New Location
@@ -506,11 +549,13 @@ Content has moved here permanently.
 ### Error Handling Example
 
 **Client Request:**
+
 ```
 gemini://example.org/nonexistent
 ```
 
 **Server Response:**
+
 ```
 51 The requested resource was not found
 ```
@@ -520,29 +565,33 @@ gemini://example.org/nonexistent
 **State Management with Client Certificates:**
 
 1. **Certificate Request:**
-```
-Client: gemini://example.org/app/
-Server: 60 Certificate required for state management
-```
+
+   ```
+   Client: gemini://example.org/app/
+   Server: 60 Certificate required for state management
+   ```
 
 2. **First Input:**
-```
-Client: gemini://example.org/app/ (with certificate)
-Server: 10 Enter first number (0-9000)
-```
+
+   ```
+   Client: gemini://example.org/app/ (with certificate)
+   Server: 10 Enter first number (0-9000)
+   ```
 
 3. **Store First Value:**
-```
-Client: gemini://example.org/app/?42 (with certificate)
-Server: 10 Enter second number (0-9000)
-```
+
+   ```
+   Client: gemini://example.org/app/?42 (with certificate)
+   Server: 10 Enter second number (0-9000)
+   ```
 
 4. **Calculate Result:**
-```
-Client: gemini://example.org/app/?1923 (with certificate)
-Server: 20 text/plain
-42 plus 1923 equals 1965, have a nice day!
-```
+
+   ```
+   Client: gemini://example.org/app/?1923 (with certificate)
+   Server: 20 text/plain
+   42 plus 1923 equals 1965, have a nice day!
+   ```
 
 ---
 
@@ -583,17 +632,20 @@ Server: 20 text/plain
 ### Security Model
 
 **Trust on First Use (TOFU):**
+
 - Accept any certificate on first connection
 - Detect certificate changes as potential attacks
 - User involvement in trust decisions
 - No reliance on Certificate Authorities
 
 **Advantages:**
+
 - Supports self-signed certificates
 - Reduces dependency on CA infrastructure
 - User control over trust decisions
 
 **Limitations:**
+
 - Vulnerable to first-connection attacks
 - Requires user education
 - Certificate management complexity
@@ -601,16 +653,19 @@ Server: 20 text/plain
 ### Privacy Features
 
 **Mandatory encryption:**
+
 - All connections encrypted via TLS
 - No plaintext fallback option
 - Protection against passive surveillance
 
 **No tracking mechanisms:**
+
 - No cookies or persistent state
 - No referrer headers
 - Minimal metadata exposure
 
 **Certificate privacy:**
+
 - TLS 1.2 exposes certificates in handshake
 - TLS 1.3 provides better certificate privacy
 - Client certificates only when explicitly required
@@ -618,11 +673,13 @@ Server: 20 text/plain
 ### Threat Model
 
 **Protected against:**
+
 - Passive network surveillance
 - Content modification in transit
 - Server impersonation (with TOFU)
 
 **Not protected against:**
+
 - Active attacks on first connection
 - Compromised client or server
 - Traffic analysis (connection patterns)
@@ -631,18 +688,21 @@ Server: 20 text/plain
 ### Best Practices
 
 **For clients:**
+
 - Implement TOFU certificate validation
 - Warn users about certificate changes
 - Provide certificate management interface
 - Support TLS 1.3 when available
 
 **For servers:**
+
 - Use strong TLS configuration
 - Implement rate limiting
 - Monitor for suspicious activity
 - Provide clear error messages
 
 **For users:**
+
 - Verify certificates on first connection
 - Be cautious with client certificates
 - Use trusted proxy servers only
@@ -719,6 +779,7 @@ port       = 1*5DIGIT ; 0-65535, default 1965
 ### Client Implementation
 
 **Core Requirements:**
+
 - [ ] TCP connection to port 1965
 - [ ] TLS 1.2+ support with SNI
 - [ ] URI validation (max 1024 bytes)
@@ -730,6 +791,7 @@ port       = 1*5DIGIT ; 0-65535, default 1965
 - [ ] Error display to user
 
 **Security Features:**
+
 - [ ] TOFU certificate validation
 - [ ] Certificate fingerprint storage
 - [ ] Certificate change warnings
@@ -737,6 +799,7 @@ port       = 1*5DIGIT ; 0-65535, default 1965
 - [ ] TLS close_notify handling
 
 **Gemtext Support:**
+
 - [ ] Text line rendering
 - [ ] Link line parsing and display
 - [ ] Preformat toggle handling
@@ -746,6 +809,7 @@ port       = 1*5DIGIT ; 0-65535, default 1965
 ### Server Implementation
 
 **Core Requirements:**
+
 - [ ] TCP server on port 1965
 - [ ] TLS 1.2+ support
 - [ ] Request parsing and validation
@@ -756,6 +820,7 @@ port       = 1*5DIGIT ; 0-65535, default 1965
 - [ ] Connection closing with TLS close_notify
 
 **Content Serving:**
+
 - [ ] Static file serving
 - [ ] Directory listing (optional)
 - [ ] Dynamic content support (optional)
@@ -763,6 +828,7 @@ port       = 1*5DIGIT ; 0-65535, default 1965
 - [ ] User input processing
 
 **Security Features:**
+
 - [ ] Input validation
 - [ ] Rate limiting (status 44)
 - [ ] Access control

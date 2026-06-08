@@ -7,6 +7,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 ### Core Configuration
 
 #### `GEMINI_MAX_RESPONSE_SIZE`
+
 - **Type**: Integer (bytes)
 - **Default**: `1048576` (1MB)
 - **Range**: `1024` - `104857600` (1KB - 100MB)
@@ -14,6 +15,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Example**: `GEMINI_MAX_RESPONSE_SIZE=2097152`
 
 #### `GEMINI_TIMEOUT_SECONDS`
+
 - **Type**: Float (seconds)
 - **Default**: `30.0`
 - **Range**: `1.0` - `300.0`
@@ -23,6 +25,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 ### Caching Configuration
 
 #### `GEMINI_CACHE_ENABLED`
+
 - **Type**: Boolean
 - **Default**: `true`
 - **Values**: `true`, `false`, `1`, `0`, `yes`, `no`, `on`, `off`
@@ -30,6 +33,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Example**: `GEMINI_CACHE_ENABLED=true`
 
 #### `GEMINI_CACHE_TTL_SECONDS`
+
 - **Type**: Integer (seconds)
 - **Default**: `300` (5 minutes)
 - **Range**: `1` - `86400` (1 second - 24 hours)
@@ -37,6 +41,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Example**: `GEMINI_CACHE_TTL_SECONDS=600`
 
 #### `GEMINI_MAX_CACHE_ENTRIES`
+
 - **Type**: Integer
 - **Default**: `1000`
 - **Range**: `1` - `100000`
@@ -46,30 +51,35 @@ This document provides a comprehensive reference for all Gemini protocol configu
 ### Security Configuration
 
 #### `GEMINI_ALLOWED_HOSTS`
+
 - **Type**: String (comma-separated)
 - **Default**: Empty (all hosts allowed)
 - **Description**: Comma-separated list of allowed Gemini hosts
 - **Example**: `GEMINI_ALLOWED_HOSTS=geminiprotocol.net,warmedal.se,kennedy.gemi.dev`
 
 #### `GEMINI_ALLOW_LOCAL_HOSTS`
+
 - **Type**: Boolean
 - **Default**: `false`
 - **Description**: Allow connections to loopback/private/internal addresses. Disabled by default to prevent SSRF.
 - **Example**: `GEMINI_ALLOW_LOCAL_HOSTS=false`
 
 #### `GEMINI_TOFU_ENABLED`
+
 - **Type**: Boolean
 - **Default**: `true`
 - **Description**: Enable Trust-on-First-Use certificate validation. Gemini TLS runs without CA-chain validation, so TOFU is the only peer authentication; disabling it leaves connections unauthenticated and MITM-able.
 - **Example**: `GEMINI_TOFU_ENABLED=true`
 
 #### `GEMINI_TOFU_REJECT_EXPIRED`
+
 - **Type**: Boolean
 - **Default**: `false`
 - **Description**: Fail closed when a server certificate is outside its validity window (already expired, or not yet valid on first use) instead of pinning it with a warning. Off by default to match the conventional Gemini TOFU model, where the pinned fingerprint is the real authenticator.
 - **Example**: `GEMINI_TOFU_REJECT_EXPIRED=true`
 
 #### `GEMINI_CLIENT_CERTS_ENABLED`
+
 - **Type**: Boolean
 - **Default**: `true`
 - **Description**: Enable automatic client certificate generation and management. Certificates are created and reused per host/path scope on demand; you do not supply cert/key files yourself.
@@ -78,12 +88,14 @@ This document provides a comprehensive reference for all Gemini protocol configu
 ### Storage Configuration
 
 #### `GEMINI_TOFU_STORAGE_PATH`
+
 - **Type**: String (file path)
 - **Default**: `~/.gemini/tofu.json`
 - **Description**: Path to TOFU certificate fingerprint storage file
 - **Example**: `GEMINI_TOFU_STORAGE_PATH=/custom/path/tofu.json`
 
 #### `GEMINI_CLIENT_CERTS_STORAGE_PATH`
+
 - **Type**: String (directory path)
 - **Default**: `~/.gemini/certs/`
 - **Description**: Directory where automatically generated client certificates and their private keys are stored. The directory is created with owner-only (`700`) permissions.
@@ -92,6 +104,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 ### Content and Rate Limiting
 
 #### `GEMINI_MAX_RENDERED_CHARS`
+
 - **Type**: Integer (characters)
 - **Default**: `50000`
 - **Range**: `0` - `10485760` (`0` = unlimited)
@@ -99,6 +112,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Example**: `GEMINI_MAX_RENDERED_CHARS=100000`
 
 #### `GEMINI_REQUESTS_PER_MINUTE`
+
 - **Type**: Float
 - **Default**: `0` (unlimited)
 - **Range**: `0` - `6000`
@@ -106,6 +120,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Example**: `GEMINI_REQUESTS_PER_MINUTE=60`
 
 #### `GEMINI_MAX_CONCURRENT_REQUESTS`
+
 - **Type**: Integer
 - **Default**: `0` (unlimited)
 - **Range**: `0` - `1000`
@@ -113,6 +128,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Example**: `GEMINI_MAX_CONCURRENT_REQUESTS=20`
 
 #### `GEMINI_DENIED_MIME_TYPES`
+
 - **Type**: String (comma-separated)
 - **Default**: Empty (no content filtering)
 - **Description**: MIME types, or `type/*` wildcards, to reject as filtered content. Empty means no content filtering.
@@ -187,6 +203,7 @@ uv run task validate-config
 ```
 
 The validator checks:
+
 - Value ranges and types
 - File path existence
 - Boolean value formats
@@ -217,18 +234,21 @@ The validator checks:
 ### Common Configuration Issues
 
 1. **Invalid Boolean Values**
+
    ```
    Error: GEMINI_CACHE_ENABLED must be a boolean value
    Solution: Use true/false, 1/0, yes/no, on/off
    ```
 
 2. **File Path Issues**
+
    ```
    Error: TOFU storage directory not writable
    Solution: Check directory permissions and ownership
    ```
 
 3. **TOFU Certificate Mismatch**
+
    ```
    Error: TOFU validation failed: certificate fingerprint changed
    Solution: Confirm the server legitimately rotated its certificate, then remove the

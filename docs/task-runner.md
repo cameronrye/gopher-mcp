@@ -40,10 +40,12 @@ uv run task <command>
 Run `python task.py help` to see all available commands, organized by category:
 
 ### Setup
+
 - `dev-setup` - Set up development environment
 - `install-hooks` - Install pre-commit hooks
 
 ### Code Quality
+
 - `lint` - Run ruff linting
 - `format` - Format code with ruff
 - `typecheck` - Run mypy type checking
@@ -51,6 +53,7 @@ Run `python task.py help` to see all available commands, organized by category:
 - `check` - Run lint + typecheck
 
 ### Testing
+
 - `test` - Run all tests
 - `test-cov` - Run tests with coverage
 - `test-unit` - Run unit tests only
@@ -58,14 +61,17 @@ Run `python task.py help` to see all available commands, organized by category:
 - `test-slow` - Run slow tests
 
 ### Server
+
 - `serve` - Run MCP server (stdio)
 - `serve-http` - Run MCP server (HTTP)
 
 ### Documentation
+
 - `docs-serve` - Serve docs locally
 - `docs-build` - Build documentation
 
 ### Maintenance
+
 - `clean` - Clean build artifacts
 - `ci` - Run CI pipeline locally
 

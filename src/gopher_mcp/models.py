@@ -174,7 +174,7 @@ class CacheEntry(_BaseCacheEntry[GopherFetchResponse]):
 class GeminiURL(BaseModel):
     """Model for parsed Gemini URLs.
 
-    Based on gemini://<host>[:<port>][/<path>][?<query>] format.
+    Based on the ``gemini://<host>[:<port>][/<path>][?<query>]`` format.
     """
 
     host: str = Field(..., description="Hostname or IP address")

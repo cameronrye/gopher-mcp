@@ -7,14 +7,17 @@ This document provides troubleshooting guidance and answers to frequently asked 
 ### TLS Connection Issues
 
 #### Problem: TLS Handshake Failures
+
 ```
 Error: TLS handshake failed: [SSL: CERTIFICATE_VERIFY_FAILED]
 ```
 
 **Causes and Solutions:**
+
 1. **TOFU Certificate Mismatch**
    - **Cause**: Server certificate has changed since first connection
    - **Solution**: Clear TOFU storage or manually update fingerprint
+
    ```bash
    rm ~/.gemini/tofu.json
    # Or edit the file to remove the specific host entry
@@ -29,54 +32,66 @@ Error: TLS handshake failed: [SSL: CERTIFICATE_VERIFY_FAILED]
    - **Solution**: Ensure hostname is properly set in URL
 
 #### Problem: TOFU Fingerprint Mismatch
+
 ```
 Error: TOFU validation failed: certificate fingerprint changed
 ```
 
 **Solutions:**
+
 1. **Confirm the certificate change is legitimate**
    - A changed fingerprint can mean the server rotated its certificate — or an active MITM. Verify out-of-band before trusting it.
 
 2. **Re-pin the certificate**
+
    ```bash
    # Remove the stale host entry from ~/.gemini/tofu.json, or delete the
    # file to re-pin every host on the next connection
    rm ~/.gemini/tofu.json
    ```
+
    - Note: Gemini trusts server certificates via TOFU (pinned fingerprint), not CA-chain or hostname verification, so there is no hostname-verification toggle.
 
 ### Client Certificate Issues
 
 #### Problem: Client Certificate Generation Fails
+
 ```
 Error: Failed to generate client certificate
 ```
 
 **Solutions:**
+
 1. **Check Directory Permissions**
+
    ```bash
    mkdir -p ~/.gemini/certs
    chmod 700 ~/.gemini/certs
    ```
 
 2. **Verify OpenSSL Installation**
+
    ```bash
    openssl version
    # Should show OpenSSL version
    ```
 
 3. **Check Disk Space**
+
    ```bash
    df -h ~/.gemini/
    ```
 
 #### Problem: Client Certificate Not Sent
+
 ```
 Error: Server requested client certificate but none available
 ```
 
 **Solutions:**
+
 1. **Enable Client Certificates**
+
    ```bash
    export GEMINI_CLIENT_CERTS_ENABLED=true
    ```
@@ -88,17 +103,21 @@ Error: Server requested client certificate but none available
 ### Connection and Timeout Issues
 
 #### Problem: Connection Timeouts
+
 ```
 Error: Connection timeout after 30 seconds
 ```
 
 **Solutions:**
+
 1. **Increase Timeout**
+
    ```bash
    export GEMINI_TIMEOUT_SECONDS=60
    ```
 
 2. **Check Network Connectivity**
+
    ```bash
    ping geminiprotocol.net
    telnet geminiprotocol.net 1965
@@ -109,17 +128,21 @@ Error: Connection timeout after 30 seconds
    - Check if server is temporarily down
 
 #### Problem: DNS Resolution Failures
+
 ```
 Error: Name or service not known
 ```
 
 **Solutions:**
+
 1. **Check DNS Configuration**
+
    ```bash
    nslookup geminiprotocol.net
    ```
 
 2. **Try Alternative DNS**
+
    ```bash
    # Query a specific resolver to rule out local DNS problems
    nslookup geminiprotocol.net 8.8.8.8
@@ -128,26 +151,31 @@ Error: Name or service not known
 ### Protocol and Content Issues
 
 #### Problem: Invalid Gemini Response
+
 ```
 Error: Invalid status code: 99
 ```
 
 **Solutions:**
+
 1. **Check Server Compliance**
    - Verify server implements Gemini protocol correctly
    - Try with reference Gemini client
 
 2. **Enable Debug Logging**
+
    ```bash
    export GOPHER_MCP_LOG_LEVEL=DEBUG
    ```
 
 #### Problem: Gemtext Parsing Errors
+
 ```
 Error: Failed to parse gemtext content
 ```
 
 **Solutions:**
+
 1. **Check Content Encoding**
    - Verify content is UTF-8 encoded
    - Check for BOM or encoding issues
@@ -159,22 +187,27 @@ Error: Failed to parse gemtext content
 ### Configuration Issues
 
 #### Problem: Invalid Configuration Values
+
 ```
 Error: GEMINI_CACHE_TTL_SECONDS must be between 1 and 86400
 ```
 
 **Solutions:**
+
 1. **Use Configuration Validator**
+
    ```bash
    python scripts/validate-config.py
    ```
 
 2. **Check Environment Variables**
+
    ```bash
    env | grep GEMINI_
    ```
 
 3. **Reset to Defaults**
+
    ```bash
    unset GEMINI_CACHE_TTL_SECONDS
    # Will use default value
@@ -209,6 +242,7 @@ A: No, client certificates are optional. They're only needed for servers that re
 **Q: How secure is the Gemini implementation?**
 
 A: The implementation follows security best practices:
+
 - Mandatory TLS 1.2+ encryption
 - TOFU certificate validation
 - Client certificate support
@@ -228,6 +262,7 @@ A: Yes, set `GEMINI_CACHE_ENABLED=false` to disable Gemini caching. Gopher cachi
 **Q: What are the performance characteristics?**
 
 A: Performance depends on network conditions and server responsiveness. Typical response times:
+
 - Cached responses: < 1ms
 - Local network: 10-50ms
 - Internet connections: 100-2000ms
@@ -237,6 +272,7 @@ A: Performance depends on network conditions and server responsiveness. Typical 
 **Q: Where are certificates stored?**
 
 A: By default:
+
 - TOFU fingerprints: `~/.gemini/tofu.json`
 - Client certificates: `~/.gemini/certs/`
 
@@ -255,11 +291,13 @@ A: No — client certificates are generated and managed automatically per host/p
 ### Built-in Diagnostics
 
 1. **Configuration Validator**
+
    ```bash
    python scripts/validate-config.py
    ```
 
 2. **Verify the Installation**
+
    ```bash
    python -c "import gopher_mcp; print(gopher_mcp.__version__)"
    ```
@@ -267,16 +305,19 @@ A: No — client certificates are generated and managed automatically per host/p
 ### External Tools
 
 1. **OpenSSL for TLS Testing**
+
    ```bash
    openssl s_client -connect geminiprotocol.net:1965 -servername geminiprotocol.net
    ```
 
 2. **Network Connectivity**
+
    ```bash
    nc -zv geminiprotocol.net 1965
    ```
 
 3. **Certificate Information**
+
    ```bash
    echo | openssl s_client -connect geminiprotocol.net:1965 -servername geminiprotocol.net 2>/dev/null | openssl x509 -noout -text
    ```
@@ -290,6 +331,7 @@ export GOPHER_MCP_LOG_LEVEL=DEBUG
 ```
 
 This will provide detailed information about:
+
 - TLS handshake process
 - Certificate validation steps
 - Request/response details
@@ -312,6 +354,7 @@ If you encounter issues not covered in this guide:
 ### Memory Usage
 
 Bound memory growth through configuration rather than runtime inspection:
+
 ```bash
 # Cap cached entries and rendered output to limit memory use
 export GEMINI_MAX_CACHE_ENTRIES=1000
@@ -321,6 +364,7 @@ export GEMINI_MAX_RENDERED_CHARS=50000
 ### Connection Optimization
 
 For high-throughput scenarios, cap simultaneous fetches and rate-limit per host:
+
 ```bash
 export GEMINI_MAX_CONCURRENT_REQUESTS=20
 export GEMINI_REQUESTS_PER_MINUTE=60
@@ -329,6 +373,7 @@ export GEMINI_REQUESTS_PER_MINUTE=60
 ### Cache Tuning
 
 Optimize cache settings based on usage:
+
 ```bash
 # For high-traffic scenarios
 export GEMINI_MAX_CACHE_ENTRIES=5000
