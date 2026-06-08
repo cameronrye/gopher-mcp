@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-08
+
+### Added
+
+- Serialization-contract tests that pin the public result models' `model_dump()`
+  key sets, guarding the documented response shape against silent drift.
+
 ### Changed
 
 - Made the published documentation site the single source of truth: consolidated
@@ -36,6 +43,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   environment variables and stale single-tool / source-only / Pituophis /
   `tools.py` / `GopherMCPServer` claims from the documentation, and corrected the
   documented response-model fields to match the code.
+- Corrected the documentation code examples to access the real serialized
+  response keys (`title`, `text`/`bytes`, `note`, `new_url`, and the nested
+  `error` object), so the examples run without raising `KeyError`.
 
 ## [0.4.0] - 2026-06-08
 
@@ -258,7 +268,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.1...v0.2.2

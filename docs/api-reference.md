@@ -34,7 +34,7 @@ result = await gopher_fetch("gopher://gopher.floodgap.com/1/")
 if result["kind"] == "menu":
     print(f"Found {len(result['items'])} menu items")
     for item in result["items"]:
-        print(f"  {item['display_text']} ({item['type']})")
+        print(f"  {item['title']} ({item['type']})")
 ```
 
 ##### Fetching a Text File
@@ -44,8 +44,8 @@ if result["kind"] == "menu":
 result = await gopher_fetch("gopher://gopher.floodgap.com/0/gopher/tech/history.txt")
 
 if result["kind"] == "text":
-    print(f"Content ({result['size']} bytes):")
-    print(result["content"])
+    print(f"Content ({result['bytes']} bytes):")
+    print(result["text"])
 ```
 
 ##### Performing a Gopher Search
@@ -65,10 +65,9 @@ if result["kind"] == "menu":
 result = await gopher_fetch("gopher://gopher.floodgap.com/9/file.zip")
 
 if result["kind"] == "binary":
-    print(f"Binary file: {result['description']}")
-    print(f"Type: {result['item_type']}")
-    if result.get("size"):
-        print(f"Size: {result['size']} bytes")
+    print(f"Binary file: {result['note']}")
+    print(f"Type: {result['mime_type']}")
+    print(f"Size: {result['bytes']} bytes")
 ```
 
 ##### Error Handling
@@ -78,13 +77,7 @@ if result["kind"] == "binary":
 result = await gopher_fetch("gopher://invalid.example.com/1/")
 
 if result["kind"] == "error":
-    print(f"Error: {result['error']}")
-    if result.get("details"):
-        print(f"Details: {result['details']}")
-    if result.get("suggestions"):
-        print("Suggestions:")
-        for suggestion in result["suggestions"]:
-            print(f"  - {suggestion}")
+    print(f"Error [{result['error']['code']}]: {result['error']['message']}")
 ```
 
 #### Response Types
@@ -125,13 +118,15 @@ from gopher_mcp.server import gemini_fetch
 result = await gemini_fetch("gemini://geminiprotocol.net/")
 
 if result["kind"] == "gemtext":
-    print(f"Document has {len(result['document']['lines'])} lines")
+    lines = result["document"]["lines"]
+    headings = [ln for ln in lines if ln["type"].startswith("heading")]
+    print(f"Document has {len(lines)} lines")
     print(f"Found {len(result['document']['links'])} links")
-    print(f"Found {len(result['document']['headings'])} headings")
+    print(f"Found {len(headings)} headings")
 
     # Print all headings
-    for heading in result["document"]["headings"]:
-        print(f"{'#' * heading['level']} {heading['text']}")
+    for heading in headings:
+        print(f"{'#' * heading['level']} {heading['heading']['text']}")
 ```
 
 ##### Fetching Plain Text
@@ -141,8 +136,9 @@ if result["kind"] == "gemtext":
 result = await gemini_fetch("gemini://example.com/document.txt")
 
 if result["kind"] == "success":
-    print(f"MIME type: {result['mime_type']['full_type']}")
-    if result["mime_type"]["is_text"]:
+    mime = result["mime_type"]
+    print(f"MIME type: {mime['type']}/{mime['subtype']}")
+    if mime["type"] == "text":
         print(f"Content:\n{result['content']}")
 ```
 
@@ -153,11 +149,11 @@ if result["kind"] == "success":
 result = await gemini_fetch("gemini://example.com/old-page")
 
 if result["kind"] == "redirect":
-    print(f"Redirected to: {result['url']}")
+    print(f"Redirected to: {result['new_url']}")
     print(f"Permanent: {result['permanent']}")
 
     # Follow the redirect
-    new_result = await gemini_fetch(result["url"])
+    new_result = await gemini_fetch(result["new_url"])
 ```
 
 ##### Handling Input Requests
@@ -170,10 +166,8 @@ if result["kind"] == "input":
     print(f"Server requests input: {result['prompt']}")
     print(f"Sensitive: {result['sensitive']}")
 
-    # Provide input by appending to URL
-    user_input = "search query"
-    new_url = f"{result['request_info']['url']}?{user_input}"
-    new_result = await gemini_fetch(new_url)
+    # Answer the prompt with the gemini_fetch input parameter
+    new_result = await gemini_fetch("gemini://example.com/search", input="search query")
 ```
 
 ##### Handling Certificate Requests
@@ -195,14 +189,13 @@ if result["kind"] == "certificate":
 result = await gemini_fetch("gemini://example.com/notfound")
 
 if result["kind"] == "error":
-    print(f"Error {result['status']}: {result['message']}")
+    err = result["error"]
+    print(f"Error {err['status']}: {err['message']}")
 
-    if result["is_temporary"]:
+    if err["temporary"]:
         print("This is a temporary error - retry may succeed")
-    elif result["is_server_error"]:
-        print("Server error - contact server administrator")
-    elif result["is_client_error"]:
-        print("Client error - check your request")
+    else:
+        print("Permanent error - do not retry")
 ```
 
 ##### Working with Links
@@ -216,7 +209,6 @@ if result["kind"] == "gemtext":
         print(f"Link: {link['url']}")
         if link.get("text"):
             print(f"  Text: {link['text']}")
-        print(f"  Line: {link['line_number']}")
 ```
 
 #### Response Types
@@ -388,7 +380,7 @@ Common Gopher errors and how to handle them:
 # GOPHER_TIMEOUT_SECONDS=60
 
 result = await gopher_fetch("gopher://slow-server.example.com/1/")
-if result["kind"] == "error" and "timeout" in result["error"].lower():
+if result["kind"] == "error" and "timeout" in result["error"]["message"].lower():
     print("Server is slow or unreachable - try again later")
 ```
 
@@ -418,10 +410,8 @@ result = await gopher_fetch(valid_url)
 
 ```python
 result = await gopher_fetch("gopher://example.com/X/unknown")
-if result["kind"] == "error" and "unsupported" in result["error"].lower():
+if result["kind"] == "error" and "unsupported" in result["error"]["message"].lower():
     print("This content type is not supported")
-    if result.get("suggestions"):
-        print("Try:", result["suggestions"])
 ```
 
 #### Content Too Large
@@ -437,7 +427,7 @@ if result["kind"] == "error" and "unsupported" in result["error"].lower():
 # GOPHER_MAX_RESPONSE_SIZE=2097152
 
 result = await gopher_fetch("gopher://example.com/0/large-file.txt")
-if result["kind"] == "error" and "size" in result["error"].lower():
+if result["kind"] == "error" and "size" in result["error"]["message"].lower():
     print("File is too large - increase GOPHER_MAX_RESPONSE_SIZE")
 ```
 
@@ -534,22 +524,26 @@ if result["kind"] == "error" and "allowed" in result["error"]["message"].lower()
 All error responses include:
 
 ```python
+# Gopher error
 {
     "kind": "error",
     "error": {
+        "code": "ERROR_CODE",  # Machine-readable error code
         "message": "Human-readable error message",
-        "type": "ErrorType",  # Exception class name
-        "details": "Additional technical details"
     },
-    "suggestions": [  # Optional troubleshooting suggestions
-        "Try increasing timeout",
-        "Check server availability"
-    ],
-    "request_info": {
-        "url": "original://request/url",
-        "timestamp": 1234567890,
-        "protocol": "gopher" or "gemini"
-    }
+    "request_info": { ... },  # Free-form request metadata
+}
+
+# Gemini error (also carries status / temporary)
+{
+    "kind": "error",
+    "error": {
+        "code": "TEMPORARY_ERROR",  # or "PERMANENT_ERROR", etc.
+        "message": "Human-readable error message",
+        "status": 51,  # Gemini status code
+        "temporary": False,
+    },
+    "request_info": { ... },
 }
 ```
 

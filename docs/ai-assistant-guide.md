@@ -52,19 +52,19 @@ result = gopher_fetch(url)
 if result["kind"] == "menu":
     # Handle menu items
     for item in result["items"]:
-        print(f"{item['type']}: {item['display_text']}")
+        print(f"{item['type']}: {item['title']}")
 
 elif result["kind"] == "text":
     # Handle text content
-    print(result["content"])
+    print(result["text"])
 
 elif result["kind"] == "binary":
     # Handle binary file metadata
-    print(f"Binary file: {result['description']}")
+    print(f"Binary file: {result['note']}")
 
 elif result["kind"] == "error":
     # Handle errors
-    print(f"Error: {result['error']}")
+    print(f"Error: {result['error']['message']}")
 ```
 
 ### Gopher Item Types
@@ -112,34 +112,35 @@ if result["kind"] == "gemtext":
     doc = result["document"]
     for line in doc["lines"]:
         if line["type"] == "heading1":
-            print(f"# {line['text']}")
+            print(f"# {line['heading']['text']}")
         elif line["type"] == "link":
-            print(f"Link: {line['text']} -> {line['url']}")
+            print(f"Link: {line['link']['text']} -> {line['link']['url']}")
         elif line["type"] == "text":
-            print(line["text"])
+            print(line["content"])
 
 elif result["kind"] == "success":
     # Handle other content types
     mime = result["mime_type"]
-    if mime["is_text"]:
+    if mime["type"] == "text":
         print(result["content"])
     else:
-        print(f"Binary content: {mime['full_type']}")
+        print(f"Binary content: {mime['type']}/{mime['subtype']}")
 
 elif result["kind"] == "input":
     # Handle input requests
     print(f"Input required: {result['prompt']}")
-    # Note: In MCP context, you cannot provide input
+    # Answer with: gemini_fetch(url, input="...")
 
 elif result["kind"] == "redirect":
     # Handle redirects
-    new_url = result["url"]
+    new_url = result["new_url"]
     print(f"Redirected to: {new_url}")
     # Follow redirect if appropriate
 
 elif result["kind"] == "error":
     # Handle errors
-    print(f"Error {result['status']}: {result['message']}")
+    err = result["error"]
+    print(f"Error {err['status']}: {err['message']}")
 ```
 
 ### Gemini Status Codes
@@ -220,18 +221,19 @@ result = gopher_fetch("gopher://gopher.floodgap.com/1/")
 if result["kind"] == "menu":
     for item in result["items"]:
         if item["type"] == "1":  # Submenu
-            print(f"Directory: {item['display_text']}")
+            print(f"Directory: {item['title']}")
         elif item["type"] == "0":  # Text file
-            print(f"Text file: {item['display_text']}")
+            print(f"Text file: {item['title']}")
 
 # Browse Gemini content
 result = gemini_fetch("gemini://geminiprotocol.net/")
 if result["kind"] == "gemtext":
     # Show headings and links
-    for heading in result["document"]["headings"]:
-        print(f"Section: {heading['text']}")
+    headings = [ln for ln in result["document"]["lines"] if ln["type"].startswith("heading")]
+    for heading in headings:
+        print(f"Section: {heading['heading']['text']}")
     for link in result["document"]["links"]:
-        print(f"Link: {link['text']} -> {link['url']}")
+        print(f"Link: {link.get('text')} -> {link['url']}")
 ```
 
 ### Search Operations
@@ -253,7 +255,8 @@ if result["kind"] == "menu":
 result = gemini_fetch("gemini://example.org/article")
 if result["kind"] == "gemtext":
     doc = result["document"]
-    print(f"Article has {len(doc['headings'])} sections")
+    headings = [ln for ln in doc["lines"] if ln["type"].startswith("heading")]
+    print(f"Article has {len(headings)} sections")
     print(f"Contains {len(doc['links'])} links")
     print(f"Total lines: {len(doc['lines'])}")
 ```
@@ -280,12 +283,10 @@ def safe_fetch(url, protocol="auto"):
     except Exception as e:
         return {
             "kind": "error",
-            "error": str(e),
-            "suggestions": [
-                "Check if the URL is correct",
-                "Verify the server is online",
-                "Try again later if it's a temporary issue"
-            ]
+            "error": {
+                "code": "FETCH_FAILED",
+                "message": str(e),
+            },
         }
 ```
 
