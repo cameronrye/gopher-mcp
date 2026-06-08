@@ -818,6 +818,58 @@ class TestFetchContentMethod:
             await client._fetch_content(parsed_url)
 
     @pytest.mark.asyncio
+    async def test_max_concurrent_requests_bounds_inflight(self):
+        """An opt-in concurrency cap limits simultaneous in-flight fetches."""
+        import asyncio
+
+        from gopher_mcp.models import TextResult
+
+        client = GopherClient(max_concurrent_requests=2, cache_enabled=False)
+        inflight = 0
+        peak = 0
+
+        async def fake(_parsed_url):
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0.02)
+            inflight -= 1
+            return TextResult(bytes=2, text="hi")
+
+        client._fetch_content = fake  # type: ignore[method-assign]
+        await asyncio.gather(
+            *[client.fetch(f"gopher://example.com/0/{i}") for i in range(6)]
+        )
+        assert peak == 2  # cap saturated but never exceeded
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_unlimited_concurrency_by_default(self):
+        """The cap is opt-in: default (0) leaves concurrency unbounded."""
+        import asyncio
+
+        from gopher_mcp.models import TextResult
+
+        client = GopherClient(cache_enabled=False)  # default: no cap
+        inflight = 0
+        peak = 0
+
+        async def fake(_parsed_url):
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0.02)
+            inflight -= 1
+            return TextResult(bytes=2, text="hi")
+
+        client._fetch_content = fake  # type: ignore[method-assign]
+        await asyncio.gather(
+            *[client.fetch(f"gopher://example.com/0/{i}") for i in range(6)]
+        )
+        assert peak == 6  # all ran concurrently
+        await client.close()
+
+    @pytest.mark.asyncio
     async def test_dns_resolution_is_bounded_by_request_timeout(self):
         """A hanging resolver must not exceed the request deadline. DNS was
         previously outside the timeout envelope, so a tarpit nameserver could

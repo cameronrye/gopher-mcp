@@ -175,6 +175,42 @@ class TestGeminiClientFetch:
             mock_parse.assert_called_once_with("gemini://example.com/")
 
     @pytest.mark.asyncio
+    async def test_max_concurrent_requests_bounds_inflight(self):
+        """An opt-in concurrency cap limits simultaneous in-flight fetches."""
+        import asyncio
+
+        from gopher_mcp.models import GeminiMimeType, GeminiSuccessResult
+
+        client = GeminiClient(
+            max_concurrent_requests=2,
+            cache_enabled=False,
+            tofu_enabled=False,
+            client_certs_enabled=False,
+        )
+        inflight = 0
+        peak = 0
+
+        async def fake(_parsed_url):
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0.02)
+            inflight -= 1
+            return GeminiSuccessResult(
+                content="hi",
+                mimeType=GeminiMimeType(type="text", subtype="plain"),
+                size=2,
+                requestInfo={},
+            )
+
+        client._fetch_content = fake  # type: ignore[method-assign]
+        await asyncio.gather(
+            *[client.fetch(f"gemini://example.org/{i}") for i in range(6)]
+        )
+        assert peak == 2
+        await client.close()
+
+    @pytest.mark.asyncio
     async def test_dns_resolution_is_bounded_by_request_timeout(self):
         """A hanging resolver must not exceed the request deadline. DNS was
         previously outside the timeout envelope, so a tarpit nameserver could
@@ -220,7 +256,10 @@ class TestGeminiClientFetch:
         result = await client.fetch("gemini://example.com/")
 
         assert isinstance(result, GeminiErrorResult)
-        assert result.error["code"] == "CERTIFICATE_CHANGED"
+        # Distinct from a fingerprint mismatch: there is no cert to compare, so
+        # reporting CERTIFICATE_CHANGED ("does not match") would be misleading.
+        assert result.error["code"] == "CERTIFICATE_UNVERIFIED"
+        assert "does not match" not in result.error["message"].lower()
         client.tls_client.send_data.assert_not_awaited()  # never reached the wire
 
     @pytest.mark.asyncio

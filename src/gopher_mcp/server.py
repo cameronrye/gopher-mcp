@@ -137,6 +137,7 @@ class ClientManager:
                     max_search_length=gopher_config.max_search_length,
                     max_rendered_chars=gopher_config.max_rendered_chars,
                     requests_per_minute=gopher_config.requests_per_minute,
+                    max_concurrent_requests=gopher_config.max_concurrent_requests,
                 )
                 logger.info(
                     "Gopher client initialized",
@@ -180,6 +181,7 @@ class ClientManager:
                     client_certs_storage_path=client_certs_path,
                     max_rendered_chars=gemini_config.max_rendered_chars,
                     requests_per_minute=gemini_config.requests_per_minute,
+                    max_concurrent_requests=gemini_config.max_concurrent_requests,
                     denied_mime_types=gemini_config.denied_mime_types,
                 )
                 logger.info(

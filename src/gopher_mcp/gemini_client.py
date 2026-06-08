@@ -19,7 +19,12 @@ from .models import (
 )
 from .ratelimit import RateLimiter
 from .ssrf import SSRFError, normalize_host, validate_target
-from .tofu import TOFUExpiredError, TOFUManager, TOFUValidationError
+from .tofu import (
+    TOFUExpiredError,
+    TOFUManager,
+    TOFUUnavailableError,
+    TOFUValidationError,
+)
 from .utils import (
     parse_gemini_response,
     parse_gemini_url,
@@ -57,6 +62,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         client_certs_storage_path: str | None = None,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
         requests_per_minute: float = 0.0,
+        max_concurrent_requests: int = 0,
         denied_mime_types: list[str] | None = None,
     ) -> None:
         """Initialize the Gemini client.
@@ -83,6 +89,13 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         self.max_cache_entries = max_cache_entries
         self.max_rendered_chars = max_rendered_chars
         self._rate_limiter = RateLimiter(requests_per_minute)
+        self.max_concurrent_requests = max_concurrent_requests
+        # Opt-in coarse cap on simultaneous fetches (None = unlimited).
+        self._fetch_semaphore = (
+            asyncio.Semaphore(max_concurrent_requests)
+            if max_concurrent_requests > 0
+            else None
+        )
         self.denied_mime_types = frozenset(denied_mime_types or ())
         self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
         self.allow_local_hosts = allow_local_hosts
@@ -183,8 +196,8 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 "timestamp": time.time(),
             }
 
-            # Fetch the content
-            response = await self._fetch_content(parsed_url)
+            # Fetch the content (optionally bounded by the concurrency cap)
+            response = await self._bounded_fetch(parsed_url)
 
             # Honour a server SLOW_DOWN (status 44): back off this host for the
             # advertised number of seconds (meta) regardless of the configured
@@ -233,6 +246,10 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             # TOFUValidationError handler since it is a subclass). The message
             # names host:port and a category only -- safe to surface.
             return self._error_result(url, "CERTIFICATE_EXPIRED", str(e), e)
+        except TOFUUnavailableError as e:
+            # No certificate to compare against (not a mismatch). Also a subclass,
+            # so it must precede the TOFUValidationError handler.
+            return self._error_result(url, "CERTIFICATE_UNVERIFIED", str(e), e)
         except TOFUValidationError as e:
             return self._error_result(
                 url,
@@ -286,6 +303,13 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         except (TypeError, ValueError):
             seconds = 60.0
         self._rate_limiter.penalize(host, seconds)
+
+    async def _bounded_fetch(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
+        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set."""
+        if self._fetch_semaphore is None:
+            return await self._fetch_content(parsed_url)
+        async with self._fetch_semaphore:
+            return await self._fetch_content(parsed_url)
 
     async def _fetch_content(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
         """Fetch content from parsed Gemini URL using TLS.
@@ -379,8 +403,9 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                     # The TLS layer runs with CERT_NONE, so TOFU is the only
                     # thing authenticating the peer. Without a fingerprint we
                     # cannot apply the pin -- refuse rather than send the
-                    # request to an unverified server.
-                    raise TOFUValidationError(
+                    # request to an unverified server. This is a distinct failure
+                    # from a fingerprint mismatch (there is nothing to compare).
+                    raise TOFUUnavailableError(
                         "No certificate fingerprint available; cannot verify "
                         "the server identity via TOFU"
                     )

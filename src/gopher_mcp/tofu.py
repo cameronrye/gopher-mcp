@@ -128,6 +128,16 @@ class TOFUExpiredError(TOFUValidationError):
     """
 
 
+class TOFUUnavailableError(TOFUValidationError):
+    """No usable certificate was available to apply the TOFU pin.
+
+    Distinct from a fingerprint *mismatch*: there is nothing to compare against
+    (the TLS layer yielded no peer certificate fingerprint), so reporting it as
+    "certificate changed / does not match" would be misleading. The connection
+    is still refused (fail closed) -- the peer simply can't be authenticated.
+    """
+
+
 class TOFUManager:
     """Trust-on-First-Use certificate validation manager."""
 

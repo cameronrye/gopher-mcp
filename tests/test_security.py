@@ -1,6 +1,6 @@
 """Security and penetration tests for Gopher and Gemini protocols."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -135,26 +135,36 @@ class TestResourceExhaustion:
 
     @pytest.mark.asyncio
     async def test_timeout_protection(self):
-        """Test timeout protection against slow responses."""
-        client = GeminiClient(timeout_seconds=1)  # 1 second timeout
+        """A response slower than the deadline is bounded, not awaited forever.
 
-        # Mock a slow connection
-        async def slow_connect(*args, **kwargs):
-            import asyncio
+        TOFU is disabled here so the request reaches the read phase; the slow
+        ``receive_data`` is wrapped in the client's overall ``wait_for`` deadline,
+        which must fire and surface a timeout error rather than hang.
+        """
+        import asyncio
 
-            await asyncio.sleep(2)  # Longer than timeout
-            return Mock(), {}
+        client = GeminiClient(
+            timeout_seconds=0.1,
+            tofu_enabled=False,
+            client_certs_enabled=False,
+        )
 
-        with patch.object(client.tls_client, "connect", side_effect=slow_connect):
-            result = await client.fetch("gemini://example.com/")
+        async def slow_receive(*args, **kwargs):
+            await asyncio.sleep(2)  # far longer than the 0.1s deadline
+            return b"20 text/gemini\r\nhi"
 
-            # Should return timeout error
-            assert isinstance(result, GeminiErrorResult)
-            # Check for TLS connection error instead of timeout
-            assert (
-                "tls" in result.error["message"].lower()
-                or "failed" in result.error["message"].lower()
-            )
+        client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+            return_value=(Mock(), {"cert_fingerprint": "x"})
+        )
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.receive_data = slow_receive  # type: ignore[method-assign]
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+
+        result = await client.fetch("gemini://example.com/")
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "FETCH_ERROR"
+        assert "timed out" in result.error["message"].lower()
 
     def test_memory_exhaustion_protection(self):
         """Test protection against memory exhaustion."""
