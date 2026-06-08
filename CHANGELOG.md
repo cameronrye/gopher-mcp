@@ -19,6 +19,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TBD
 
+## [0.3.0] - 2026-06-07
+
+### Security
+
+- Pin the SSRF-validated IP address for the actual connection so a hostname can
+  no longer be re-resolved to an internal or rebinding address between the
+  validation check and the connect (Gopher and Gemini).
+- Add a denylist of dangerous service ports (SSH, SMTP, Redis, etc.) as
+  defense-in-depth.
+- Close the socket on every TLS connection/handshake failure (previously leaked
+  file descriptors under repeated failures).
+- Normalize TOFU trust-store host keys so a casing/trailing-dot variant cannot
+  establish a second pin, and reject a non-valid TOFU result (fail closed).
+- Fail closed on a corrupt client-certificate registry, and write the trust
+  store, certificate registry, and private keys owner-only.
+- Scan dependencies with `pip-audit` in CI (replacing the deprecated
+  `safety check`) and pin the PyPI publish action to a commit SHA.
+
+### Added
+
+- Range constraints on model port/size fields and scheme-based classification of
+  gemtext links (relative links are internal, not external).
+
+### Changed
+
+- Fetch tools now return structured error results instead of raising, so invalid
+  input, batch limits, and client-setup failures no longer surface as raw tool
+  errors.
+- Server settings are read under the `GOPHER_MCP_` environment prefix (e.g.
+  `GOPHER_MCP_LOG_LEVEL`) so common ambient variables no longer leak into
+  configuration. **Update any `LOG_LEVEL`/`DEVELOPMENT_MODE`/`LOG_FILE_PATH`
+  env vars to the prefixed names.**
+- `--mount-path` is now rejected for transports that ignore it (was silently
+  dropped for stdio/streamable-http).
+- Per-request URL/query logging moved to DEBUG.
+- Client connections are released on shutdown.
+
+### Fixed
+
+- Reject explicit invalid or zero ports in Gopher/Gemini URLs instead of
+  silently coercing them to the default.
+- Percent-decode Gopher selectors to their on-wire form.
+- Parse gemtext on CRLF/LF only and preserve preformatted lines verbatim.
+- Stop double-wrapping the Gemini response parser's own validation errors.
+- Enforce the project's full ruff ruleset (it was silently shadowed by a stray
+  config file) and clear a transitive `jaraco-context` advisory.
+
 ## [0.2.2] - 2025-01-16
 
 ### Added
