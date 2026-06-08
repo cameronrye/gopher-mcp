@@ -1,5 +1,5 @@
 site_name: Gopher MCP
-site_description: A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources
+site_description: A cross-platform Model Context Protocol (MCP) server for browsing Gopher and Gemini resources
 site_url: https://cameronrye.github.io/gopher-mcp
 repo_url: https://github.com/cameronrye/gopher-mcp
 repo_name: cameronrye/gopher-mcp
@@ -35,26 +35,28 @@ theme:
 
 nav:
   - Home: index.md
-  - Installation: installation.md
-  - API Reference: api-reference.md
-  - Advanced Features: advanced-features.md
-  - AI Assistant Guide: ai-assistant-guide.md
+  - Getting Started:
+      - Installation: installation.md
+      - Configuration: configuration.md
+      - Troubleshooting: troubleshooting.md
+  - Usage:
+      - API Reference: api-reference.md
+      - AI Assistant Guide: ai-assistant-guide.md
+      - Advanced Features: advanced-features.md
+      - Task Runner: task-runner.md
   - Protocols:
       - Gopher Specification: gopher-specification-for-llms.md
       - Gemini Support: gemini-support.md
       - Gemini Configuration: gemini-configuration.md
       - Gemini Specification: gemini-specification-for-llms.md
       - Gemini Troubleshooting: gemini-troubleshooting.md
-  - Guides:
+  - Reference:
+      - Architecture: architecture.md
       - Migration Guide: migration-guide.md
-      - Task Runner: task-runner.md
   - Development:
+      - Contributing: contributing.md
       - Repository Setup: development/repository-setup.md
-      - Open Source Release Checklist: development/open-source-release-checklist.md
-      - Gemini API Contracts: development/gemini_api_contracts.md
-      - Gemini Project Timeline: development/gemini_project_timeline.md
-      - Gemini Security Architecture: development/gemini_security_architecture.md
-  - Contributing: contributing.md
+      - Releasing: development/releasing.md
 
 plugins:
   - search
@@ -116,4 +118,4 @@ extra_javascript:
   - https://polyfill.io/v3/polyfill.min.js?features=es6
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
-copyright: Copyright &copy; 2025 Gopher MCP Team
+copyright: Copyright &copy; 2025&ndash;2026 Cameron Rye

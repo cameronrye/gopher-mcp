@@ -210,6 +210,7 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 **Parameters:**
 
 - `url` (string, required): Full Gemini URL (e.g., `gemini://geminiprotocol.net/`)
+- `input` (string, optional): Text to answer a Gemini input prompt (status 10/11); it is percent-encoded into the query string
 
 **Response Types:**
 
@@ -286,20 +287,27 @@ Once configured, you can ask Claude:
 gopher-mcp/
 ├── src/gopher_mcp/          # Main package
 │   ├── __init__.py          # Package initialization
-│   ├── server.py            # FastMCP server implementation
+│   ├── __main__.py          # CLI entry point (transports, --host/--port)
+│   ├── server.py            # FastMCP server + MCP tool definitions
 │   ├── gopher_client.py     # Gopher protocol client
+│   ├── gopher_transport.py  # Low-level Gopher transport
+│   ├── gemini_client.py     # Gemini protocol client
+│   ├── gemini_tls.py        # Gemini TLS connection handling
+│   ├── tofu.py              # Trust-on-First-Use certificate store
+│   ├── client_certs.py      # Gemini client certificate management
+│   ├── ssrf.py              # SSRF protection / address filtering
+│   ├── ratelimit.py         # Per-host rate limiting
+│   ├── cache.py             # Per-protocol response cache
+│   ├── config.py            # Pydantic settings models
 │   ├── models.py            # Pydantic data models
-│   ├── tools.py             # MCP tool definitions
 │   └── utils.py             # Utility functions
 ├── tests/                   # Comprehensive test suite
-│   ├── test_server.py       # Server tests
-│   ├── test_gopher_client.py # Client tests
-│   └── test_integration.py  # Integration tests
 ├── docs/                    # MkDocs documentation
 ├── scripts/                 # Development scripts
+├── config/                  # Example configuration (example.env)
 ├── .github/workflows/       # CI/CD pipelines
 ├── Makefile                 # Unix/macOS task runner
-├── task.bat                 # Windows task runner
+├── task.py                  # Cross-platform task runner
 └── pyproject.toml           # Modern Python project config
 ```
 
@@ -340,6 +348,7 @@ The server can be configured through environment variables for both protocols:
 | `GOPHER_TIMEOUT_SECONDS`   | Request timeout in seconds     | `30`            | `60`                   |
 | `GOPHER_CACHE_ENABLED`     | Enable response caching        | `true`          | `false`                |
 | `GOPHER_CACHE_TTL_SECONDS` | Cache time-to-live in seconds  | `300`           | `600`                  |
+| `GOPHER_MAX_CACHE_ENTRIES` | Max cached entries (LRU)       | `1000`          | `2000`                 |
 | `GOPHER_ALLOWED_HOSTS`     | Comma-separated allowed hosts  | `None` (all)    | `example.com,test.com` |
 | `GOPHER_ALLOW_LOCAL_HOSTS` | Permit loopback/private hosts  | `false`         | `true`                 |
 
@@ -360,6 +369,16 @@ The server can be configured through environment variables for both protocols:
 > link-local (including cloud metadata `169.254.169.254`), or private/RFC1918 addresses.
 > Set `GOPHER_ALLOW_LOCAL_HOSTS` / `GEMINI_ALLOW_LOCAL_HOSTS` to `true` only when you
 > deliberately need to reach local hosts (e.g. testing a server on localhost).
+
+The tables above cover the most common settings. Additional options include cache
+sizing (`*_MAX_CACHE_ENTRIES`), per-host rate limiting (`*_REQUESTS_PER_MINUTE`),
+concurrency caps (`*_MAX_CONCURRENT_REQUESTS`), rendered-output limits
+(`*_MAX_RENDERED_CHARS`), Gemini TOFU/certificate storage paths
+(`GEMINI_TOFU_STORAGE_PATH`, `GEMINI_CLIENT_CERTS_STORAGE_PATH`), MIME filtering
+(`GEMINI_DENIED_MIME_TYPES`), and server/logging settings under the `GOPHER_MCP_`
+prefix. See the full
+[Configuration Guide](https://cameronrye.github.io/gopher-mcp/configuration/) for
+every variable, its type, range, and default.
 
 ### Example Configuration
 
@@ -400,7 +419,7 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 ### Development Standards
 
 - **Type hints** for all functions and methods
-- **Comprehensive tests** with >90% coverage
+- **Comprehensive tests** (CI enforces a minimum of 85% coverage)
 - **Documentation** for all public APIs
 - **Security** considerations for all network operations
 - **Cross-platform** compatibility (Windows, macOS, Linux)

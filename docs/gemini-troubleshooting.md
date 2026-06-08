@@ -21,30 +21,29 @@ Error: TLS handshake failed: [SSL: CERTIFICATE_VERIFY_FAILED]
    ```
 
 2. **TLS Version Incompatibility**
-   - **Cause**: Server doesn't support configured minimum TLS version
-   - **Solution**: Lower TLS version requirement
-   ```bash
-   export GEMINI_TLS_VERSION=TLSv1.2
-   ```
+   - **Cause**: The server doesn't support TLS 1.2 or 1.3
+   - **Note**: The minimum TLS version is fixed in code at TLS 1.2 and is not configurable. A server that cannot negotiate TLS 1.2+ cannot be reached; this is intentional.
 
 3. **SNI Issues**
    - **Cause**: Server requires SNI but client isn't sending it
    - **Solution**: Ensure hostname is properly set in URL
 
-#### Problem: Certificate Validation Errors
+#### Problem: TOFU Fingerprint Mismatch
 ```
-Error: Certificate validation failed: hostname mismatch
+Error: TOFU validation failed: certificate fingerprint changed
 ```
 
 **Solutions:**
-1. **Disable Hostname Verification** (development only)
-   ```bash
-   export GEMINI_TLS_VERIFY_HOSTNAME=false
-   ```
+1. **Confirm the certificate change is legitimate**
+   - A changed fingerprint can mean the server rotated its certificate — or an active MITM. Verify out-of-band before trusting it.
 
-2. **Check URL Format**
-   - Ensure URL uses correct hostname
-   - Verify hostname matches certificate
+2. **Re-pin the certificate**
+   ```bash
+   # Remove the stale host entry from ~/.gemini/tofu.json, or delete the
+   # file to re-pin every host on the next connection
+   rm ~/.gemini/tofu.json
+   ```
+   - Note: Gemini trusts server certificates via TOFU (pinned fingerprint), not CA-chain or hostname verification, so there is no hostname-verification toggle.
 
 ### Client Certificate Issues
 
@@ -56,8 +55,8 @@ Error: Failed to generate client certificate
 **Solutions:**
 1. **Check Directory Permissions**
    ```bash
-   mkdir -p ~/.gemini/client_certs
-   chmod 700 ~/.gemini/client_certs
+   mkdir -p ~/.gemini/certs
+   chmod 700 ~/.gemini/certs
    ```
 
 2. **Verify OpenSSL Installation**
@@ -122,7 +121,8 @@ Error: Name or service not known
 
 2. **Try Alternative DNS**
    ```bash
-   export DNS_SERVER=8.8.8.8
+   # Query a specific resolver to rule out local DNS problems
+   nslookup geminiprotocol.net 8.8.8.8
    ```
 
 ### Protocol and Content Issues
@@ -139,7 +139,7 @@ Error: Invalid status code: 99
 
 2. **Enable Debug Logging**
    ```bash
-   export LOG_LEVEL=DEBUG
+   export GOPHER_MCP_LOG_LEVEL=DEBUG
    ```
 
 #### Problem: Gemtext Parsing Errors
@@ -238,17 +238,17 @@ A: Performance depends on network conditions and server responsiveness. Typical 
 
 A: By default:
 - TOFU fingerprints: `~/.gemini/tofu.json`
-- Client certificates: `~/.gemini/client_certs/`
+- Client certificates: `~/.gemini/certs/`
 
-You can customize these paths with environment variables.
+You can customize these paths with `GEMINI_TOFU_STORAGE_PATH` and `GEMINI_CLIENT_CERTS_STORAGE_PATH`.
 
 **Q: How do I configure for production use?**
 
 A: Use the production configuration example in `docs/gemini-configuration.md` and enable security features like host allowlists and TOFU validation.
 
-**Q: Can I use custom TLS certificates?**
+**Q: Can I supply my own client certificate and key?**
 
-A: Yes, you can specify custom client certificates using `GEMINI_TLS_CLIENT_CERT_PATH` and `GEMINI_TLS_CLIENT_KEY_PATH`.
+A: No — client certificates are generated and managed automatically per host/path scope when `GEMINI_CLIENT_CERTS_ENABLED=true`. There is no environment variable to point the server at an external cert/key pair. You can relocate where the generated certificates are stored with `GEMINI_CLIENT_CERTS_STORAGE_PATH` (default `~/.gemini/certs/`).
 
 ## Diagnostic Tools
 
@@ -259,19 +259,9 @@ A: Yes, you can specify custom client certificates using `GEMINI_TLS_CLIENT_CERT
    python scripts/validate-config.py
    ```
 
-2. **Connection Test**
+2. **Verify the Installation**
    ```bash
-   python -c "
-   import asyncio
-   from src.gopher_mcp.server import get_gemini_client
-
-   async def test():
-       client = get_gemini_client()
-       print('Gemini client initialized successfully')
-       await client.close()
-
-   asyncio.run(test())
-   "
+   python -c "import gopher_mcp; print(gopher_mcp.__version__)"
    ```
 
 ### External Tools
@@ -293,11 +283,10 @@ A: Yes, you can specify custom client certificates using `GEMINI_TLS_CLIENT_CERT
 
 ## Debug Logging
 
-Enable detailed logging for troubleshooting:
+Enable detailed logging for troubleshooting by raising the server log level:
 
 ```bash
-export LOG_LEVEL=DEBUG
-export DEBUG_COMPONENTS=gemini_client,gemini_tls,tofu
+export GOPHER_MCP_LOG_LEVEL=DEBUG
 ```
 
 This will provide detailed information about:
@@ -322,23 +311,19 @@ If you encounter issues not covered in this guide:
 
 ### Memory Usage
 
-Monitor memory usage with:
+Bound memory growth through configuration rather than runtime inspection:
 ```bash
-# Check cache memory usage
-python -c "
-from src.gopher_mcp.server import get_gemini_client
-client = get_gemini_client()
-print(f'Cache entries: {len(client.cache) if hasattr(client, \"cache\") else \"N/A\"}')
-"
+# Cap cached entries and rendered output to limit memory use
+export GEMINI_MAX_CACHE_ENTRIES=1000
+export GEMINI_MAX_RENDERED_CHARS=50000
 ```
 
 ### Connection Optimization
 
-For high-throughput scenarios:
+For high-throughput scenarios, cap simultaneous fetches and rate-limit per host:
 ```bash
-export MAX_CONCURRENT_CONNECTIONS=20
-export CONNECTION_POOL_SIZE=10
-export CONNECTION_KEEP_ALIVE=true
+export GEMINI_MAX_CONCURRENT_REQUESTS=20
+export GEMINI_REQUESTS_PER_MINUTE=60
 ```
 
 ### Cache Tuning

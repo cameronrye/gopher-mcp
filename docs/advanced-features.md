@@ -204,7 +204,7 @@ client = GopherClient(
 ## Performance Considerations
 
 - **Caching**: Significantly reduces response times for repeated requests
-- **Connection Reuse**: Pituophis handles connection pooling efficiently
+- **Bounded Streaming**: The native asyncio Gopher transport enforces size caps and request deadlines
 - **Async Processing**: Non-blocking I/O for concurrent requests
 - **Memory Management**: Automatic cache eviction prevents memory leaks
 - **Size Limits**: Prevents resource exhaustion from large responses
@@ -234,34 +234,28 @@ GEMINI_TOFU_STORAGE_PATH=/custom/path/tofu.json
 Automatic client certificate generation and management:
 
 ```bash
-# Enable client certificate support
+# Enable automatic client certificate management
 GEMINI_CLIENT_CERTS_ENABLED=true
 
-# Custom certificate storage directory
-GEMINI_CLIENT_CERT_STORAGE_PATH=/custom/path/certs/
+# Custom certificate storage directory (default: ~/.gemini/certs/)
+GEMINI_CLIENT_CERTS_STORAGE_PATH=/custom/path/certs/
 ```
 
 **Features:**
 - Automatic certificate generation per hostname/path scope
-- Secure private key storage with proper permissions
+- Secure private key storage with owner-only (700/600) permissions
 - Certificate reuse within the same scope
 - Scope-based certificate isolation
 
-### TLS Security Configuration
+You do not supply a cert/key pair yourself — the client generates and reuses one automatically when a server requests client authentication.
 
-Advanced TLS settings for enhanced security:
+### TLS Security
 
-```bash
-# Minimum TLS version
-GEMINI_TLS_VERSION=TLSv1.3
+TLS settings are fixed in code rather than configured through environment variables:
 
-# Hostname verification
-GEMINI_TLS_VERIFY_HOSTNAME=true
-
-# Custom client certificates
-GEMINI_TLS_CLIENT_CERT_PATH=/path/to/cert.pem
-GEMINI_TLS_CLIENT_KEY_PATH=/path/to/key.pem
-```
+- **Minimum version**: TLS 1.2 is enforced (TLS 1.2 and 1.3 are supported). There is no environment variable to raise or lower this.
+- **Server trust**: Server certificates are trusted via TOFU (the pinned fingerprint), not CA-chain or hostname verification. Standard hostname verification is intentionally not used, so there is no toggle for it. Tighten this with `GEMINI_TOFU_REJECT_EXPIRED=true` to fail closed on certificates outside their validity window.
+- **Client certificates**: Generated and managed automatically (see above); the server is never pointed at an external cert/key file.
 
 ### Gemini Caching System
 
@@ -297,9 +291,9 @@ GEMINI_ALLOWED_HOSTS=geminiprotocol.net,warmedal.se,kennedy.gemi.dev
 3. **Monitor Logs**: Use structured logging for security monitoring
 
 ### Gemini Protocol
-1. **Enable TOFU**: Always use TOFU certificate validation in production
-2. **Use TLS 1.3**: Configure minimum TLS version for enhanced security
-3. **Client Certificates**: Enable client certificate support for authenticated access
+1. **Enable TOFU**: Always use TOFU certificate validation in production; TLS 1.2+ is enforced automatically
+2. **Fail Closed on Bad Certificates**: Set `GEMINI_TOFU_REJECT_EXPIRED=true` to reject certificates outside their validity window
+3. **Client Certificates**: Enable automatic client certificate management for authenticated access
 4. **Host Allowlists**: Restrict access to trusted Gemini servers
 5. **Certificate Monitoring**: Monitor certificate validation failures
 

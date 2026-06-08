@@ -2,8 +2,8 @@
 
 ## 🔒 Security Overview
 
-The Gopher MCP Server is designed with security as a primary concern. This document outlines our security practices, how to
-report vulnerabilities, and the measures we take to protect users.
+The Gopher & Gemini MCP Server is designed with security as a primary concern. This document outlines our security practices,
+how to report vulnerabilities, and the measures we take to protect users.
 
 ## 🛡️ Security Measures
 
@@ -12,8 +12,10 @@ report vulnerabilities, and the measures we take to protect users.
 - **Timeout Protection**: All network requests have configurable timeouts (default: 30 seconds)
 - **Size Limits**: Response size limits prevent memory exhaustion attacks (default: 1MB)
 - **URL Validation**: Input URLs are validated to prevent malicious requests
-- **Protocol Restriction**: Only Gopher protocol (gopher://) URLs are accepted
-- **No Arbitrary Code Execution**: The server only fetches and parses Gopher content
+- **Protocol Restriction**: Only Gopher (`gopher://`) and Gemini (`gemini://`) URLs are accepted
+- **SSRF Protection**: Requests to loopback, link-local, and private addresses are blocked by default
+- **TLS for Gemini**: Gemini connections are encrypted and validated with Trust-on-First-Use (TOFU)
+- **No Arbitrary Code Execution**: The server only fetches and parses Gopher/Gemini content
 
 ### Input Validation
 
@@ -42,8 +44,10 @@ We provide security updates for the following versions:
 
 | Version | Supported |
 | ------- | --------- |
-| 1.x.x   | ✅ Yes    |
-| < 1.0   | ❌ No     |
+| 0.4.x   | ✅ Yes    |
+| < 0.4   | ❌ No     |
+
+As a pre-1.0 project, security fixes are released on the latest minor version.
 
 ## 📢 Reporting a Vulnerability
 
@@ -52,7 +56,8 @@ We provide security updates for the following versions:
 If you discover a security vulnerability, please report it responsibly:
 
 1. **DO NOT** create a public GitHub issue
-2. **Email** security reports to: [security@example.com](mailto:security@example.com)
+2. **Report privately** through GitHub Security Advisories:
+   [Report a vulnerability](https://github.com/cameronrye/gopher-mcp/security/advisories/new)
 3. **Include** detailed information about the vulnerability
 4. **Provide** steps to reproduce if possible
 
@@ -155,7 +160,7 @@ Use the `GOPHER_` / `GEMINI_` prefix for each protocol.
 Our CI/CD pipeline includes:
 
 - **Bandit**: Static security analysis for Python
-- **Safety**: Dependency vulnerability scanning
+- **pip-audit**: Dependency vulnerability scanning
 - **Ruff**: Code quality and security linting
 - **MyPy**: Type checking to prevent runtime errors
 
@@ -199,9 +204,17 @@ def test_response_size_limit():
 - **Plain Text**: All communication is in plain text
 - **Legacy Protocol**: May have undiscovered vulnerabilities
 
+### Gemini Protocol Security
+
+- **TLS Encryption**: All Gemini traffic is encrypted (TLS 1.2+)
+- **TOFU Validation**: Server certificates are pinned on first use; a changed fingerprint is rejected
+- **Client Certificates**: Per-host client certificates are supported for Gemini identities
+- **Expired Certificates**: Optionally reject certificates outside their validity window (`GEMINI_TOFU_REJECT_EXPIRED`)
+- **MIME Filtering**: Optionally deny content types via `GEMINI_DENIED_MIME_TYPES`
+
 ### Mitigation Strategies
 
-- **Network Monitoring**: Monitor all Gopher traffic
+- **Network Monitoring**: Monitor Gopher and Gemini traffic
 - **Content Filtering**: Filter potentially malicious content
 - **Access Logging**: Log all access attempts
 - **Regular Updates**: Keep the server updated
@@ -230,7 +243,8 @@ def test_response_size_limit():
 
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
 - [Python Security Best Practices](https://python.org/dev/security/)
-- [Gopher Protocol Specification](https://tools.ietf.org/html/rfc1436)
+- [Gopher Protocol Specification (RFC 1436)](https://datatracker.ietf.org/doc/html/rfc1436)
+- [Gemini Protocol Specification](https://geminiprotocol.net/docs/specification.gmi)
 
 ### Internal Documentation
 
@@ -242,7 +256,7 @@ def test_response_size_limit():
 
 For security-related questions or concerns:
 
-- **Security Email**: [security@example.com](mailto:security@example.com)
+- **Security Reports**: [GitHub Security Advisories](https://github.com/cameronrye/gopher-mcp/security/advisories/new)
 - **General Issues**: [GitHub Issues](https://github.com/cameronrye/gopher-mcp/issues)
 - **Documentation**: [Project Docs](https://cameronrye.github.io/gopher-mcp/)
 

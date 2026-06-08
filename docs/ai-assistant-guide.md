@@ -9,6 +9,11 @@ The server provides two main tools:
 - **`gopher_fetch`**: For exploring Gopherspace (vintage internet protocol)
 - **`gemini_fetch`**: For exploring Geminispace (modern privacy-focused protocol)
 
+For fetching several resources at once, two batch tools are also available:
+**`gopher_batch_fetch`** and **`gemini_batch_fetch`**, which each take a list of
+URLs and return a list of results (with bounded concurrency and a capped list
+length). They behave like the single-resource tools applied to each URL.
+
 ## Understanding the Protocols
 
 ### Gopher Protocol

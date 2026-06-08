@@ -47,11 +47,11 @@ cd gopher-mcp
 Verify your installation:
 
 ```bash
-# Check version
-gopher-mcp --version
-
-# Run basic health check
+# Confirm the console script is available
 gopher-mcp --help
+
+# Check the installed version
+python -c "import gopher_mcp; print(gopher_mcp.__version__)"
 ```
 
 ## Configuration
@@ -72,6 +72,19 @@ Add to your Claude Desktop configuration:
   }
 }
 ```
+
+The configuration file is located at:
+
+| OS | Path |
+|----|------|
+| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+| Linux | `~/.config/Claude/claude_desktop_config.json` |
+
+If `gopher-mcp` is not on Claude Desktop's `PATH`, use the absolute path to the
+command (find it with `which gopher-mcp`). Fully restart Claude Desktop after
+editing the file. Zero-install via `uvx` also works — set `"command": "uvx"` and
+`"args": ["gopher-mcp"]`.
 
 #### Other MCP Clients
 
@@ -109,6 +122,6 @@ pip install gopher-mcp
 
 ### Getting Help
 
-- Check the [Troubleshooting Guide](gemini-troubleshooting.md)
+- Check the [Troubleshooting Guide](troubleshooting.md)
 - Open an issue on [GitHub](https://github.com/cameronrye/gopher-mcp/issues)
 - Review the [API Reference](api-reference.md) for detailed usage information
