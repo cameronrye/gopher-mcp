@@ -65,3 +65,34 @@ class TestRateLimiterAcquire:
         await rl.acquire("slow.example")
         sleep.assert_awaited_once()
         assert sleep.await_args.args[0] == pytest.approx(5.0)
+
+    async def test_stale_host_entries_are_swept_when_throttling(self):
+        """With throttling enabled, hosts visited once must not accumulate
+        forever -- entries whose next-allowed time has elapsed are swept."""
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(60, clock=clock, sleep=sleep)  # 1s interval
+        rl._sweep_threshold = 10  # keep the test small
+
+        # Visit many distinct hosts, advancing the clock so each prior host's
+        # reservation has long elapsed by the time the sweep runs.
+        for i in range(100):
+            clock.t = 100.0 + i * 10.0
+            await rl.acquire(f"host{i}.example")
+
+        # Without sweeping this would be 100; it must stay bounded near the
+        # threshold (only the just-reserved host is still "in the future").
+        assert len(rl._next_allowed) <= rl._sweep_threshold + 1
+
+    async def test_sweep_keeps_hosts_with_live_reservations(self):
+        """The sweep must not drop hosts that still owe a future wait."""
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(60, clock=clock, sleep=sleep)  # 1s interval
+        rl._sweep_threshold = 5
+
+        # All reservations are live (clock never advances), so none are stale.
+        for i in range(50):
+            await rl.acquire(f"host{i}.example")
+
+        assert len(rl._next_allowed) == 50

@@ -48,6 +48,12 @@ class RateLimiter:
         self._lock = asyncio.Lock()
         self._clock = clock
         self._sleep = sleep
+        # When throttling is enabled, hosts visited once would otherwise live in
+        # ``_next_allowed`` forever (an "open-world" fetcher sees unbounded
+        # distinct hosts). Once the map grows past this many entries, sweep out
+        # hosts whose reservation has already elapsed (they impose no future
+        # constraint, so dropping them is behaviour-preserving).
+        self._sweep_threshold = 1024
 
     async def acquire(self, host: str) -> None:
         """Block until a request to ``host`` is permitted.
@@ -65,6 +71,14 @@ class RateLimiter:
             base = allowed_at if wait > 0 else now
             if self.min_interval > 0:
                 self._next_allowed[host] = base + self.min_interval
+                # Bound memory: drop hosts whose reserved time has already
+                # passed. The host just reserved above is in the future, so it
+                # survives. Amortized via the threshold so the common path stays
+                # O(1).
+                if len(self._next_allowed) > self._sweep_threshold:
+                    self._next_allowed = {
+                        h: t for h, t in self._next_allowed.items() if t > now
+                    }
             elif wait <= 0:
                 # Disabled and the penalty (if any) has elapsed -- forget the host.
                 self._next_allowed.pop(host, None)
