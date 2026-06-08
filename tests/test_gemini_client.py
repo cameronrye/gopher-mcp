@@ -1,7 +1,7 @@
 """Tests for Gemini client implementation."""
 
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -173,6 +173,26 @@ class TestGeminiClientFetch:
             assert "url" in result.request_info
             assert "timestamp" in result.request_info
             mock_parse.assert_called_once_with("gemini://example.com/")
+
+    @pytest.mark.asyncio
+    async def test_missing_fingerprint_fails_closed_without_sending(self):
+        """The most security-critical TOFU branch: when TLS yields no certificate
+        fingerprint, the request must NOT be sent to the unverified peer."""
+        client = GeminiClient(client_certs_enabled=False)  # TOFU on by default
+        assert client.tofu_manager is not None
+
+        client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+            return_value=(Mock(), {})  # no 'cert_fingerprint' key
+        )
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.receive_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+
+        result = await client.fetch("gemini://example.com/")
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CERTIFICATE_CHANGED"
+        client.tls_client.send_data.assert_not_awaited()  # never reached the wire
 
     @pytest.mark.asyncio
     async def test_fetch_with_cache_hit(self):

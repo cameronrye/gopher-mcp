@@ -779,6 +779,29 @@ class TestFetchContentMethod:
         client._rate_limiter.acquire.assert_awaited_once_with("example.com")
 
     @pytest.mark.asyncio
+    async def test_fetch_internal_host_is_blocked(self):
+        """A URL resolving to an internal address yields a BLOCKED error (the
+        SSRF guard is wired into the gopher client, not only end-to-end)."""
+        client = GopherClient()
+        result = await client.fetch("gopher://db.internal/1/")
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "BLOCKED"
+
+    @pytest.mark.asyncio
+    async def test_allow_local_hosts_permits_loopback(self):
+        """With allow_local_hosts the guard is bypassed and the fetch proceeds to
+        the (mocked) transport instead of being blocked."""
+        client = GopherClient(allow_local_hosts=True)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"hi"),
+        ) as mock_fetch:
+            result = await client.fetch("gopher://localhost/0/x")
+        assert isinstance(result, TextResult)
+        # Connection is pinned to the validated loopback IP (DNS-rebinding guard).
+        assert mock_fetch.await_args.kwargs["connect_addresses"] == ["127.0.0.1"]
+
+    @pytest.mark.asyncio
     async def test_fetch_content_transport_error_propagates(self):
         """Transport errors propagate to be mapped by fetch()."""
         client = GopherClient()
