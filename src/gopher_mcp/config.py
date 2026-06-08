@@ -78,6 +78,14 @@ class GopherConfig(BaseSettings):
         ge=0,
         le=6000,
     )
+    max_concurrent_requests: int = Field(
+        default=0,
+        description="Cap on simultaneous in-flight fetches (0 = unlimited); a "
+        "coarse bound on concurrent sockets/memory, complementary to the "
+        "per-host rate limit. Off by default.",
+        ge=0,
+        le=1000,
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="GOPHER_",
@@ -176,6 +184,14 @@ class GeminiConfig(BaseSettings):
         "honoured regardless of this setting.",
         ge=0,
         le=6000,
+    )
+    max_concurrent_requests: int = Field(
+        default=0,
+        description="Cap on simultaneous in-flight fetches (0 = unlimited); a "
+        "coarse bound on concurrent sockets/memory, complementary to the "
+        "per-host rate limit. Off by default.",
+        ge=0,
+        le=1000,
     )
     denied_mime_types: list[str] = Field(
         default_factory=list,

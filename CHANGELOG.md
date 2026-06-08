@@ -33,6 +33,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selector/search at parse time, not only via the client's re-check.
 - Defensive fetch-error paths return a generic message to the model instead of
   echoing the raw internal exception string (full detail is still logged).
+- Report a missing / unobtainable server certificate as a distinct
+  `CERTIFICATE_UNVERIFIED` result rather than the misleading `CERTIFICATE_CHANGED`
+  ("does not match"), since there is no certificate to compare against.
 
 ### Added
 
@@ -44,6 +47,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `type/*` wildcards).
 - `GEMINI_TOFU_REJECT_EXPIRED` (default off) to fail closed on a Gemini
   certificate outside its validity window.
+- `GOPHER_MAX_CONCURRENT_REQUESTS` / `GEMINI_MAX_CONCURRENT_REQUESTS` (default 0 =
+  unlimited) — an opt-in cap on simultaneous in-flight fetches, a coarse bound on
+  concurrent sockets/memory complementary to the per-host rate limit.
 - LLM-facing text render cap (`GOPHER_/GEMINI_MAX_RENDERED_CHARS`, default 50000)
   with a `truncated` flag, distinct from the network byte cap.
 - Rich tool input schemas (descriptions + examples), `readOnlyHint`/

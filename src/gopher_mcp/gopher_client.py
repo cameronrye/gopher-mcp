@@ -83,6 +83,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
         requests_per_minute: float = 0.0,
+        max_concurrent_requests: int = 0,
     ) -> None:
         """Initialize the Gopher client.
 
@@ -95,6 +96,8 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             allowed_hosts: List of allowed hostnames (None = allow all)
             max_selector_length: Maximum selector string length
             max_search_length: Maximum search query length
+            max_concurrent_requests: Cap on simultaneous in-flight fetches
+                (0 = unlimited); a coarse bound on concurrent sockets/memory.
 
         """
         self.max_response_size = max_response_size
@@ -106,6 +109,13 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         self.max_search_length = max_search_length
         self.max_rendered_chars = max_rendered_chars
         self._rate_limiter = RateLimiter(requests_per_minute)
+        self.max_concurrent_requests = max_concurrent_requests
+        # Opt-in coarse cap on simultaneous fetches (None = unlimited).
+        self._fetch_semaphore = (
+            asyncio.Semaphore(max_concurrent_requests)
+            if max_concurrent_requests > 0
+            else None
+        )
 
         self.allow_local_hosts = allow_local_hosts
 
@@ -204,8 +214,8 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
                 "timestamp": time.time(),
             }
 
-            # Fetch the content
-            response = await self._fetch_content(parsed_url)
+            # Fetch the content (optionally bounded by the concurrency cap)
+            response = await self._bounded_fetch(parsed_url)
             # Merge (not clobber) so any fields a processor attached survive --
             # matches the Gemini client and avoids a latent maintenance trap.
             if hasattr(response, "request_info"):
@@ -261,6 +271,13 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             error={"code": code, "message": message},
             requestInfo={"url": url, "timestamp": time.time()},
         )
+
+    async def _bounded_fetch(self, parsed_url: GopherURL) -> GopherFetchResponse:
+        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set."""
+        if self._fetch_semaphore is None:
+            return await self._fetch_content(parsed_url)
+        async with self._fetch_semaphore:
+            return await self._fetch_content(parsed_url)
 
     async def _fetch_content(self, parsed_url: GopherURL) -> GopherFetchResponse:
         """Fetch content from a parsed Gopher URL over the native transport.
