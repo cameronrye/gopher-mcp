@@ -19,10 +19,7 @@ from gopher_mcp.server import (
 
 
 def clear_client_manager():
-    """Helper to clear both module-level and class-level client manager instances."""
-    import gopher_mcp.server
-
-    gopher_mcp.server._client_manager = None
+    """Helper to clear the client-manager singleton."""
     ClientManager._instance = None
     # Also reset the config so it picks up new environment variables
     reset_config()
@@ -143,9 +140,10 @@ class TestGopherFetch:
 
     @pytest.mark.asyncio
     async def test_gopher_fetch_client_error(self):
-        """A client failure is returned as a sanitized FETCH_ERROR, not raised."""
+        """An unexpected client failure is a sanitized FETCH_ERROR whose
+        message does not leak internal exception detail to the LLM."""
         mock_client = AsyncMock()
-        mock_client.fetch.side_effect = Exception("Connection failed")
+        mock_client.fetch.side_effect = Exception("/home/u/.gemini/secret boom")
 
         mock_manager = AsyncMock()
         mock_manager.get_gopher_client.return_value = mock_client
@@ -154,7 +152,8 @@ class TestGopherFetch:
             result = await gopher_fetch("gopher://example.com/0/test.txt")
 
         assert result["error"]["code"] == "FETCH_ERROR"
-        assert "Connection failed" in result["error"]["message"]
+        assert "secret" not in result["error"]["message"]
+        assert "boom" not in result["error"]["message"]
 
 
 class TestGopherBatchFetch:
@@ -245,14 +244,17 @@ class TestGopherBatchFetch:
 
     @pytest.mark.asyncio
     async def test_gopher_batch_fetch_too_many_urls(self):
-        """A batch larger than MAX_BATCH_URLS is rejected."""
+        """Over-limit preserves the order/length contract: one error per URL."""
         from gopher_mcp.server import MAX_BATCH_URLS, gopher_batch_fetch
 
         urls = [f"gopher://example.com/0/{i}" for i in range(MAX_BATCH_URLS + 1)]
         results = await gopher_batch_fetch(urls)
-        assert len(results) == 1
-        assert results[0]["error"]["code"] == "INVALID_REQUEST"
+        # Same length as input so a model can zip responses to URLs by index.
+        assert len(results) == len(urls)
+        assert all(r["error"]["code"] == "INVALID_REQUEST" for r in results)
         assert "Too many URLs" in results[0]["error"]["message"]
+        assert results[0]["request_info"]["url"] == urls[0]
+        assert results[-1]["request_info"]["url"] == urls[-1]
 
     @pytest.mark.asyncio
     async def test_gopher_batch_fetch_setup_failure_returns_error(self):
@@ -354,14 +356,16 @@ class TestGeminiBatchFetch:
 
     @pytest.mark.asyncio
     async def test_gemini_batch_fetch_too_many_urls(self):
-        """A batch larger than MAX_BATCH_URLS is rejected."""
+        """Over-limit preserves the order/length contract: one error per URL."""
         from gopher_mcp.server import MAX_BATCH_URLS, gemini_batch_fetch
 
         urls = [f"gemini://example.org/{i}" for i in range(MAX_BATCH_URLS + 1)]
         results = await gemini_batch_fetch(urls)
-        assert len(results) == 1
-        assert results[0]["error"]["code"] == "INVALID_REQUEST"
+        assert len(results) == len(urls)
+        assert all(r["error"]["code"] == "INVALID_REQUEST" for r in results)
         assert "Too many URLs" in results[0]["error"]["message"]
+        assert results[0]["request_info"]["url"] == urls[0]
+        assert results[-1]["request_info"]["url"] == urls[-1]
 
     @pytest.mark.asyncio
     async def test_gemini_batch_fetch_setup_failure_returns_error(self):
@@ -394,10 +398,11 @@ class TestCleanup:
         # Cleanup should close clients
         await cleanup()
 
-        # Verify cleanup was called
-        import gopher_mcp.server
-
-        assert gopher_mcp.server._client_manager is None
+        # The class singleton is the single source of truth and must be reset,
+        # so the next call builds a fresh manager rather than handing back the
+        # one whose clients were just closed.
+        assert ClientManager._instance is None
+        assert await get_client_manager() is not manager
 
     @pytest.mark.asyncio
     async def test_cleanup_without_clients(self):
@@ -701,9 +706,9 @@ class TestGeminiFetch:
 
     @pytest.mark.asyncio
     async def test_gemini_fetch_client_error(self):
-        """Test gemini fetch when client raises an error."""
+        """An unexpected client failure must not leak exception detail."""
         mock_client = AsyncMock()
-        mock_client.fetch.side_effect = Exception("Connection failed")
+        mock_client.fetch.side_effect = Exception("/home/u/.gemini/secret boom")
 
         mock_manager = AsyncMock()
         mock_manager.get_gemini_client.return_value = mock_client
@@ -712,4 +717,5 @@ class TestGeminiFetch:
             result = await gemini_fetch("gemini://example.org/")
 
         assert result["error"]["code"] == "FETCH_ERROR"
-        assert "Connection failed" in result["error"]["message"]
+        assert "secret" not in result["error"]["message"]
+        assert "boom" not in result["error"]["message"]

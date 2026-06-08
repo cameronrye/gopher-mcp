@@ -35,17 +35,14 @@ def _stub_dns(monkeypatch: pytest.MonkeyPatch) -> None:
 def _reset_client_manager_singleton():
     """Reset the global client-manager singleton around every test.
 
-    The manager is a module/class-level singleton, so an instance created by one
-    test would otherwise leak into the next (an ordering dependency). This is the
+    The manager is a class-level singleton, so an instance created by one test
+    would otherwise leak into the next (an ordering dependency). This is the
     safety net so a forgotten manual reset can't contaminate later tests.
     """
-    import gopher_mcp.server
     from gopher_mcp.server import ClientManager
 
-    gopher_mcp.server._client_manager = None
     ClientManager._instance = None
     yield
-    gopher_mcp.server._client_manager = None
     ClientManager._instance = None
 
 

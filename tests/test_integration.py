@@ -23,9 +23,6 @@ from gopher_mcp.server import (
 
 def clear_client_manager():
     """Helper to clear client manager singleton."""
-    import gopher_mcp.server
-
-    gopher_mcp.server._client_manager = None
     ClientManager._instance = None
 
 
