@@ -123,7 +123,7 @@ async def resolve_host(host: str, port: int) -> list[str]:
 
     Isolated in its own function so tests can stub DNS deterministically.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     return [info[4][0] for info in infos]
 

@@ -6,6 +6,7 @@ from collections import OrderedDict
 
 import structlog
 
+from .cache import TTLCacheMixin
 from .gopher_transport import GopherProtocolError, decode_gopher_text, fetch_gopher
 from .models import (
     BinaryResult,
@@ -64,7 +65,7 @@ def _strip_gopher_text_terminator(text: str) -> str:
     return result
 
 
-class GopherClient:
+class GopherClient(TTLCacheMixin[GopherFetchResponse]):
     """Async Gopher protocol client with caching and safety features."""
 
     def __init__(
@@ -112,8 +113,10 @@ class GopherClient:
             set(allowed_hosts) if allowed_hosts else None
         )
 
-        # Use OrderedDict for LRU cache implementation
-        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
+        # is inherited from the mixin annotation; only the entry class differs.
+        self._cache = OrderedDict()
+        self._cache_entry_cls = CacheEntry
 
     def _validate_security(self, parsed_url: GopherURL) -> None:
         """Validate security constraints for a Gopher request.
@@ -202,8 +205,10 @@ class GopherClient:
 
             # Fetch the content
             response = await self._fetch_content(parsed_url)
+            # Merge (not clobber) so any fields a processor attached survive --
+            # matches the Gemini client and avoids a latent maintenance trap.
             if hasattr(response, "request_info"):
-                response.request_info = request_info
+                response.request_info.update(request_info)
 
             # Cache the response
             if self.cache_enabled:
@@ -391,60 +396,7 @@ class GopherClient:
             mimeType=detect_binary_mime_type(raw),
         )
 
-    def _get_cached_response(self, url: str) -> GopherFetchResponse | None:
-        """Get cached response if available and not expired.
-
-        Args:
-            url: Gopher URL
-
-        Returns:
-            Cached response or None
-
-        """
-        if not self.cache_enabled or url not in self._cache:
-            return None
-
-        entry = self._cache[url]
-        current_time = time.time()
-
-        if entry.is_expired(current_time):
-            del self._cache[url]
-            return None
-
-        # Move to end to mark as recently used (LRU)
-        self._cache.move_to_end(url)
-        return entry.value
-
-    def _cache_response(self, url: str, response: GopherFetchResponse) -> None:
-        """Cache a response using LRU eviction strategy.
-
-        Args:
-            url: Gopher URL
-            response: Response to cache
-
-        """
-        if not self.cache_enabled:
-            return
-
-        # Evict least recently used entry if cache is full
-        if (
-            self._cache
-            and len(self._cache) >= self.max_cache_entries
-            and url not in self._cache
-        ):
-            # Remove first item (least recently used)
-            self._cache.popitem(last=False)
-
-        entry = CacheEntry(
-            key=url,
-            value=response,
-            timestamp=time.time(),
-            ttl=self.cache_ttl_seconds,
-        )
-
-        # Add or update entry and move to end (most recently used)
-        self._cache[url] = entry
-        self._cache.move_to_end(url)
+    # _get_cached_response / _cache_response are provided by TTLCacheMixin.
 
     async def close(self) -> None:
         """Close the client and cleanup resources."""

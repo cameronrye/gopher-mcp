@@ -6,6 +6,7 @@ from collections import OrderedDict
 
 import structlog
 
+from .cache import TTLCacheMixin
 from .client_certs import ClientCertificateManager
 from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnectionError
 from .models import (
@@ -35,7 +36,7 @@ DEFAULT_MAX_CACHE_ENTRIES = 1000
 DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 
 
-class GeminiClient:
+class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
     """Async Gemini protocol client with TLS, caching and safety features."""
 
     def __init__(
@@ -111,8 +112,10 @@ class GeminiClient:
                 client_certs_storage_path
             )
 
-        # Use OrderedDict for LRU cache implementation
-        self._cache: OrderedDict[str, GeminiCacheEntry] = OrderedDict()
+        # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
+        # is inherited from the mixin annotation; only the entry class differs.
+        self._cache = OrderedDict()
+        self._cache_entry_cls = GeminiCacheEntry
 
     def _validate_security(self, parsed_url: GeminiURL) -> None:
         """Validate security constraints for a Gemini request.
@@ -442,60 +445,7 @@ class GeminiClient:
             if ssl_sock:
                 await self.tls_client.close(ssl_sock)
 
-    def _get_cached_response(self, url: str) -> GeminiFetchResponse | None:
-        """Get cached response if available and not expired.
-
-        Args:
-            url: Gemini URL
-
-        Returns:
-            Cached response or None
-
-        """
-        if not self.cache_enabled or url not in self._cache:
-            return None
-
-        entry = self._cache[url]
-        current_time = time.time()
-
-        if entry.is_expired(current_time):
-            del self._cache[url]
-            return None
-
-        # Move to end to mark as recently used (LRU)
-        self._cache.move_to_end(url)
-        return entry.value
-
-    def _cache_response(self, url: str, response: GeminiFetchResponse) -> None:
-        """Cache a response using LRU eviction strategy.
-
-        Args:
-            url: Gemini URL
-            response: Response to cache
-
-        """
-        if not self.cache_enabled:
-            return
-
-        # Evict least recently used entry if cache is full
-        if (
-            self._cache
-            and len(self._cache) >= self.max_cache_entries
-            and url not in self._cache
-        ):
-            # Remove first item (least recently used)
-            self._cache.popitem(last=False)
-
-        entry = GeminiCacheEntry(
-            key=url,
-            value=response,
-            timestamp=time.time(),
-            ttl=self.cache_ttl_seconds,
-        )
-
-        # Add or update entry and move to end (most recently used)
-        self._cache[url] = entry
-        self._cache.move_to_end(url)
+    # _get_cached_response / _cache_response are provided by TTLCacheMixin.
 
     def update_tofu_certificate(
         self, host: str, port: int, cert_fingerprint: str, force: bool = False

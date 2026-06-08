@@ -153,7 +153,7 @@ class TestGeminiTLSClient:
 
     @pytest.mark.asyncio
     @patch("socket.socket")
-    @patch("asyncio.get_event_loop")
+    @patch("asyncio.get_running_loop")
     async def test_connect_success(self, mock_get_loop, mock_socket):
         """Test successful TLS connection."""
         # Mock socket and SSL socket
@@ -230,7 +230,7 @@ class TestGeminiTLSClient:
 
     @pytest.mark.asyncio
     @patch("socket.socket")
-    @patch("asyncio.get_event_loop")
+    @patch("asyncio.get_running_loop")
     async def test_connect_ssl_error(self, mock_get_loop, mock_socket):
         """Test SSL handshake error."""
         mock_sock = Mock()
@@ -259,7 +259,7 @@ class TestGeminiTLSClient:
         mock_ssl_sock = Mock()
         client = GeminiTLSClient()
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
+        with patch("asyncio.get_running_loop") as mock_get_loop:
             mock_loop = Mock()
             mock_loop.run_in_executor = AsyncMock()
             mock_get_loop.return_value = mock_loop
@@ -279,7 +279,7 @@ class TestGeminiTLSClient:
 
         client = GeminiTLSClient()
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
+        with patch("asyncio.get_running_loop") as mock_get_loop:
             mock_loop = Mock()
             mock_loop.run_in_executor = AsyncMock(
                 side_effect=Exception("Unwrap failed")
@@ -296,7 +296,7 @@ class TestGeminiTLSClient:
         client = GeminiTLSClient()
         data = b"gemini://example.org/\r\n"
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
+        with patch("asyncio.get_running_loop") as mock_get_loop:
             mock_loop = Mock()
             mock_loop.run_in_executor = AsyncMock()
             mock_get_loop.return_value = mock_loop
@@ -311,7 +311,7 @@ class TestGeminiTLSClient:
         mock_ssl_sock = Mock()
         client = GeminiTLSClient()
 
-        with patch("asyncio.get_event_loop") as mock_get_loop:
+        with patch("asyncio.get_running_loop") as mock_get_loop:
             mock_loop = Mock()
             mock_loop.run_in_executor = AsyncMock(side_effect=Exception("Send failed"))
             mock_get_loop.return_value = mock_loop
