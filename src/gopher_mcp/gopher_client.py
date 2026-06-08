@@ -1,5 +1,6 @@
 """Gopher protocol client implementation."""
 
+import asyncio
 import re
 import time
 from collections import OrderedDict
@@ -296,11 +297,24 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         # SSRF guard: reject internal/loopback/link-local targets before
         # connecting, and pin the connection to the exact IPs we validated so
         # the transport can't re-resolve to a rebinding answer.
-        connect_addresses = await validate_target(
-            parsed_url.host,
-            parsed_url.port,
-            allow_local=self.allow_local_hosts,
-        )
+        #
+        # Bound DNS resolution by the request deadline: getaddrinfo is otherwise
+        # unbounded (a tarpit nameserver could stall a worker -- and tie up an
+        # event-loop executor thread -- far past timeout_seconds), so the
+        # documented "overall deadline" must cover it too.
+        try:
+            connect_addresses = await asyncio.wait_for(
+                validate_target(
+                    parsed_url.host,
+                    parsed_url.port,
+                    allow_local=self.allow_local_hosts,
+                ),
+                timeout=self.timeout_seconds,
+            )
+        except TimeoutError as e:
+            raise GopherProtocolError(
+                f"Timed out resolving host '{parsed_url.host}'"
+            ) from e
 
         # Politeness: space out requests to the same (often small) host.
         await self._rate_limiter.acquire(parsed_url.host)

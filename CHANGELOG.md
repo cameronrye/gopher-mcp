@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Disabling TOFU now logs a prominent warning (it leaves Gemini connections
   unauthenticated under CERT_NONE TLS); a certificate already expired on first
   use is pinned but flagged; and a status-11 input answer is no longer logged.
+- Bound DNS resolution by the request deadline in both clients, so a hostname
+  pointing at a tarpit nameserver can no longer stall a worker (or tie up an
+  event-loop executor thread) far past `timeout_seconds`.
+- TOFU trust store hardening: certificate fingerprints are canonicalized (a pin
+  pasted in the `openssl`/browser colon-uppercase form now matches the wire
+  digest); cross-process writes take an advisory lock and merge with the on-disk
+  store so two server instances can't silently drop each other's pins; and the
+  store write is `fsync`'d for crash durability.
+- Optional `GEMINI_TOFU_REJECT_EXPIRED` fails closed on a certificate outside
+  its validity window (`notBefore` is enforced on first use), reported with a
+  distinct `CERTIFICATE_EXPIRED` code rather than a misleading "certificate
+  changed".
+- Gopher URL parsing fails closed on percent-decoded control characters in the
+  selector/search at parse time, not only via the client's re-check.
+- Defensive fetch-error paths return a generic message to the model instead of
+  echoing the raw internal exception string (full detail is still logged).
 
 ### Added
 
@@ -26,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off) that also honours a Gemini status-44 SLOW_DOWN backoff.
 - Opt-in Gemini MIME content filter (`GEMINI_DENIED_MIME_TYPES`, supports
   `type/*` wildcards).
+- `GEMINI_TOFU_REJECT_EXPIRED` (default off) to fail closed on a Gemini
+  certificate outside its validity window.
 - LLM-facing text render cap (`GOPHER_/GEMINI_MAX_RENDERED_CHARS`, default 50000)
   with a `truncated` flag, distinct from the network byte cap.
 - Rich tool input schemas (descriptions + examples), `readOnlyHint`/
@@ -40,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   certificate results carry the 60/61/62 subcode (61/62 are rejections, not
   prompts); relative Gemini redirects are resolved to absolute URLs.
 - `__version__` is single-sourced from the package metadata.
+- The batch fetch tools return one error per input URL on an over-limit or
+  client-setup failure, keeping responses index-aligned with the request list.
+- The per-host rate limiter sweeps hosts whose reservation has elapsed, so a
+  long-lived server no longer accumulates state for every distinct host visited.
+- Collapsed the duplicate client-manager singleton so `cleanup()` fully resets
+  it and the next call builds a fresh manager.
 
 ### Fixed
 

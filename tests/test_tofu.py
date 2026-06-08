@@ -9,6 +9,7 @@ import pytest
 
 from gopher_mcp.models import TOFUEntry
 from gopher_mcp.tofu import (
+    TOFUExpiredError,
     TOFUManager,
     TOFUValidationError,
 )
@@ -239,6 +240,130 @@ class TestTOFUManager:
             assert warning is not None
             assert "expired" in warning.lower()
 
+    def test_first_use_not_yet_valid_warns(self):
+        """A cert whose notBefore is in the future is pinned but flagged."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+
+            cert_info = {"not_before_timestamp": 2000.0}
+            with patch("time.time", return_value=1000.0):
+                is_valid, warning = manager.validate_certificate(
+                    "example.com", 1965, "abc123", cert_info
+                )
+
+            assert is_valid is True
+            assert warning is not None
+            assert "not yet valid" in warning.lower()
+
+    def test_first_use_out_of_window_rejected_when_reject_expired(self):
+        """With reject_expired, a not-yet-valid cert is refused and not pinned."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path, reject_expired=True)
+
+            cert_info = {"not_before_timestamp": 2000.0}
+            with patch("time.time", return_value=1000.0):
+                with pytest.raises(TOFUExpiredError):
+                    manager.validate_certificate(
+                        "example.com", 1965, "abc123", cert_info
+                    )
+
+            assert "example.com:1965" not in manager._entries
+
+    def test_expired_pin_warns_but_valid_by_default(self):
+        """Default policy keeps the Gemini-conventional fail-open on expiry."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+            manager._entries["example.com:1965"] = TOFUEntry(
+                host="example.com",
+                port=1965,
+                fingerprint="abc123",
+                first_seen=1.0,
+                last_seen=1.0,
+                expires=100.0,
+            )
+
+            with patch("time.time", return_value=200.0):
+                is_valid, warning = manager.validate_certificate(
+                    "example.com", 1965, "abc123"
+                )
+
+            assert is_valid is True
+            assert warning is not None and "expired" in warning.lower()
+
+    def test_expired_pin_fails_closed_when_reject_expired(self):
+        """reject_expired opts a deployment into fail-closed on an expired pin,
+        raising the distinct TOFUExpiredError (a TOFUValidationError subclass) so
+        callers can report it as expiry rather than a fingerprint change."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path, reject_expired=True)
+            manager._entries["example.com:1965"] = TOFUEntry(
+                host="example.com",
+                port=1965,
+                fingerprint="abc123",
+                first_seen=1.0,
+                last_seen=1.0,
+                expires=100.0,
+            )
+
+            with patch("time.time", return_value=200.0):
+                with pytest.raises(TOFUExpiredError) as exc_info:
+                    manager.validate_certificate("example.com", 1965, "abc123")
+
+            assert isinstance(exc_info.value, TOFUValidationError)
+            assert "expired" in str(exc_info.value).lower()
+
+    def test_fingerprint_mismatch_warning_renders_first_seen_in_utc(self):
+        """The security warning must render first_seen in UTC, not local time."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+            manager._entries["example.com:1965"] = TOFUEntry(
+                host="example.com",
+                port=1965,
+                fingerprint="aa",
+                first_seen=1.0,
+                last_seen=1.0,
+            )
+
+            with pytest.raises(TOFUValidationError) as exc_info:
+                manager.validate_certificate("example.com", 1965, "bb")
+
+            assert "1970-01-01 00:00:01+00:00" in str(exc_info.value)
+
+    def test_save_preserves_pins_written_by_another_instance(self):
+        """A save must merge with on-disk state, not clobber a pin another
+        process/instance wrote after this manager loaded (lost-pin)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            m1 = TOFUManager(storage_path)
+            m2 = TOFUManager(storage_path)  # both loaded the same (empty) store
+
+            with patch("time.time", return_value=1000.0):
+                m1.validate_certificate("a.example", 1965, "aa")  # m1 pins a
+            with patch("time.time", return_value=1001.0):
+                m2.validate_certificate("b.example", 1965, "bb")  # m2 must keep a
+
+            reloaded = TOFUManager(storage_path)
+            assert "a.example:1965" in reloaded._entries
+            assert "b.example:1965" in reloaded._entries
+
+    def test_remove_persists_across_reload_despite_merge(self):
+        """Removal must win over the merge-with-disk step, not be resurrected."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+            with patch("time.time", return_value=1000.0):
+                manager.validate_certificate("a.example", 1965, "aa")
+
+            assert manager.remove_certificate("a.example", 1965) is True
+
+            reloaded = TOFUManager(storage_path)
+            assert "a.example:1965" not in reloaded._entries
+
     def test_last_seen_save_is_throttled(self):
         """A matching re-validation only touches last_seen; it must not rewrite
         the whole trust store to disk on every request (I/O amplification)."""
@@ -301,6 +426,62 @@ class TestTOFUManager:
 
             # Verify last_seen was updated
             assert entry.last_seen == 1234567900
+
+    def test_pin_in_openssl_colon_uppercase_form_matches_wire_digest(self):
+        """A cert pinned in colon-separated uppercase form still matches.
+
+        Users copy fingerprints from ``openssl x509 -fingerprint`` or browser
+        dialogs (``AB:CD:...``), but every live connection presents the
+        canonical lowercase no-colon SHA-256 hexdigest. Without canonicalization
+        the constant-time compare never matches and the user's own pin becomes a
+        permanent CERTIFICATE_CHANGED denial.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+
+            manager.update_certificate("example.com", 1965, "AB:CD:EF:01")
+
+            is_valid, _warning = manager.validate_certificate(
+                "example.com", 1965, "abcdef01"
+            )
+            assert is_valid is True
+
+    def test_validate_first_use_canonicalizes_stored_fingerprint(self):
+        """A colon/uppercase fingerprint seen first is stored canonically."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+
+            with patch("time.time", return_value=1234567890):
+                manager.validate_certificate("example.com", 1965, "AB:CD:EF:01")
+
+            assert manager._entries["example.com:1965"].fingerprint == "abcdef01"
+
+    def test_legacy_noncanonical_entry_canonicalized_on_load(self):
+        """Hand-edited/legacy entries are canonicalized when loaded."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            with open(storage_path, "w") as f:
+                json.dump(
+                    {
+                        "example.com:1965": {
+                            "host": "example.com",
+                            "port": 1965,
+                            "fingerprint": "AB:CD:EF:01",
+                            "first_seen": 1.0,
+                            "last_seen": 1.0,
+                            "expires": None,
+                        }
+                    },
+                    f,
+                )
+
+            manager = TOFUManager(storage_path)
+            is_valid, _warning = manager.validate_certificate(
+                "example.com", 1965, "abcdef01"
+            )
+            assert is_valid is True
 
     def test_validate_certificate_fingerprint_mismatch(self):
         """Test validating certificate with fingerprint mismatch."""

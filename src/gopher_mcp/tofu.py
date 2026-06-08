@@ -3,9 +3,12 @@
 import contextlib
 import hmac
 import json
+import os
 import time
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import structlog
@@ -14,12 +17,38 @@ from .models import TOFUEntry
 from .ssrf import normalize_host
 from .utils import atomic_write_json, get_home_directory
 
+# fcntl is POSIX-only. The explicit ``ModuleType | None`` annotation keeps the
+# ``is None`` guard reachable under mypy's warn_unreachable (the import always
+# succeeds on POSIX, so without it mypy would treat the None branch as dead).
+fcntl: ModuleType | None
+try:
+    import fcntl  # POSIX-only advisory file locking
+except ImportError:  # pragma: no cover - non-POSIX (e.g. Windows)
+    fcntl = None
+
 logger = structlog.get_logger(__name__)
 
 # Minimum seconds between best-effort last_seen flushes to disk. A new pin or a
 # fingerprint change always persists immediately; only the read-path last_seen
 # touch is throttled.
 SAVE_THROTTLE_SECONDS = 60.0
+
+
+def _canon_fingerprint(fingerprint: str) -> str:
+    """Canonicalize a SHA-256 certificate fingerprint to one comparable form.
+
+    The wire path always produces ``hashlib.sha256(...).hexdigest()`` (lowercase,
+    no separators), but users pin certs by pasting the conventional
+    ``openssl x509 -fingerprint`` / browser form (``sha256:AB:CD:...`` or
+    ``AB:CD:...``). Storing those verbatim makes the constant-time compare never
+    match, turning the user's own pin into a permanent CERTIFICATE_CHANGED
+    denial. Normalize both stored and presented fingerprints through here so the
+    representation can never cause a spurious mismatch.
+    """
+    fingerprint = fingerprint.strip()
+    if fingerprint.lower().startswith("sha256:"):
+        fingerprint = fingerprint[7:]
+    return fingerprint.replace(":", "").lower()
 
 
 def _parse_expiry(cert_info: dict[str, Any] | None) -> float | None:
@@ -51,6 +80,35 @@ def _parse_expiry(cert_info: dict[str, Any] | None) -> float | None:
     return None
 
 
+def _parse_not_before(cert_info: dict[str, Any] | None) -> float | None:
+    """Extract a certificate's notBefore (UNIX timestamp) from cert info.
+
+    Mirrors :func:`_parse_expiry`; the gemini_tls layer parses the DER under
+    CERT_NONE, so ``not_before_timestamp`` is the authoritative source.
+    """
+    if not cert_info:
+        return None
+    if "not_before_timestamp" in cert_info:
+        try:
+            return float(cert_info["not_before_timestamp"])
+        except (TypeError, ValueError):
+            return None
+    if "notBefore" in cert_info:
+        try:
+            return (
+                datetime.strptime(cert_info["notBefore"], "%b %d %H:%M:%S %Y %Z")
+                .replace(tzinfo=UTC)
+                .timestamp()
+            )
+        except ValueError:
+            logger.warning(
+                "Failed to parse certificate notBefore",
+                not_before=cert_info["notBefore"],
+            )
+            return None
+    return None
+
+
 class TOFUValidationError(Exception):
     """Exception raised for TOFU validation failures."""
 
@@ -59,14 +117,33 @@ class TOFUValidationError(Exception):
         self.entry = entry
 
 
+class TOFUExpiredError(TOFUValidationError):
+    """A certificate is outside its validity window (expired / not yet valid).
+
+    A *distinct* subclass so callers can report this accurately: the cert still
+    matches the pinned fingerprint, so surfacing it as a generic
+    "certificate changed / does not match" would wrongly imply a key rotation or
+    MITM and send an operator chasing a phantom. Only raised when
+    ``reject_expired`` is enabled.
+    """
+
+
 class TOFUManager:
     """Trust-on-First-Use certificate validation manager."""
 
-    def __init__(self, storage_path: str | None = None):
+    def __init__(
+        self, storage_path: str | None = None, *, reject_expired: bool = False
+    ):
         """Initialize TOFU manager.
 
         Args:
             storage_path: Path to TOFU storage file (default: ~/.gemini/tofu.json)
+            reject_expired: When True, a certificate outside its validity window
+                (already expired, or not yet valid on first use) fails CLOSED
+                instead of being accepted with a warning. Defaults to False to
+                preserve the conventional Gemini TOFU behaviour where the
+                fingerprint pin -- not the validity window -- is the real
+                authenticator.
         """
         if storage_path is None:
             home_dir = get_home_directory()
@@ -81,6 +158,7 @@ class TOFUManager:
             storage_path = str(gemini_dir / "tofu.json")
 
         self.storage_path = storage_path
+        self.reject_expired = reject_expired
         self._entries: dict[str, TOFUEntry] = {}
         # Throttle best-effort last_seen flushes (see validate_certificate).
         self._last_save_time = 0.0
@@ -112,6 +190,11 @@ class TOFUManager:
             with Path(self.storage_path).open(encoding="utf-8") as f:
                 data = json.load(f)
             entries = {key: TOFUEntry(**entry_data) for key, entry_data in data.items()}
+            # Canonicalize any legacy / hand-edited fingerprints so a store
+            # written before normalization (or edited by a human in colon form)
+            # still matches the wire digest.
+            for entry in entries.values():
+                entry.fingerprint = _canon_fingerprint(entry.fingerprint)
         except Exception as e:
             logger.error("TOFU storage is corrupt or unreadable", error=str(e))
             raise TOFUValidationError(
@@ -126,16 +209,73 @@ class TOFUManager:
             storage_path=self.storage_path,
         )
 
-    def _save_entries(self) -> None:
-        """Save TOFU entries to storage."""
-        try:
-            # Convert entries to dict for JSON serialization
-            data = {}
-            for key, entry in self._entries.items():
-                data[key] = entry.model_dump()
+    @contextlib.contextmanager
+    def _store_lock(self) -> Iterator[None]:
+        """Best-effort exclusive cross-process lock around a store mutation.
 
-            # Use atomic write function
-            atomic_write_json(self.storage_path, data)
+        Serializes the read-merge-write cycle so two server instances sharing
+        the same store file can't lose each other's pins. A no-op where
+        ``fcntl`` is unavailable (e.g. Windows): the atomic rename still
+        prevents torn files there; only the cross-process merge guarantee is
+        relaxed.
+        """
+        if fcntl is None:  # pragma: no cover - exercised only on non-POSIX
+            yield
+            return
+        lock = fcntl  # local so mypy narrows ModuleType | None -> ModuleType
+        lock_path = self.storage_path + ".lock"
+        Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            lock.flock(fd, lock.LOCK_EX)
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                lock.flock(fd, lock.LOCK_UN)
+            os.close(fd)
+
+    def _read_disk_entries(self) -> dict[str, TOFUEntry]:
+        """Read the current on-disk entries (canonicalized) for merging.
+
+        Returns ``{}`` if the file is missing or unreadable. Unlike
+        :meth:`_load_entries` this does NOT fail closed: a transiently bad file
+        must not block persisting our good in-memory state (the next write
+        repairs it). Startup fail-closed behaviour is unchanged.
+        """
+        path = Path(self.storage_path)
+        if not path.exists():
+            return {}
+        try:
+            with path.open(encoding="utf-8") as f:
+                data = json.load(f)
+            entries = {key: TOFUEntry(**val) for key, val in data.items()}
+        except Exception as e:
+            logger.warning("Ignoring unreadable TOFU store during merge", error=str(e))
+            return {}
+        for entry in entries.values():
+            entry.fingerprint = _canon_fingerprint(entry.fingerprint)
+        return entries
+
+    def _save_entries(self, *, removed_keys: set[str] | None = None) -> None:
+        """Persist entries, merging with concurrent on-disk changes.
+
+        Holds an exclusive cross-process lock while it re-reads the store,
+        unions it with our in-memory entries (ours win for shared keys), drops
+        any keys this operation explicitly removed, then atomically writes. This
+        keeps a second instance from silently clobbering a pin we just wrote
+        (and vice versa). ``removed_keys`` must be passed for deletions so the
+        merge doesn't resurrect them from disk.
+        """
+        try:
+            with self._store_lock():
+                merged = {**self._read_disk_entries(), **self._entries}
+                if removed_keys:
+                    for key in removed_keys:
+                        merged.pop(key, None)
+                self._entries = merged
+
+                data = {key: entry.model_dump() for key, entry in merged.items()}
+                atomic_write_json(self.storage_path, data)
 
             logger.debug("TOFU entries saved", count=len(self._entries))
         except Exception as e:
@@ -166,15 +306,38 @@ class TOFUManager:
         key = self._get_key(host, port)
         current_time = time.time()
 
-        # Clean fingerprint format (remove sha256: prefix if present)
-        if cert_fingerprint.startswith("sha256:"):
-            cert_fingerprint = cert_fingerprint[7:]
+        # Normalize to one canonical form so a colon/uppercase representation
+        # can never cause a spurious mismatch against the wire digest.
+        cert_fingerprint = _canon_fingerprint(cert_fingerprint)
 
         existing_entry = self._entries.get(key)
 
         if existing_entry is None:
             # First time seeing this host:port - trust on first use
             expires = _parse_expiry(cert_info)
+            not_before = _parse_not_before(cert_info)
+
+            # A cert outside its validity window on first contact is a strong
+            # signal something is off. The fingerprint pin is fixed for the
+            # life of the cert (same fingerprint == same cert), so checking the
+            # window once, here, covers every subsequent connection.
+            window_problem: str | None = None
+            if expires is not None and expires < current_time:
+                window_problem = "already expired"
+            elif not_before is not None and not_before > current_time:
+                window_problem = "not yet valid"
+
+            if window_problem and self.reject_expired:
+                logger.warning(
+                    "Refusing to pin certificate outside its validity window",
+                    host=host,
+                    port=port,
+                    problem=window_problem,
+                )
+                raise TOFUExpiredError(
+                    f"Certificate for {host}:{port} is {window_problem}; refusing "
+                    "to trust on first use (reject_expired is enabled)"
+                )
 
             new_entry = TOFUEntry(
                 host=host,
@@ -197,12 +360,13 @@ class TOFUManager:
             )
 
             message = f"New certificate for {host}:{port} trusted on first use"
-            # Pin it regardless, but flag a cert that is ALREADY expired on first
-            # contact -- a strong signal that something is off.
-            if expires is not None and expires < current_time:
-                message += " (warning: certificate is already expired)"
+            if window_problem:
+                message += f" (warning: certificate is {window_problem})"
                 logger.warning(
-                    "First-use certificate is already expired", host=host, port=port
+                    "First-use certificate is outside its validity window",
+                    host=host,
+                    port=port,
+                    problem=window_problem,
                 )
             return True, message
 
@@ -214,7 +378,7 @@ class TOFUManager:
                     f"Certificate for {host}:{port} has changed!\n"
                     f"Previous: {existing_entry.fingerprint[:16]}...\n"
                     f"Current:  {cert_fingerprint[:16]}...\n"
-                    f"First seen: {datetime.fromtimestamp(existing_entry.first_seen)}\n"
+                    f"First seen: {datetime.fromtimestamp(existing_entry.first_seen, tz=UTC)}\n"
                     f"This could indicate a security issue."
                 )
 
@@ -238,10 +402,14 @@ class TOFUManager:
                 self._save_entries()
                 self._last_save_time = current_time
 
-            # Check if certificate is expired
+            # Check if certificate is expired. By default this is advisory only
+            # (the fingerprint pin is the real authenticator under TOFU); a
+            # deployment can opt into fail-closed via reject_expired.
             if existing_entry.is_expired(current_time):
                 warning = f"Certificate for {host}:{port} has expired"
                 logger.warning("Certificate expired", host=host, port=port)
+                if self.reject_expired:
+                    raise TOFUExpiredError(warning, existing_entry)
                 return True, warning
 
             logger.debug(
@@ -276,9 +444,8 @@ class TOFUManager:
         key = self._get_key(host, port)
         current_time = time.time()
 
-        # Clean fingerprint format
-        if cert_fingerprint.startswith("sha256:"):
-            cert_fingerprint = cert_fingerprint[7:]
+        # Normalize to one canonical form (see _canon_fingerprint).
+        cert_fingerprint = _canon_fingerprint(cert_fingerprint)
 
         existing_entry = self._entries.get(key)
 
@@ -329,7 +496,9 @@ class TOFUManager:
 
         if key in self._entries:
             del self._entries[key]
-            self._save_entries()
+            # Pass the removed key so the merge-with-disk step doesn't resurrect
+            # it from a stale on-disk copy.
+            self._save_entries(removed_keys={key})
 
             logger.info("Certificate removed", host=host, port=port)
             return True
@@ -361,7 +530,7 @@ class TOFUManager:
             del self._entries[key]
 
         if expired_keys:
-            self._save_entries()
+            self._save_entries(removed_keys=set(expired_keys))
             logger.info("Expired certificates removed", count=len(expired_keys))
 
         return len(expired_keys)

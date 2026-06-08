@@ -19,7 +19,7 @@ from .models import (
 )
 from .ratelimit import RateLimiter
 from .ssrf import SSRFError, normalize_host, validate_target
-from .tofu import TOFUManager, TOFUValidationError
+from .tofu import TOFUExpiredError, TOFUManager, TOFUValidationError
 from .utils import (
     parse_gemini_response,
     parse_gemini_url,
@@ -52,6 +52,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         tls_config: TLSConfig | None = None,
         tofu_enabled: bool = True,
         tofu_storage_path: str | None = None,
+        tofu_reject_expired: bool = False,
         client_certs_enabled: bool = True,
         client_certs_storage_path: str | None = None,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
@@ -70,6 +71,8 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             tls_config: TLS configuration (uses defaults if None)
             tofu_enabled: Whether to enable TOFU certificate validation
             tofu_storage_path: Path to TOFU storage file
+            tofu_reject_expired: Fail closed on a certificate outside its
+                validity window instead of accepting it with a warning
             client_certs_enabled: Whether to enable client certificate management
             client_certs_storage_path: Path to client certificate storage directory
         """
@@ -94,7 +97,9 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         # Initialize TOFU manager
         self.tofu_manager: TOFUManager | None = None
         if self.tofu_enabled:
-            self.tofu_manager = TOFUManager(tofu_storage_path)
+            self.tofu_manager = TOFUManager(
+                tofu_storage_path, reject_expired=tofu_reject_expired
+            )
         else:
             # Gemini TLS runs with CERT_NONE, so TOFU is the ONLY peer
             # authentication. Disabling it leaves every connection unauthenticated
@@ -222,6 +227,12 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         except SSRFError as e:
             # Policy messages name a host/category only (no internal detail).
             return self._error_result(url, "BLOCKED", str(e), e)
+        except TOFUExpiredError as e:
+            # Distinct from a fingerprint change: the cert MATCHES the pin but is
+            # outside its validity window. Report it accurately (must precede the
+            # TOFUValidationError handler since it is a subclass). The message
+            # names host:port and a category only -- safe to surface.
+            return self._error_result(url, "CERTIFICATE_EXPIRED", str(e), e)
         except TOFUValidationError as e:
             return self._error_result(
                 url,
@@ -232,6 +243,9 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             )
         except TLSConnectionError as e:
             return self._error_result(url, "TLS_ERROR", "TLS connection failed", e)
+        except TimeoutError as e:
+            # DNS resolution, connect, or read exceeded the request deadline.
+            return self._error_result(url, "FETCH_ERROR", "The request timed out", e)
         except ValueError as e:
             # URL/host validation errors are safe to surface verbatim.
             return self._error_result(url, "INVALID_REQUEST", str(e), e)
@@ -288,10 +302,17 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             # SSRF guard: reject internal/loopback/link-local targets before
             # opening the TLS connection, and pin the connection to a validated
             # IP so the TLS layer can't re-resolve to a rebinding answer.
-            connect_addresses = await validate_target(
-                parsed_url.host,
-                parsed_url.port,
-                allow_local=self.allow_local_hosts,
+            #
+            # Bound DNS resolution by the request deadline: getaddrinfo is
+            # otherwise unbounded (a tarpit nameserver could stall a worker -- and
+            # tie up an event-loop executor thread -- far past timeout_seconds).
+            connect_addresses = await asyncio.wait_for(
+                validate_target(
+                    parsed_url.host,
+                    parsed_url.port,
+                    allow_local=self.allow_local_hosts,
+                ),
+                timeout=self.timeout_seconds,
             )
             # Prefer an IPv4 address (the historical behavior was AF_INET-only),
             # but fall back to the first address so IPv6-only hosts still work.

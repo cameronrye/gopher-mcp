@@ -816,3 +816,29 @@ class TestFetchContentMethod:
             pytest.raises(GopherProtocolError, match="Connection failed"),
         ):
             await client._fetch_content(parsed_url)
+
+    @pytest.mark.asyncio
+    async def test_dns_resolution_is_bounded_by_request_timeout(self):
+        """A hanging resolver must not exceed the request deadline. DNS was
+        previously outside the timeout envelope, so a tarpit nameserver could
+        stall a worker far past timeout_seconds."""
+        import asyncio
+
+        client = GopherClient(timeout_seconds=0.05, cache_enabled=False)
+
+        async def slow_validate(*args, **kwargs):
+            await asyncio.sleep(5)
+            return ["93.184.216.34"]
+
+        with patch(
+            "gopher_mcp.gopher_client.validate_target", side_effect=slow_validate
+        ):
+            # Outer guard fails the test if fetch hangs on DNS instead of
+            # honouring its own deadline.
+            result = await asyncio.wait_for(
+                client.fetch("gopher://example.com/1/"), timeout=1.0
+            )
+
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "FETCH_ERROR"
+        await client.close()

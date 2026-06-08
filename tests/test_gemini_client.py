@@ -175,6 +175,35 @@ class TestGeminiClientFetch:
             mock_parse.assert_called_once_with("gemini://example.com/")
 
     @pytest.mark.asyncio
+    async def test_dns_resolution_is_bounded_by_request_timeout(self):
+        """A hanging resolver must not exceed the request deadline. DNS was
+        previously outside the timeout envelope, so a tarpit nameserver could
+        stall a worker far past timeout_seconds."""
+        import asyncio
+
+        client = GeminiClient(
+            timeout_seconds=0.05,
+            cache_enabled=False,
+            tofu_enabled=False,
+            client_certs_enabled=False,
+        )
+
+        async def slow_validate(*args, **kwargs):
+            await asyncio.sleep(5)
+            return ["93.184.216.34"]
+
+        with patch(
+            "gopher_mcp.gemini_client.validate_target", side_effect=slow_validate
+        ):
+            result = await asyncio.wait_for(
+                client.fetch("gemini://example.org/"), timeout=1.0
+            )
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "FETCH_ERROR"
+        await client.close()
+
+    @pytest.mark.asyncio
     async def test_missing_fingerprint_fails_closed_without_sending(self):
         """The most security-critical TOFU branch: when TLS yields no certificate
         fingerprint, the request must NOT be sent to the unverified peer."""
@@ -193,6 +222,48 @@ class TestGeminiClientFetch:
         assert isinstance(result, GeminiErrorResult)
         assert result.error["code"] == "CERTIFICATE_CHANGED"
         client.tls_client.send_data.assert_not_awaited()  # never reached the wire
+
+    @pytest.mark.asyncio
+    async def test_expired_pin_reports_certificate_expired_not_changed(self):
+        """With reject_expired, an expired-but-MATCHING pin must report
+        CERTIFICATE_EXPIRED -- not CERTIFICATE_CHANGED, which would falsely imply
+        the cert no longer matches and send an operator chasing a phantom MITM."""
+        import tempfile
+        from pathlib import Path as _Path
+
+        from gopher_mcp.models import TOFUEntry
+
+        with tempfile.TemporaryDirectory() as d:
+            client = GeminiClient(
+                client_certs_enabled=False,
+                tofu_reject_expired=True,
+                tofu_storage_path=str(_Path(d) / "tofu.json"),
+            )
+            assert client.tofu_manager is not None
+            # Pre-pin an already-expired cert with a known fingerprint.
+            client.tofu_manager._entries["example.com:1965"] = TOFUEntry(
+                host="example.com",
+                port=1965,
+                fingerprint="abc",
+                first_seen=1.0,
+                last_seen=1.0,
+                expires=100.0,
+            )
+
+            client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+                return_value=(Mock(), {"cert_fingerprint": "abc", "peer_cert_info": {}})
+            )
+            client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+            client.tls_client.receive_data = AsyncMock()  # type: ignore[method-assign]
+            client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+
+            result = await client.fetch("gemini://example.com/")
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CERTIFICATE_EXPIRED"
+        # The accurate message must not claim the cert "changed"/"does not match".
+        assert "does not match" not in result.error["message"].lower()
+        client.tls_client.send_data.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_fetch_with_cache_hit(self):
