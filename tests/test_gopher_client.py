@@ -764,6 +764,21 @@ class TestFetchContentMethod:
         assert isinstance(result, BinaryResult)
 
     @pytest.mark.asyncio
+    async def test_fetch_content_acquires_rate_limiter(self):
+        """Each network fetch passes through the per-host rate limiter."""
+        client = GopherClient()
+        client._rate_limiter.acquire = AsyncMock()  # type: ignore[method-assign]
+        parsed_url = GopherURL(
+            host="example.com", port=70, gopherType="0", selector="/f", search=None
+        )
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"hi"),
+        ):
+            await client._fetch_content(parsed_url)
+        client._rate_limiter.acquire.assert_awaited_once_with("example.com")
+
+    @pytest.mark.asyncio
     async def test_fetch_content_transport_error_propagates(self):
         """Transport errors propagate to be mapped by fetch()."""
         client = GopherClient()

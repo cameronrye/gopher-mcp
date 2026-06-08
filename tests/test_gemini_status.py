@@ -478,6 +478,38 @@ class TestProcessGeminiResponse:
         assert isinstance(result, GeminiSuccessResult)
         assert result.truncated is False
 
+    def test_denied_mime_type_is_filtered(self):
+        """A response whose MIME matches the deny list is rejected, not returned."""
+        from gopher_mcp.models import GeminiErrorResult
+
+        response = GeminiResponse(status=20, meta="text/html", body=b"<h1>hi</h1>")
+        result = process_gemini_response(
+            response,
+            "gemini://example.org/",
+            denied_mime_types=frozenset({"text/html"}),
+        )
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CONTENT_FILTERED"
+
+    def test_denied_mime_wildcard_is_filtered(self):
+        from gopher_mcp.models import GeminiErrorResult
+
+        response = GeminiResponse(status=20, meta="image/png", body=b"\x89PNG")
+        result = process_gemini_response(
+            response, "gemini://example.org/", denied_mime_types=frozenset({"image/*"})
+        )
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CONTENT_FILTERED"
+
+    def test_non_denied_mime_passes(self):
+        response = GeminiResponse(status=20, meta="text/plain", body=b"ok")
+        result = process_gemini_response(
+            response,
+            "gemini://example.org/",
+            denied_mime_types=frozenset({"text/html"}),
+        )
+        assert isinstance(result, GeminiSuccessResult)
+
     def test_temporary_error_response(self):
         """Test temporary error response processing."""
         response = GeminiResponse(

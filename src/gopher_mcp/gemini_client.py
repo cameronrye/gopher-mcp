@@ -16,6 +16,7 @@ from .models import (
     GeminiURL,
     TOFUEntry,
 )
+from .ratelimit import RateLimiter
 from .ssrf import SSRFError, normalize_host, validate_target
 from .tofu import TOFUManager, TOFUValidationError
 from .utils import (
@@ -53,6 +54,8 @@ class GeminiClient:
         client_certs_enabled: bool = True,
         client_certs_storage_path: str | None = None,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
+        requests_per_minute: float = 0.0,
+        denied_mime_types: list[str] | None = None,
     ) -> None:
         """Initialize the Gemini client.
 
@@ -75,6 +78,8 @@ class GeminiClient:
         self.cache_ttl_seconds = cache_ttl_seconds
         self.max_cache_entries = max_cache_entries
         self.max_rendered_chars = max_rendered_chars
+        self._rate_limiter = RateLimiter(requests_per_minute)
+        self.denied_mime_types = frozenset(denied_mime_types or ())
         self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
         self.allow_local_hosts = allow_local_hosts
         self.tofu_enabled = tofu_enabled
@@ -89,6 +94,15 @@ class GeminiClient:
         self.tofu_manager: TOFUManager | None = None
         if self.tofu_enabled:
             self.tofu_manager = TOFUManager(tofu_storage_path)
+        else:
+            # Gemini TLS runs with CERT_NONE, so TOFU is the ONLY peer
+            # authentication. Disabling it leaves every connection unauthenticated
+            # and trivially MITM-able -- make that loud rather than a silent toggle.
+            logger.warning(
+                "TOFU is DISABLED: Gemini connections are unauthenticated "
+                "(CERT_NONE TLS with no certificate pinning) and vulnerable to "
+                "active MITM. Re-enable TOFU unless you fully trust the network."
+            )
 
         # Initialize client certificate manager
         self.client_cert_manager: ClientCertificateManager | None = None
@@ -164,6 +178,11 @@ class GeminiClient:
             # Fetch the content
             response = await self._fetch_content(parsed_url)
 
+            # Honour a server SLOW_DOWN (status 44): back off this host for the
+            # advertised number of seconds (meta) regardless of the configured
+            # rate limit, so we don't keep hammering a server asking us to wait.
+            self._maybe_honor_slow_down(parsed_url.host, response)
+
             # Add request info to response
             if hasattr(response, "request_info"):
                 response.request_info.update(request_info)
@@ -234,6 +253,23 @@ class GeminiClient:
             requestInfo={"url": url, "timestamp": time.time()},
         )
 
+    def _maybe_honor_slow_down(self, host: str, response: GeminiFetchResponse) -> None:
+        """If ``response`` is a status-44 SLOW_DOWN, back off this host.
+
+        The Gemini spec says the meta of a 44 is the number of seconds to wait;
+        fall back to a conservative default if it isn't a plain number.
+        """
+        if not isinstance(response, GeminiErrorResult):
+            return
+        if response.error.get("status") != 44:
+            return
+        message = response.error.get("message", "")
+        try:
+            seconds = float(str(message).strip())
+        except (TypeError, ValueError):
+            seconds = 60.0
+        self._rate_limiter.penalize(host, seconds)
+
     async def _fetch_content(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
         """Fetch content from parsed Gemini URL using TLS.
 
@@ -259,6 +295,10 @@ class GeminiClient:
             connect_ip = next(
                 (a for a in connect_addresses if ":" not in a), connect_addresses[0]
             )
+
+            # Politeness: space out requests to the same host (and honour any
+            # outstanding status-44 backoff for it).
+            await self._rate_limiter.acquire(parsed_url.host)
 
             # Check for client certificate
             client_cert_path = None
@@ -376,6 +416,7 @@ class GeminiClient:
                 request_url,
                 time.time(),
                 max_rendered_chars=self.max_rendered_chars,
+                denied_mime_types=self.denied_mime_types,
             )
 
             # Add connection info to request info

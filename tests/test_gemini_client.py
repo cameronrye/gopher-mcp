@@ -34,6 +34,37 @@ class TestGeminiClientInit:
         assert client.tls_client is not None
         assert isinstance(client._cache, dict)
 
+    def test_disabling_tofu_logs_a_warning(self):
+        """tofu_enabled=False removes ALL peer authentication (CERT_NONE TLS),
+        so it must be loud rather than a silent footgun."""
+        with patch("gopher_mcp.gemini_client.logger") as mock_logger:
+            client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)
+        assert client.tofu_manager is None
+        assert mock_logger.warning.called
+        logged = str(mock_logger.warning.call_args).lower()
+        assert "tofu" in logged or "unauthenticated" in logged
+
+    def test_status_44_slow_down_penalizes_host(self):
+        """A status-44 SLOW_DOWN backs the host off for the advertised seconds."""
+        client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)
+        client._rate_limiter.penalize = Mock()  # type: ignore[method-assign]
+        result = GeminiErrorResult(
+            error={"code": "TEMPORARY_ERROR", "message": "10", "status": 44},
+            requestInfo={},
+        )
+        client._maybe_honor_slow_down("slow.example", result)
+        client._rate_limiter.penalize.assert_called_once_with("slow.example", 10.0)
+
+    def test_non_44_response_does_not_penalize(self):
+        client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)
+        client._rate_limiter.penalize = Mock()  # type: ignore[method-assign]
+        result = GeminiErrorResult(
+            error={"code": "TEMPORARY_ERROR", "message": "x", "status": 41},
+            requestInfo={},
+        )
+        client._maybe_honor_slow_down("h", result)
+        client._rate_limiter.penalize.assert_not_called()
+
     def test_custom_initialization(self):
         """Test client initialization with custom parameters."""
         tls_config = TLSConfig(timeout_seconds=60.0)

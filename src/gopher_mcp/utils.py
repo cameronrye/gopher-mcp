@@ -1233,12 +1233,24 @@ def validate_gemini_mime_type(mime_type: "GeminiMimeType") -> bool:
     return True
 
 
+def mime_is_denied(full_type: str, denied: "frozenset[str] | set[str]") -> bool:
+    """Whether ``full_type`` matches a deny-list entry (exact or ``type/*``)."""
+    if not denied:
+        return False
+    full = full_type.lower()
+    if full in denied:
+        return True
+    top = full.split("/", 1)[0]
+    return f"{top}/*" in denied
+
+
 def process_gemini_response(
     response: "GeminiResponse",
     request_url: str,
     request_time: float | None = None,
     *,
     max_rendered_chars: int = 0,
+    denied_mime_types: "frozenset[str] | None" = None,
 ) -> "GeminiFetchResponse":
     """Process Gemini response based on status code.
 
@@ -1248,6 +1260,8 @@ def process_gemini_response(
         request_time: Request timestamp (defaults to current time)
         max_rendered_chars: LLM-facing cap on returned text characters
             (0 = unlimited). Only applies to textual success bodies.
+        denied_mime_types: MIME types (or ``type/*`` wildcards) to reject on a
+            success response; empty/None = no content filtering.
 
     Returns:
         Appropriate response result object based on status code
@@ -1279,7 +1293,11 @@ def process_gemini_response(
     # Success: status codes 20 through 29
     elif 20 <= status_code <= 29:
         return _process_success_response(
-            meta, body, request_info, max_rendered_chars=max_rendered_chars
+            meta,
+            body,
+            request_info,
+            max_rendered_chars=max_rendered_chars,
+            denied_mime_types=denied_mime_types,
         )
 
     # Redirect: status codes 30 through 39
@@ -1339,7 +1357,8 @@ def _process_success_response(
     request_info: dict[str, Any],
     *,
     max_rendered_chars: int = 0,
-) -> Union["GeminiSuccessResult", "GeminiGemtextResult"]:
+    denied_mime_types: "frozenset[str] | None" = None,
+) -> Union["GeminiSuccessResult", "GeminiGemtextResult", "GeminiErrorResult"]:
     """Process success response (status 20-29).
 
     Args:
@@ -1348,9 +1367,11 @@ def _process_success_response(
         request_info: Request information
         max_rendered_chars: LLM-facing cap on returned text characters
             (0 = unlimited); applies to textual bodies only, never binary.
+        denied_mime_types: MIME types (or ``type/*``) to reject as filtered.
 
     Returns:
-        GeminiSuccessResult or GeminiGemtextResult based on content type
+        GeminiSuccessResult / GeminiGemtextResult, or GeminiErrorResult if the
+        content type is on the deny list.
 
     Raises:
         ValueError: If MIME type is invalid or body is missing
@@ -1386,6 +1407,18 @@ def _process_success_response(
             mime_type = get_default_gemini_mime_type()
 
     size = len(body)
+
+    # Content filtering: reject a denied MIME type before decoding/returning it.
+    if denied_mime_types and mime_is_denied(mime_type.full_type, denied_mime_types):
+        return GeminiErrorResult(
+            error={
+                "code": "CONTENT_FILTERED",
+                "message": f"Content type '{mime_type.full_type}' is blocked by "
+                f"the configured content filter",
+                "mimeType": mime_type.full_type,
+            },
+            requestInfo=request_info,
+        )
 
     # Handle gemtext content specially
     if mime_type.is_gemtext:

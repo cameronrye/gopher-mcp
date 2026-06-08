@@ -16,6 +16,7 @@ from .models import (
     MenuResult,
     TextResult,
 )
+from .ratelimit import RateLimiter
 from .ssrf import SSRFError, normalize_host, validate_target
 from .utils import (
     detect_binary_mime_type,
@@ -79,6 +80,7 @@ class GopherClient:
         max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
+        requests_per_minute: float = 0.0,
     ) -> None:
         """Initialize the Gopher client.
 
@@ -101,6 +103,7 @@ class GopherClient:
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
         self.max_rendered_chars = max_rendered_chars
+        self._rate_limiter = RateLimiter(requests_per_minute)
 
         self.allow_local_hosts = allow_local_hosts
 
@@ -293,6 +296,9 @@ class GopherClient:
             parsed_url.port,
             allow_local=self.allow_local_hosts,
         )
+
+        # Politeness: space out requests to the same (often small) host.
+        await self._rate_limiter.acquire(parsed_url.host)
 
         # RFC 1436 only defines the <TAB>query field for type-7 (Index-Search)
         # servers; never forward a stray search to a plain selector.
