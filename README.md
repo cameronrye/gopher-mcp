@@ -194,7 +194,7 @@ Fetches Gopher menus, text files, or metadata by URL with comprehensive error ha
 **Response Types:**
 
 - **MenuResult**: For Gopher menus (type 1) and search results (type 7)
-  - Contains structured menu items with type, display text, selector, host, and port
+  - Contains structured menu items with type, title, selector, host, and port
 - **TextResult**: For text files (type 0)
   - Returns the full text content with metadata
 - **BinaryResult**: Metadata only for binary files (types 4, 5, 6, 9, g, I)
@@ -214,7 +214,7 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 **Response Types:**
 
 - **GeminiGemtextResult**: For gemtext content (text/gemini)
-  - Parsed gemtext document with structured lines, links, and headings
+  - Parsed gemtext document with structured lines and links (headings are line entries)
 - **GeminiSuccessResult**: For other text and binary content
   - Raw content with MIME type information
 - **GeminiInputResult**: For input requests (status 10-11)
