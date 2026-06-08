@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -49,15 +50,27 @@ def atomic_write_json(file_path: str, data: Any) -> None:
     # Ensure directory exists
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # Create temporary file in the same directory as the target
+    # Create temporary file in the same directory as the target. Capture its
+    # path first so the cleanup below can always reach it -- every fallible step
+    # after creation (json.dump, flush, fsync, rename, chmod, dir fsync) runs
+    # inside the single try whose ``except`` unlinks the temp file, so a failure
+    # mid-write (e.g. ENOSPC surfacing on flush/fsync) can't orphan a .tmp file.
     temp_dir = Path(file_path).parent
-    with tempfile.NamedTemporaryFile(
-        mode="w", dir=temp_dir, delete=False, suffix=".tmp"
-    ) as temp_file:
-        json.dump(data, temp_file, indent=2)
-        temp_path = temp_file.name
-
+    temp_path: str | None = None
     try:
+        with tempfile.NamedTemporaryFile(
+            mode="w", dir=temp_dir, delete=False, suffix=".tmp"
+        ) as temp_file:
+            temp_path = temp_file.name
+            json.dump(data, temp_file, indent=2)
+            # Durability: force the bytes to stable storage BEFORE the rename.
+            # ``rename`` is atomic only for *visibility* -- without the fsync a
+            # crash/power-loss after the rename can leave a zero-length or
+            # truncated file, which the deliberately fail-closed TOFU loader then
+            # refuses to start with. Flush the Python buffer, then the OS buffer.
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+
         # On Windows, we need to remove the target file first if it exists
         if os.name == "nt" and Path(file_path).exists():
             Path(file_path).unlink()
@@ -69,11 +82,21 @@ def atomic_write_json(file_path: str, data: Any) -> None:
         # dir's 0700 (whose chmod is best-effort). No-op / harmless on Windows.
         with contextlib.suppress(OSError):
             Path(file_path).chmod(0o600)
+        # fsync the directory so the rename itself is durable (POSIX). Best
+        # effort: not supported on every platform/FS, and a no-op on Windows.
+        with contextlib.suppress(OSError, AttributeError):
+            dir_fd = os.open(str(temp_dir), os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except Exception:
-        # Clean up temporary file if rename fails (ignore cleanup failures so
-        # the original error is preserved).
-        with contextlib.suppress(Exception):
-            Path(temp_path).unlink()
+        # Clean up the temp file on any failure (ignore cleanup failures so the
+        # original error is preserved). After a successful rename temp_path no
+        # longer exists, so the unlink is a harmless no-op.
+        if temp_path is not None:
+            with contextlib.suppress(Exception):
+                Path(temp_path).unlink()
         raise
 
 
@@ -154,6 +177,17 @@ def parse_gopher_url(url: str) -> GopherURL:
         search = unquote(search_part)
     else:
         selector = unquote(raw_selector)
+
+    # Fail closed on raw control bytes that percent-decoding can introduce. A
+    # C0/DEL byte (CR/LF/TAB/NUL/ESC/...) in the selector or search would inject
+    # extra fields or terminate the single Gopher request line (which the
+    # transport builds as ``selector<TAB>search\r\n``). The client re-checks
+    # this too, but the parser must not depend on a separate validation pass --
+    # mirror parse_gemini_url and reject here.
+    if re.search(r"[\x00-\x1f\x7f]", selector):
+        raise ValueError("Selector must not contain control characters")
+    if search is not None and re.search(r"[\x00-\x1f\x7f]", search):
+        raise ValueError("Search query must not contain control characters")
 
     return GopherURL(
         host=host,
@@ -400,24 +434,6 @@ def gopher_type_category(gopher_type: str) -> str:
     types default to ``"text"`` (best-effort), matching historical behaviour.
     """
     return _GOPHER_TYPE_CATEGORY.get(gopher_type, "text")
-
-
-def validate_gopher_response(content: bytes, max_size: int) -> None:
-    """Validate a Gopher response.
-
-    Args:
-        content: Response content
-        max_size: Maximum allowed size
-
-    Raises:
-        ValueError: If response is invalid
-
-    """
-    if len(content) > max_size:
-        raise ValueError(f"Response too large: {len(content)} bytes (max {max_size})")
-
-    # Additional validation could be added here
-    # e.g., checking for proper termination markers
 
 
 # ============================================================================

@@ -1,8 +1,13 @@
 """Tests for gopher_mcp.utils module."""
 
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
 from gopher_mcp.utils import (
+    atomic_write_json,
     format_gopher_url,
     guess_mime_type,
     parse_gopher_menu,
@@ -10,8 +15,33 @@ from gopher_mcp.utils import (
     parse_menu_line,
     sanitize_selector,
     truncate_text,
-    validate_gopher_response,
 )
+
+
+class TestAtomicWriteJson:
+    """Durability and cleanup contract of atomic_write_json."""
+
+    def test_writes_and_reads_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = str(Path(d) / "store.json")
+            atomic_write_json(target, {"a": 1, "b": [2, 3]})
+            import json
+
+            assert json.loads(Path(target).read_text()) == {"a": 1, "b": [2, 3]}
+
+    def test_no_orphan_temp_file_when_fsync_fails(self):
+        """A flush/fsync failure (e.g. disk full) must not leave a .tmp orphan --
+        the durability fsync must be inside the cleanup-guarded region."""
+        with tempfile.TemporaryDirectory() as d:
+            target = str(Path(d) / "store.json")
+            with (
+                patch("gopher_mcp.utils.os.fsync", side_effect=OSError("ENOSPC")),
+                pytest.raises(OSError),
+            ):
+                atomic_write_json(target, {"a": 1})
+
+            leftovers = list(Path(d).glob("*.tmp"))
+            assert leftovers == [], f"orphaned temp files: {leftovers}"
 
 
 class TestTruncateText:
@@ -348,32 +378,6 @@ class TestGuessMimeType:
         assert guess_mime_type("9", "file.PDF") == "application/pdf"
 
 
-class TestValidateGopherResponse:
-    """Test validate_gopher_response function."""
-
-    def test_valid_response(self):
-        """Test validating valid response."""
-        content = b"Hello, Gopher!"
-        validate_gopher_response(content, 1024)  # Should not raise
-
-    def test_response_too_large(self):
-        """Test response that is too large."""
-        content = b"x" * 1025
-        with pytest.raises(ValueError) as exc_info:
-            validate_gopher_response(content, 1024)
-        assert "too large" in str(exc_info.value)
-
-    def test_empty_response(self):
-        """Test empty response."""
-        content = b""
-        validate_gopher_response(content, 1024)  # Should not raise
-
-    def test_response_at_limit(self):
-        """Test response at size limit."""
-        content = b"x" * 1024
-        validate_gopher_response(content, 1024)  # Should not raise
-
-
 class TestGopherUrlPortAndSelectorHandling:
     """Regression tests for Gopher URL port/selector parsing fixes."""
 
@@ -403,3 +407,19 @@ class TestGopherUrlPortAndSelectorHandling:
         item = parse_menu_line("0Title\t/sel\texample.com\t²")
         assert item is not None
         assert item.port == 70
+
+    def test_percent_encoded_crlf_in_selector_is_rejected(self):
+        """A %0d%0a in the selector decodes to raw CRLF -- the parser must
+        fail closed rather than relying solely on a downstream re-check."""
+        with pytest.raises(ValueError, match=r"control character"):
+            parse_gopher_url("gopher://example.com/0sel%0d%0aINJECT")
+
+    def test_percent_encoded_nul_in_selector_is_rejected(self):
+        """A percent-encoded NUL must be rejected at parse time."""
+        with pytest.raises(ValueError, match=r"control character"):
+            parse_gopher_url("gopher://example.com/0sel%00evil")
+
+    def test_percent_encoded_control_char_in_search_is_rejected(self):
+        """A control char in the type-7 search field must be rejected."""
+        with pytest.raises(ValueError, match=r"control character"):
+            parse_gopher_url("gopher://example.com/7sel%09a%0db")

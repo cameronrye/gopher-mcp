@@ -146,6 +146,13 @@ class GeminiConfig(BaseSettings):
         default=None,
         description="TOFU storage file path",
     )
+    tofu_reject_expired: bool = Field(
+        default=False,
+        description="Fail closed on a certificate outside its validity window "
+        "(already expired, or not yet valid on first use) instead of accepting "
+        "it with a warning. Off by default to match the conventional Gemini TOFU "
+        "model where the fingerprint pin is the real authenticator.",
+    )
     client_certs_enabled: bool = Field(
         default=True,
         description="Enable client certificate support",
