@@ -460,6 +460,24 @@ class TestProcessGeminiResponse:
         assert isinstance(result, GeminiRedirectResult)
         assert result.permanent is True
 
+    def test_success_text_response_truncates_to_render_limit(self):
+        """A text/* body beyond the render cap is truncated and flagged."""
+        response = GeminiResponse(status=20, meta="text/plain", body=b"abcdefghij")
+        result = process_gemini_response(
+            response, "gemini://example.org/", max_rendered_chars=5
+        )
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.content == "abcde"
+        assert result.truncated is True
+
+    def test_success_text_response_not_truncated_under_limit(self):
+        response = GeminiResponse(status=20, meta="text/plain", body=b"short")
+        result = process_gemini_response(
+            response, "gemini://example.org/", max_rendered_chars=100
+        )
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.truncated is False
+
     def test_temporary_error_response(self):
         """Test temporary error response processing."""
         response = GeminiResponse(

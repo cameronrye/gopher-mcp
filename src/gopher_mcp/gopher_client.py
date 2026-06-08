@@ -22,6 +22,7 @@ from .utils import (
     gopher_type_category,
     parse_gopher_menu,
     parse_gopher_url,
+    truncate_text,
 )
 
 logger = structlog.get_logger(__name__)
@@ -33,6 +34,7 @@ DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
 DEFAULT_MAX_CACHE_ENTRIES = 1000
 DEFAULT_MAX_SELECTOR_LENGTH = 1024
 DEFAULT_MAX_SEARCH_LENGTH = 256
+DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 
 
 def _strip_gopher_text_terminator(text: str) -> str:
@@ -76,6 +78,7 @@ class GopherClient:
         allow_local_hosts: bool = False,
         max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
+        max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
     ) -> None:
         """Initialize the Gopher client.
 
@@ -97,6 +100,7 @@ class GopherClient:
         self.max_cache_entries = max_cache_entries
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
+        self.max_rendered_chars = max_rendered_chars
 
         self.allow_local_hosts = allow_local_hosts
 
@@ -354,10 +358,15 @@ class GopherClient:
             if char.isprintable() or char in ("\n", "\t", "\r")
         )
 
+        # Cap the text handed to the LLM (distinct from the network byte cap);
+        # `bytes` still reports the full original size.
+        rendered, truncated = truncate_text(sanitized_text, self.max_rendered_chars)
+
         return TextResult(
-            text=sanitized_text,
+            text=rendered,
             bytes=len(raw),
             charset=charset,
+            truncated=truncated,
         )
 
     # Note: Search is handled by _process_menu_response since search results are menus

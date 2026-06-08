@@ -381,6 +381,18 @@ _GOPHER_TYPE_CATEGORY: dict[str, str] = {
 }
 
 
+def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
+    """Truncate ``text`` to an LLM-facing character budget.
+
+    Distinct from the network response-size cap: a 1 MB text page is well under
+    the byte limit yet still ~250k tokens. Returns ``(text, truncated)``; a
+    ``max_chars`` of 0 means unlimited (the truncation is opt-out).
+    """
+    if max_chars and len(text) > max_chars:
+        return text[:max_chars], True
+    return text, False
+
+
 def gopher_type_category(gopher_type: str) -> str:
     """Return the handling category for a Gopher item type.
 
@@ -1222,7 +1234,11 @@ def validate_gemini_mime_type(mime_type: "GeminiMimeType") -> bool:
 
 
 def process_gemini_response(
-    response: "GeminiResponse", request_url: str, request_time: float | None = None
+    response: "GeminiResponse",
+    request_url: str,
+    request_time: float | None = None,
+    *,
+    max_rendered_chars: int = 0,
 ) -> "GeminiFetchResponse":
     """Process Gemini response based on status code.
 
@@ -1230,6 +1246,8 @@ def process_gemini_response(
         response: Parsed Gemini response
         request_url: Original request URL
         request_time: Request timestamp (defaults to current time)
+        max_rendered_chars: LLM-facing cap on returned text characters
+            (0 = unlimited). Only applies to textual success bodies.
 
     Returns:
         Appropriate response result object based on status code
@@ -1260,7 +1278,9 @@ def process_gemini_response(
 
     # Success: status codes 20 through 29
     elif 20 <= status_code <= 29:
-        return _process_success_response(meta, body, request_info)
+        return _process_success_response(
+            meta, body, request_info, max_rendered_chars=max_rendered_chars
+        )
 
     # Redirect: status codes 30 through 39
     elif 30 <= status_code <= 39:
@@ -1314,7 +1334,11 @@ def _process_input_response(
 
 
 def _process_success_response(
-    meta: str, body: bytes | None, request_info: dict[str, Any]
+    meta: str,
+    body: bytes | None,
+    request_info: dict[str, Any],
+    *,
+    max_rendered_chars: int = 0,
 ) -> Union["GeminiSuccessResult", "GeminiGemtextResult"]:
     """Process success response (status 20-29).
 
@@ -1322,6 +1346,8 @@ def _process_success_response(
         meta: MIME type string
         body: Response body bytes
         request_info: Request information
+        max_rendered_chars: LLM-facing cap on returned text characters
+            (0 = unlimited); applies to textual bodies only, never binary.
 
     Returns:
         GeminiSuccessResult or GeminiGemtextResult based on content type
@@ -1381,10 +1407,13 @@ def _process_success_response(
     elif mime_type.is_text:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        # Cap the text handed to the LLM; `size` still reports the full bytes.
+        rendered, truncated = truncate_text(content, max_rendered_chars)
         return GeminiSuccessResult(
             mimeType=mime_type,
-            content=content,
+            content=rendered,
             size=size,
+            truncated=truncated,
             requestInfo=request_info,
         )
 

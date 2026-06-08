@@ -31,6 +31,7 @@ DEFAULT_MAX_RESPONSE_SIZE = 1024 * 1024  # 1MB
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
 DEFAULT_MAX_CACHE_ENTRIES = 1000
+DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 
 
 class GeminiClient:
@@ -51,6 +52,7 @@ class GeminiClient:
         tofu_storage_path: str | None = None,
         client_certs_enabled: bool = True,
         client_certs_storage_path: str | None = None,
+        max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
     ) -> None:
         """Initialize the Gemini client.
 
@@ -72,6 +74,7 @@ class GeminiClient:
         self.cache_enabled = cache_enabled
         self.cache_ttl_seconds = cache_ttl_seconds
         self.max_cache_entries = max_cache_entries
+        self.max_rendered_chars = max_rendered_chars
         self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
         self.allow_local_hosts = allow_local_hosts
         self.tofu_enabled = tofu_enabled
@@ -368,7 +371,12 @@ class GeminiClient:
             parsed_response = parse_gemini_response(raw_response)
 
             # Process response based on status code
-            result = process_gemini_response(parsed_response, request_url, time.time())
+            result = process_gemini_response(
+                parsed_response,
+                request_url,
+                time.time(),
+                max_rendered_chars=self.max_rendered_chars,
+            )
 
             # Add connection info to request info
             if hasattr(result, "request_info"):

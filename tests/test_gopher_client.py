@@ -547,6 +547,21 @@ class TestResponseProcessing:
         # The generated URL must parse back to the original selector.
         assert parse_gopher_url(item.next_url).selector == "/path with space?q"
 
+    def test_process_text_response_truncates_to_render_limit(self):
+        """Text beyond the LLM-facing render cap is truncated and flagged, while
+        `bytes` still reports the full original size."""
+        client = GopherClient(max_rendered_chars=5)
+        result = client._process_text_response(b"abcdefghij")
+        assert result.text == "abcde"
+        assert result.truncated is True
+        assert result.bytes == 10
+
+    def test_process_text_response_not_truncated_under_limit(self):
+        client = GopherClient(max_rendered_chars=100)
+        result = client._process_text_response(b"short")
+        assert result.text == "short"
+        assert result.truncated is False
+
     def test_process_text_response_latin1_fallback(self):
         """Non-UTF-8 (legacy latin-1) content decodes via fallback."""
         client = GopherClient()

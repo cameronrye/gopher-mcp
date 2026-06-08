@@ -63,6 +63,14 @@ class GopherConfig(BaseSettings):
         ge=1,
         le=4096,
     )
+    max_rendered_chars: int = Field(
+        default=50000,
+        description="LLM-facing cap on returned text characters (distinct from "
+        "the network byte cap); 0 = unlimited. Truncation is flagged on the "
+        "result.",
+        ge=0,
+        le=10485760,
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="GOPHER_",
@@ -138,6 +146,14 @@ class GeminiConfig(BaseSettings):
     client_certs_storage_path: Path | None = Field(
         default=None,
         description="Client certificates storage directory path",
+    )
+    max_rendered_chars: int = Field(
+        default=50000,
+        description="LLM-facing cap on returned text characters (distinct from "
+        "the network byte cap); 0 = unlimited. Truncation is flagged on the "
+        "result.",
+        ge=0,
+        le=10485760,
     )
 
     model_config = SettingsConfigDict(

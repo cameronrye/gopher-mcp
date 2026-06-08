@@ -126,6 +126,7 @@ class ClientManager:
                     allow_local_hosts=gopher_config.allow_local_hosts,
                     max_selector_length=gopher_config.max_selector_length,
                     max_search_length=gopher_config.max_search_length,
+                    max_rendered_chars=gopher_config.max_rendered_chars,
                 )
                 logger.info(
                     "Gopher client initialized",
@@ -166,6 +167,7 @@ class ClientManager:
                     tofu_storage_path=tofu_path,
                     client_certs_enabled=gemini_config.client_certs_enabled,
                     client_certs_storage_path=client_certs_path,
+                    max_rendered_chars=gemini_config.max_rendered_chars,
                 )
                 logger.info(
                     "Gemini client initialized",
