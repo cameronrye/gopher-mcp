@@ -41,12 +41,12 @@ The Gopher & Gemini MCP Server is a Model Context Protocol (MCP) server that ena
               │                         │
               │                         │
 ┌─────────────▼──────────────┐  ┌───────▼──────────────────────┐
-│   Pituophis Library        │  │   Security Components        │
-│   (External)               │  │                              │
+│   Gopher Transport         │  │   Security Components        │
+│   (gopher_transport.py)    │  │                              │
 │                            │  │  ┌──────────────────────────┐│
-│  • Request()               │  │  │  GeminiTLSClient         ││
-│  • Response parsing        │  │  │  (gemini_tls.py)         ││
-│  • Protocol handling       │  │  │  • TLS 1.2+ connection   ││
+│  • fetch_gopher()          │  │  │  GeminiTLSClient         ││
+│  • asyncio TCP client      │  │  │  (gemini_tls.py)         ││
+│  • bounded read + deadline │  │  │  • TLS 1.2+ connection   ││
 └────────────────────────────┘  │  │  • Certificate handling  ││
                                 │  └──────────────────────────┘│
                                 │  ┌──────────────────────────┐│
@@ -216,9 +216,9 @@ URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Re
 7. If cached and valid → Return cached response
    ↓
 8. If not cached:
-   a. Create Pituophis Request
-   b. Execute request in thread pool
-   c. Receive response
+   a. Open an async TCP connection (gopher_transport.fetch_gopher)
+   b. Send the selector and stream the response
+   c. Receive response (bounded by size cap and request deadline)
    d. Determine response type (menu, text, binary)
    e. Process response based on type
    f. Cache response
@@ -497,7 +497,7 @@ Return to MCP Client
 
 **Connection Pooling**:
 - Gemini: Connections closed after each request
-- Gopher: Pituophis handles connection lifecycle
+- Gopher: Native asyncio transport opens and closes a connection per request
 
 **Memory Management**:
 - Response size limits prevent memory exhaustion
@@ -548,7 +548,7 @@ Return to MCP Client
                          ↓
 ┌─────────────────────────────────────────────────────────┐
 │  Mocking Strategy                                       │
-│  • Pituophis requests (Gopher)                         │
+│  • Async TCP requests (Gopher)                         │
 │  • TLS connections (Gemini)                            │
 │  • File system operations                              │
 │  • Network failures                                    │

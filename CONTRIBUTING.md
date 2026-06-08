@@ -74,7 +74,7 @@ uv run task quality
 We maintain high code quality standards:
 
 - **Type hints** for all functions and methods
-- **Comprehensive tests** with >90% coverage
+- **Comprehensive tests** (CI enforces a minimum of 85% coverage)
 - **Documentation** for all public APIs
 - **Security** considerations for all network operations
 - **Cross-platform** compatibility (Windows, macOS, Linux)
@@ -104,10 +104,16 @@ pre-commit run --all-files
 
 ```text
 tests/
-├── test_server.py           # MCP server tests
-├── test_gopher_client.py    # Gopher client tests
-├── test_integration.py      # Integration tests
-└── conftest.py              # Pytest configuration
+├── test_server.py            # MCP server + tool tests
+├── test_gopher_client.py     # Gopher client tests
+├── test_gemini_client.py     # Gemini client tests
+├── test_gemini_tls.py        # Gemini TLS / TOFU tests
+├── test_client_certs.py      # Client certificate tests
+├── test_config.py            # Configuration tests
+├── test_security.py          # Security / SSRF tests
+├── test_integration.py       # Integration tests
+├── conftest.py               # Pytest fixtures and configuration
+└── ...                       # Additional protocol, model, and util tests
 ```
 
 ### Running Tests
@@ -138,19 +144,21 @@ Example test structure:
 
 ```python
 import pytest
-from gopher_mcp.server import GopherMCPServer
+from gopher_mcp.config import GopherConfig
 
-def test_server_initialization():
-    """Test that the server initializes with default configuration."""
-    server = GopherMCPServer()
-    assert server.max_response_size == 1048576
-    assert server.timeout_seconds == 30
+def test_default_configuration():
+    """The Gopher config exposes the documented defaults."""
+    config = GopherConfig()
+    assert config.max_response_size == 1048576
+    assert config.timeout_seconds == 30.0
 
 @pytest.mark.asyncio
-async def test_gopher_fetch_menu():
-    """Test fetching a Gopher menu returns structured data."""
-    # Test implementation here
-    pass
+async def test_gopher_fetch_returns_structured_result():
+    """gopher_fetch returns a structured dict for a menu URL."""
+    from gopher_mcp.server import gopher_fetch
+
+    result = await gopher_fetch("gopher://gopher.floodgap.com/1/")
+    assert isinstance(result, dict)
 ```
 
 ## Documentation
@@ -240,7 +248,7 @@ What you expected to happen.
 
 - OS: [e.g., Windows 11, macOS 14, Ubuntu 22.04]
 - Python version: [e.g., 3.11.5]
-- Package version: [e.g., 1.0.0]
+- Package version: [e.g., 0.4.0]
 
 **Additional context**
 Any other context about the problem.
@@ -311,11 +319,14 @@ We follow [Semantic Versioning](https://semver.org/):
 
 ### Release Checklist
 
-1. Update version in `pyproject.toml`
+1. Update version in `pyproject.toml` (and run `uv lock`)
 2. Update `CHANGELOG.md`
 3. Create release PR
 4. Tag release after merge
 5. Publish to PyPI (automated)
+
+See the [Releasing guide](https://cameronrye.github.io/gopher-mcp/development/releasing/)
+for the full process, trusted-publishing setup, and the complete pre-release checklist.
 
 ## Community Guidelines
 

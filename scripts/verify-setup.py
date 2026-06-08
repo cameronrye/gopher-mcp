@@ -122,7 +122,7 @@ class SetupVerifier:
             "installation.md",
             "api-reference.md",
             "development/repository-setup.md",
-            "development/open-source-release-checklist.md",
+            "development/releasing.md",
         ]
 
         for doc in required_docs:

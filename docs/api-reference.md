@@ -4,7 +4,9 @@ This document provides a comprehensive reference for the Gopher & Gemini MCP Ser
 
 ## MCP Tools
 
-The server provides two main tools for fetching content from alternative internet protocols.
+The server provides four tools: `gopher_fetch` and `gemini_fetch` for single
+resources, plus `gopher_batch_fetch` and `gemini_batch_fetch` for fetching
+multiple URLs in a single call.
 
 ### `gopher_fetch`
 
@@ -160,6 +162,7 @@ Fetches content from Gemini protocol servers with full TLS security.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `url` | string | Yes | Full Gemini URL (e.g., `gemini://geminiprotocol.net/`) |
+| `input` | string | No | Text to answer a Gemini input prompt (status 10/11); it is percent-encoded into the query string |
 
 #### Examples
 
@@ -387,6 +390,60 @@ interface GeminiCertificateResult {
   message: string;       // Certificate requirement message
   request_info: RequestInfo;
 }
+```
+
+### `gopher_batch_fetch`
+
+Fetches several Gopher resources in a single call.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `urls` | string[] | Yes | List of full Gopher URLs (maximum 50) |
+
+#### Behavior
+
+- Returns a list of results aligned by index with the input `urls`.
+- Each element has the same shape as a `gopher_fetch` response (`MenuResult`, `TextResult`, `BinaryResult`, or `ErrorResult`).
+- Requests run with bounded concurrency (up to 5 at a time). Passing more than 50 URLs returns one `ErrorResult` per URL instead of fetching.
+
+```python
+from gopher_mcp.server import gopher_batch_fetch
+
+results = await gopher_batch_fetch([
+    "gopher://gopher.floodgap.com/1/",
+    "gopher://gopher.floodgap.com/0/gopher/welcome",
+])
+for result in results:
+    print(result["kind"])
+```
+
+### `gemini_batch_fetch`
+
+Fetches several Gemini resources in a single call.
+
+#### Parameters
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `urls` | string[] | Yes | List of full Gemini URLs (maximum 50) |
+
+#### Behavior
+
+- Returns a list of results aligned by index with the input `urls`.
+- Each element has the same shape as a `gemini_fetch` response (gemtext, success, input, redirect, error, or certificate).
+- Requests run with bounded concurrency (up to 5 at a time). Passing more than 50 URLs returns one error result per URL instead of fetching.
+
+```python
+from gopher_mcp.server import gemini_batch_fetch
+
+results = await gemini_batch_fetch([
+    "gemini://geminiprotocol.net/",
+    "gemini://geminiprotocol.net/docs/",
+])
+for result in results:
+    print(result["kind"])
 ```
 
 ## Common Types

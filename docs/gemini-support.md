@@ -15,7 +15,7 @@ The Gemini protocol is a modern, lightweight internet protocol that sits between
 
 ### Core Protocol Support
 
-- ✅ **Full Gemini 0.16.1 specification compliance**
+- ✅ **Full Gemini 0.24.1 specification compliance**
 - ✅ **TLS 1.2+ with SNI support**
 - ✅ **All status codes (10-69) handled**
 - ✅ **Native gemtext parsing and structured output**
@@ -160,7 +160,7 @@ The client supports automatic client certificate generation and management:
 
 1. **Scope-based isolation**: Certificates are generated per hostname or path scope
 2. **Automatic generation**: Certificates are created on-demand when requested
-3. **Secure storage**: Private keys are stored securely in `~/.gemini/client_certs/`
+3. **Secure storage**: Private keys are stored securely in `~/.gemini/certs/`
 4. **Certificate reuse**: Same certificate is used for the same scope
 
 ### Host Allowlists
@@ -184,38 +184,40 @@ export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se,kennedy.gemi.dev"
 | `GEMINI_MAX_CACHE_ENTRIES` | Maximum cache entries | `1000` | `2000` |
 | `GEMINI_ALLOWED_HOSTS` | Comma-separated allowed hosts | `None` | `example.org,test.org` |
 | `GEMINI_TOFU_ENABLED` | Enable TOFU certificate validation | `true` | `false` |
-| `GEMINI_CLIENT_CERTS_ENABLED` | Enable client certificate support | `true` | `false` |
+| `GEMINI_TOFU_REJECT_EXPIRED` | Fail closed on certificates outside their validity window | `false` | `true` |
+| `GEMINI_CLIENT_CERTS_ENABLED` | Enable automatic client certificate management | `true` | `false` |
 | `GEMINI_TOFU_STORAGE_PATH` | TOFU storage file path | `~/.gemini/tofu.json` | `/custom/path/tofu.json` |
-| `GEMINI_CLIENT_CERT_STORAGE_PATH` | Client cert storage directory | `~/.gemini/client_certs/` | `/custom/path/certs/` |
+| `GEMINI_CLIENT_CERTS_STORAGE_PATH` | Client certificate storage directory | `~/.gemini/certs/` | `/custom/path/certs/` |
+| `GEMINI_MAX_RENDERED_CHARS` | LLM-facing cap on returned text characters (0 = unlimited) | `50000` | `100000` |
+| `GEMINI_REQUESTS_PER_MINUTE` | Per-host request rate cap (0 = unlimited) | `0` | `60` |
+| `GEMINI_MAX_CONCURRENT_REQUESTS` | Cap on simultaneous in-flight fetches (0 = unlimited) | `0` | `20` |
+| `GEMINI_DENIED_MIME_TYPES` | Comma-separated MIME deny list (supports `type/*`) | `None` | `text/html,image/*` |
 
 ### Advanced Configuration
 
 ```python
 from gopher_mcp.gemini_client import GeminiClient
-from gopher_mcp.gemini_tls import TLSConfig
 
-# Custom TLS configuration
-tls_config = TLSConfig(
-    tls_version="TLSv1.3",
-    timeout_seconds=60.0,
-    verify_hostname=True,
-    client_cert_path="/path/to/cert.pem",
-    client_key_path="/path/to/key.pem"
-)
-
-# Custom client configuration
+# Custom client configuration. TLS 1.2 is the enforced minimum (TLS 1.2 and
+# 1.3 are supported) and server trust is handled by TOFU, so there are no TLS
+# version or hostname-verification knobs. Client certificates are generated
+# and managed automatically when client_certs_enabled is True.
 client = GeminiClient(
     max_response_size=2 * 1024 * 1024,  # 2MB
     timeout_seconds=60.0,
     cache_enabled=True,
     cache_ttl_seconds=600,
     max_cache_entries=2000,
-    allowed_hosts={"geminiprotocol.net", "warmedal.se"},
+    allowed_hosts=["geminiprotocol.net", "warmedal.se"],
     tofu_enabled=True,
+    tofu_reject_expired=True,
     client_certs_enabled=True,
-    tls_config=tls_config
+    client_certs_storage_path="/custom/path/certs/",
 )
 ```
+
+!!! note "TLS and certificate trust are not user-tuned"
+    The internal `TLSConfig` does carry `client_cert_path` / `client_key_path` fields, but they are populated automatically by the client-certificate manager per host/scope — you never set them yourself. Likewise there is no `min_version` override exposed through configuration; TLS 1.2 is enforced in code.
 
 ## Error Handling
 
@@ -286,19 +288,17 @@ The Gemini client provides comprehensive error handling:
 
 ### Debug Logging
 
-Enable debug logging for troubleshooting:
+Enable debug logging for troubleshooting by setting the server log level:
 
-```python
-import logging
-logging.getLogger("gopher_mcp.gemini_client").setLevel(logging.DEBUG)
-logging.getLogger("gopher_mcp.gemini_tls").setLevel(logging.DEBUG)
+```bash
+export GOPHER_MCP_LOG_LEVEL=DEBUG
 ```
 
 ## Standards Compliance
 
 The implementation follows these specifications:
 
-- **[Gemini Protocol Specification v0.16.1](https://geminiprotocol.net/docs/specification.gmi)**
+- **[Gemini Protocol Specification v0.24.1](https://geminiprotocol.net/docs/specification.gmi)**
 - **[RFC 5246 - TLS 1.2](https://tools.ietf.org/html/rfc5246)**
 - **[RFC 8446 - TLS 1.3](https://tools.ietf.org/html/rfc8446)**
 - **[RFC 6066 - TLS Extensions (SNI)](https://tools.ietf.org/html/rfc6066)**

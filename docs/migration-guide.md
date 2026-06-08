@@ -4,12 +4,12 @@ This guide helps existing users migrate from the Gopher-only version to the new 
 
 ## Overview
 
-Version 0.2.0 introduces comprehensive Gemini protocol support alongside the existing Gopher functionality. This is a **backward-compatible** update - all existing Gopher functionality remains unchanged.
+The server added comprehensive Gemini protocol support (introduced in v0.2.0) alongside the existing Gopher functionality. This was a **backward-compatible** change — all existing Gopher functionality remains unchanged.
 
 ## What's New
 
 ### New Features
-- **Gemini Protocol Support**: Full implementation of Gemini v0.16.1
+- **Gemini Protocol Support**: Full implementation of Gemini v0.24.1
 - **`gemini_fetch` Tool**: New MCP tool for Gemini protocol access
 - **TLS Security**: Mandatory TLS with TOFU certificate validation
 - **Client Certificates**: Automatic generation and management
@@ -258,7 +258,7 @@ df -h ~/.gemini
 # Test Gopher functionality
 python -c "
 import asyncio
-from src.gopher_mcp.server import gopher_fetch
+from gopher_mcp.server import gopher_fetch
 
 async def test():
     result = await gopher_fetch('gopher://gopher.floodgap.com/1/')
@@ -270,7 +270,7 @@ asyncio.run(test())
 # Test Gemini functionality
 python -c "
 import asyncio
-from src.gopher_mcp.server import gemini_fetch
+from gopher_mcp.server import gemini_fetch
 
 async def test():
     result = await gemini_fetch('gemini://geminiprotocol.net/')
@@ -307,7 +307,7 @@ If you encounter issues during migration:
 
 1. **Check the logs** with debug logging enabled:
    ```bash
-   export LOG_LEVEL=DEBUG
+   export GOPHER_MCP_LOG_LEVEL=DEBUG
    ```
 
 2. **Validate your configuration**:
