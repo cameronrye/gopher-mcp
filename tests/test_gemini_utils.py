@@ -119,6 +119,33 @@ class TestGeminiURLParsing:
         with pytest.raises(ValueError, match=r"Invalid port number|Port out of range"):
             parse_gemini_url("gemini://example.org:70000/")
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "gemini://example.org/a\x00b",  # NUL
+            "gemini://example.org/a\x0bb",  # vertical tab
+            "gemini://example.org/a\x0cb",  # form feed
+            "gemini://example.org/a\rb",  # CR (urlparse silently strips this)
+            "gemini://example.org/a\nb",  # LF (request-line injection shape)
+            "gemini://example.org/a\tb",  # TAB
+            "gemini://example.org/a\x7fb",  # DEL
+        ],
+    )
+    def test_control_characters_rejected(self, url):
+        """Raw control characters anywhere in the URL must be rejected.
+
+        urlparse silently strips CR/LF/TAB, which would otherwise mask a
+        request-line injection attempt; other C0 bytes (NUL/VT/FF) survive into
+        the on-wire request verbatim. Both must fail closed.
+        """
+        with pytest.raises(ValueError, match="control character"):
+            parse_gemini_url(url)
+
+    def test_raw_space_in_path_rejected(self):
+        """A raw (unencoded) space in the path yields a malformed request line."""
+        with pytest.raises(ValueError, match="space"):
+            parse_gemini_url("gemini://example.org/a b")
+
 
 class TestGeminiURLFormatting:
     """Test Gemini URL formatting functionality."""

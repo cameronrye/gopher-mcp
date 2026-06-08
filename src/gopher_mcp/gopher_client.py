@@ -105,15 +105,17 @@ class GopherClient:
                 f"Search query too long: {len(parsed_url.search)} > {self.max_search_length}"
             )
 
-        # Validate selector doesn't contain dangerous characters
-        if re.search(r"[\r\n\t]", parsed_url.selector):
+        # Validate selector doesn't contain dangerous characters. Reject every
+        # C0 control byte (0x00-0x1f) and DEL (0x7f), not just CR/LF/TAB: a
+        # percent-encoded NUL/ESC is decoded by parse_gopher_url and would
+        # otherwise be sent verbatim inside the single Gopher request line.
+        if re.search(r"[\x00-\x1f\x7f]", parsed_url.selector):
             raise ValueError("Selector contains invalid control characters")
 
-        # Validate search query doesn't contain dangerous characters. TAB is
-        # rejected too: the transport joins selector and search with a literal
-        # TAB, so an unescaped TAB here would inject an extra field into the
-        # single Gopher request line.
-        if parsed_url.search and re.search(r"[\r\n\t]", parsed_url.search):
+        # Same rule for the search query. TAB in particular must be rejected:
+        # the transport joins selector and search with a literal TAB, so an
+        # unescaped TAB here would inject an extra field into the request line.
+        if parsed_url.search and re.search(r"[\x00-\x1f\x7f]", parsed_url.search):
             raise ValueError("Search query contains invalid control characters")
 
         # Validate port range

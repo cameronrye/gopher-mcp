@@ -204,9 +204,10 @@ exclude_lines = [
 dev-setup = "bash scripts/dev-setup.sh"
 install-hooks = "pre-commit install"
 
-# Code quality
-lint = "ruff check src/ tests/"
-format = "ruff format src/ tests/"
+# Code quality (whole-repo to match CI's `ruff check .`; scoping to src/tests
+# hides violations in task.py/scripts/ that CI would still fail on)
+lint = "ruff check ."
+format = "ruff format ."
 typecheck = "mypy src/ --ignore-missing-imports"
 quality = "uv run task lint && uv run task typecheck && uv run task test"
 

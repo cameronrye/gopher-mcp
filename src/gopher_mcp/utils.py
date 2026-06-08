@@ -384,6 +384,13 @@ def parse_gemini_url(url: str) -> GeminiURL:
     if not url.startswith("gemini://"):
         raise ValueError("URL must start with 'gemini://'")
 
+    # Reject raw ASCII control characters (C0 range + DEL) anywhere in the URL.
+    # ``urlparse`` silently *strips* CR/LF/TAB, which would otherwise mask a
+    # request-line injection attempt; other C0 bytes (NUL/VT/FF) survive into
+    # the on-wire ``<url>\r\n`` request verbatim. Both must fail closed.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise ValueError("URL must not contain control characters")
+
     # Check URL length limit (1024 bytes as per Gemini spec)
     if len(url.encode("utf-8")) > 1024:
         raise ValueError("URL must not exceed 1024 bytes")
@@ -413,6 +420,11 @@ def parse_gemini_url(url: str) -> GeminiURL:
     host = parsed.hostname
     path = parsed.path or "/"  # Default to root path
     query = parsed.query or None  # Query string for user input
+
+    # A raw (unencoded) space in the path/query produces a malformed request
+    # line -- URLs must percent-encode spaces. Reject rather than send garbage.
+    if " " in path or (query is not None and " " in query):
+        raise ValueError("URL path/query must not contain a raw space")
 
     # Reject an explicit invalid port instead of silently coercing it (``0`` is
     # falsy, so the old ``parsed.port or 1965`` rewrote it to the default).
@@ -1213,7 +1225,7 @@ def process_gemini_response(
 
     # Client certificate required (60-69)
     elif 60 <= status_code <= 69:
-        return _process_certificate_response(meta, request_info)
+        return _process_certificate_response(status_code, meta, request_info)
 
     else:
         # This shouldn't happen due to validation in parse_gemini_response
@@ -1416,20 +1428,34 @@ def _process_error_response(
 
 
 def _process_certificate_response(
-    meta: str, request_info: dict[str, Any]
+    status_code: int, meta: str, request_info: dict[str, Any]
 ) -> "GeminiCertificateResult":
     """Process certificate request response (status 60-62).
 
+    The three subcodes mean different things and must not be collapsed:
+
+    * 60 CERTIFICATE_REQUIRED -- the server is prompting the client to present
+      a certificate and retry (``required=True``).
+    * 61 CERTIFICATE_NOT_AUTHORIZED -- the presented identity was refused.
+    * 62 CERTIFICATE_NOT_VALID -- the presented certificate is expired/invalid.
+
+    61 and 62 are *rejections*, so ``required`` is False: re-prompting for a
+    fresh certificate (as if none had been sent) would just loop.
+
     Args:
-        meta: Certificate-related message
-        request_info: Request information
+        status_code: Gemini status code (60-69).
+        meta: Certificate-related message.
+        request_info: Request information.
 
     Returns:
-        GeminiCertificateResult object
+        GeminiCertificateResult object.
     """
+
+    required = status_code == GeminiStatusCode.CERTIFICATE_REQUIRED.value
 
     return GeminiCertificateResult(
         message=meta,
-        required=True,
+        status=status_code,
+        required=required,
         requestInfo=request_info,
     )

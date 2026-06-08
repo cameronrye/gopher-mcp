@@ -410,7 +410,18 @@ class GeminiCertificateResult(BaseModel):
 
     kind: Literal["certificate"] = "certificate"
     message: str = Field(..., description="Certificate-related message")
-    required: bool = Field(default=True, description="Whether certificate is required")
+    status: int = Field(
+        default=60,
+        ge=60,
+        le=69,
+        description="Gemini certificate status code: 60 required, 61 not "
+        "authorized, 62 not valid",
+    )
+    required: bool = Field(
+        default=True,
+        description="Whether the server is prompting for a certificate (status "
+        "60). False for 61/62, which are rejections of a presented identity.",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",

@@ -479,6 +479,37 @@ class TestProcessGeminiResponse:
         assert result.kind == "certificate"
         assert result.message == "Certificate required for access"
         assert result.required is True
+        assert result.status == 60
+
+    def test_certificate_not_authorized_is_a_rejection(self):
+        """Status 61 (NOT_AUTHORIZED) is a rejection, not a prompt for a cert."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.CERTIFICATE_NOT_AUTHORIZED,
+            meta="Certificate not authorized",
+            body=None,
+        )
+
+        result = process_gemini_response(response, "gemini://example.org/private")
+
+        assert isinstance(result, GeminiCertificateResult)
+        assert result.status == 61
+        # The presented identity was refused; the caller must NOT re-prompt for
+        # a (fresh) certificate as if none had been sent.
+        assert result.required is False
+
+    def test_certificate_not_valid_is_a_rejection(self):
+        """Status 62 (NOT_VALID) is a rejection (expired/malformed cert)."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.CERTIFICATE_NOT_VALID,
+            meta="Certificate not valid",
+            body=None,
+        )
+
+        result = process_gemini_response(response, "gemini://example.org/private")
+
+        assert isinstance(result, GeminiCertificateResult)
+        assert result.status == 62
+        assert result.required is False
 
     def test_success_response_empty_body(self):
         """Test success response with empty body."""

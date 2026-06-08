@@ -130,6 +130,29 @@ class TestSecurityValidation:
         ):
             client._validate_security(parsed_url)
 
+    @pytest.mark.parametrize(
+        "selector",
+        ["/sel\x00null", "/sel\x07bell", "/sel\x1bescape", "/sel\x0bvtab"],
+    )
+    def test_validate_security_selector_rejects_all_c0_controls(self, selector):
+        """All C0 control bytes (not just CR/LF/TAB) must be rejected in selectors.
+
+        A percent-encoded NUL/ESC is decoded by parse_gopher_url and would
+        otherwise be sent verbatim to the server inside the request line.
+        """
+        client = GopherClient()
+        parsed_url = GopherURL(
+            host="example.com",
+            port=70,
+            gopherType="1",
+            selector=selector,
+            search=None,
+        )
+        with pytest.raises(
+            ValueError, match="Selector contains invalid control characters"
+        ):
+            client._validate_security(parsed_url)
+
     def test_validate_security_search_invalid_chars(self):
         """Test security validation fails for search queries with invalid characters."""
         client = GopherClient()
