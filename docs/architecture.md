@@ -71,12 +71,14 @@ The Gopher & Gemini MCP Server is a Model Context Protocol (MCP) server that ena
 **Responsibility**: Expose Gopher and Gemini functionality as MCP tools
 
 **Key Functions**:
+
 - `gopher_fetch(url: str)` - MCP tool for Gopher protocol
 - `gemini_fetch(url: str)` - MCP tool for Gemini protocol
 - Environment variable parsing and validation
 - Client manager singleton access
 
 **Dependencies**:
+
 - FastMCP framework
 - GopherClient
 - GeminiClient
@@ -87,12 +89,14 @@ The Gopher & Gemini MCP Server is a Model Context Protocol (MCP) server that ena
 **Responsibility**: Singleton pattern for client lifecycle management
 
 **Key Features**:
+
 - Single instance per protocol client
 - Lazy initialization
 - Configuration from environment variables
 - Thread-safe access
 
 **Pattern**:
+
 ```python
 class ClientManager:
     _instance = None
@@ -111,6 +115,7 @@ class ClientManager:
 **Responsibility**: Gopher protocol implementation and response processing
 
 **Key Methods**:
+
 - `fetch(url)` - Main entry point
 - `_fetch_content(url)` - Network communication
 - `_process_menu_response()` - Parse Gopher menus
@@ -120,6 +125,7 @@ class ClientManager:
 - `_cache_response()` - Cache storage
 
 **Data Flow**:
+
 ```
 URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Return
 ```
@@ -129,6 +135,7 @@ URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Re
 **Responsibility**: Gemini protocol implementation with TLS security
 
 **Key Methods**:
+
 - `fetch(url)` - Main entry point
 - `_fetch_content(url)` - TLS connection and response handling
 - Response parsing by status code (20, 30, 40, 60, etc.)
@@ -136,6 +143,7 @@ URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Re
 - `_cache_response()` - Cache storage
 
 **Dependencies**:
+
 - GeminiTLSClient
 - TOFUManager
 - ClientCertificateManager
@@ -145,12 +153,14 @@ URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Re
 **Responsibility**: Low-level TLS connection management
 
 **Key Methods**:
+
 - `connect(host, port)` - Establish TLS connection
 - `send_data(data)` - Send request
 - `receive_data()` - Receive response
 - `close()` - Close connection
 
 **Security Features**:
+
 - TLS 1.2+ enforcement
 - Certificate validation
 - Cipher suite selection
@@ -161,12 +171,14 @@ URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Re
 **Responsibility**: Trust-on-First-Use certificate validation
 
 **Key Methods**:
+
 - `validate_certificate(host, cert)` - Validate against stored fingerprint
 - `store_certificate(host, cert)` - Store new certificate
 - `load_certificates()` - Load from storage
 - `save_certificates()` - Persist to storage
 
 **Storage Format** (`~/.gemini/tofu.json`):
+
 ```json
 {
   "example.com": {
@@ -182,12 +194,14 @@ URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Re
 **Responsibility**: Automatic client certificate generation and management
 
 **Key Methods**:
+
 - `get_certificate(host)` - Get or generate certificate for host
 - `generate_certificate(host)` - Generate new certificate
 - `load_certificates()` - Load from storage
 - `save_certificate(host, cert, key)` - Persist certificate
 
 **Storage Structure** (`~/.gemini/client_certs/`):
+
 ```
 ~/.gemini/client_certs/
 ├── example.com.crt
@@ -286,6 +300,7 @@ Request → Hash URL → Check Cache
 **Cache Key**: `SHA256(protocol + url)`
 
 **Cache Entry**:
+
 ```python
 {
     "response": {...},      # Formatted response
@@ -301,12 +316,14 @@ Request → Hash URL → Check Cache
 ### Gopher Security
 
 **Threat Model**:
+
 - No encryption (plaintext protocol)
 - No authentication
 - Potential for malicious content
 - Network eavesdropping
 
 **Mitigations**:
+
 1. **Input Validation**
    - URL format validation
    - Selector sanitization
@@ -329,12 +346,14 @@ Request → Hash URL → Check Cache
 ### Gemini Security
 
 **Threat Model**:
+
 - Man-in-the-middle attacks
 - Certificate spoofing
 - Malicious content
 - Privacy concerns
 
 **Mitigations**:
+
 1. **Transport Security**
    - Mandatory TLS 1.2+
    - Strong cipher suites only
@@ -467,16 +486,19 @@ Return to MCP Client
 ### Caching Strategy
 
 **Benefits**:
+
 - Reduces network requests
 - Improves response time
 - Reduces server load
 
 **Configuration**:
+
 - `GOPHER_CACHE_ENABLED` / `GEMINI_CACHE_ENABLED`
 - `GOPHER_CACHE_TTL_SECONDS` / `GEMINI_CACHE_TTL_SECONDS`
 - `GOPHER_MAX_CACHE_ENTRIES` / `GEMINI_MAX_CACHE_ENTRIES`
 
 **Trade-offs**:
+
 - Memory usage vs. performance
 - Freshness vs. speed
 - Cache size vs. hit rate
@@ -484,11 +506,13 @@ Return to MCP Client
 ### Concurrency Model
 
 **Gopher**:
+
 - Synchronous requests executed in thread pool
 - `asyncio.get_event_loop().run_in_executor()`
 - Non-blocking for async MCP server
 
 **Gemini**:
+
 - Asynchronous TLS connections
 - Native async/await support
 - Efficient connection handling
@@ -496,10 +520,12 @@ Return to MCP Client
 ### Resource Management
 
 **Connection Pooling**:
+
 - Gemini: Connections closed after each request
 - Gopher: Native asyncio transport opens and closes a connection per request
 
 **Memory Management**:
+
 - Response size limits prevent memory exhaustion
 - Cache eviction prevents unbounded growth
 - Streaming not supported (responses buffered)
@@ -610,6 +636,7 @@ Return to MCP Client
 **Framework**: structlog
 
 **Log Levels**:
+
 - `DEBUG`: Detailed diagnostic information
 - `INFO`: General informational messages
 - `WARNING`: Warning messages
@@ -617,6 +644,7 @@ Return to MCP Client
 - `CRITICAL`: Critical failures
 
 **Log Fields**:
+
 ```python
 {
     "event": "gopher_fetch_successful",
@@ -631,6 +659,7 @@ Return to MCP Client
 ### Metrics
 
 **Key Metrics**:
+
 - Request count (per protocol)
 - Response time (per protocol)
 - Cache hit rate

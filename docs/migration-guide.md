@@ -9,6 +9,7 @@ The server added comprehensive Gemini protocol support (introduced in v0.2.0) al
 ## What's New
 
 ### New Features
+
 - **Gemini Protocol Support**: Full implementation of Gemini v0.24.1
 - **`gemini_fetch` Tool**: New MCP tool for Gemini protocol access
 - **TLS Security**: Mandatory TLS with TOFU certificate validation
@@ -17,6 +18,7 @@ The server added comprehensive Gemini protocol support (introduced in v0.2.0) al
 - **Dual Caching**: Separate cache systems for each protocol
 
 ### Backward Compatibility
+
 - ✅ All existing `gopher_fetch` functionality preserved
 - ✅ Existing configuration variables unchanged
 - ✅ No breaking changes to API or behavior
@@ -27,11 +29,13 @@ The server added comprehensive Gemini protocol support (introduced in v0.2.0) al
 ### 1. Update Dependencies
 
 If you're using pip:
+
 ```bash
 pip install --upgrade gopher-mcp
 ```
 
 If you're using uv:
+
 ```bash
 uv sync
 ```
@@ -136,6 +140,7 @@ python scripts/validate-config.py
 **After**: Gopher settings unchanged, can optionally configure Gemini
 
 **Action Required**:
+
 1. Keep existing configuration
 2. Optionally add Gemini-specific settings if desired
 
@@ -145,6 +150,7 @@ python scripts/validate-config.py
 **After**: Same Gopher security, plus enhanced Gemini security
 
 **Recommended Actions**:
+
 ```bash
 # Keep existing Gopher allowlist
 GOPHER_ALLOWED_HOSTS=trusted-gopher-hosts.com
@@ -162,6 +168,7 @@ GEMINI_TOFU_ENABLED=true
 **After**: Can optimize both protocols independently
 
 **Recommended Actions**:
+
 ```bash
 # Keep existing Gopher optimization
 GOPHER_CACHE_TTL_SECONDS=1800
@@ -178,6 +185,7 @@ GEMINI_MAX_CACHE_ENTRIES=5000
 
 **Cause**: Incomplete installation or environment issues
 **Solution**:
+
 ```bash
 # Reinstall completely
 pip uninstall gopher-mcp
@@ -191,6 +199,7 @@ uv sync --reinstall
 
 **Cause**: Invalid configuration values
 **Solution**:
+
 ```bash
 # Run validation to see specific issues
 python scripts/validate-config.py
@@ -203,6 +212,7 @@ unset PROBLEMATIC_VARIABLE
 
 **Cause**: Network or TLS configuration issues
 **Solution**:
+
 ```bash
 # Test with relaxed security (development only)
 export GEMINI_TOFU_ENABLED=false
@@ -215,6 +225,7 @@ ping geminiprotocol.net
 
 **Cause**: Permission or disk space issues
 **Solution**:
+
 ```bash
 # Check and fix permissions
 mkdir -p ~/.gemini
@@ -306,11 +317,13 @@ python -m pytest tests/test_server.py -v
 If you encounter issues during migration:
 
 1. **Check the logs** with debug logging enabled:
+
    ```bash
    export GOPHER_MCP_LOG_LEVEL=DEBUG
    ```
 
 2. **Validate your configuration**:
+
    ```bash
    python scripts/validate-config.py
    ```

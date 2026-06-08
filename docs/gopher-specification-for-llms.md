@@ -80,6 +80,7 @@ gopher://<host>:<port>/<gopher-path>
 ```
 
 Where `<gopher-path>` is one of:
+
 - `<gophertype><selector>`
 - `<gophertype><selector>%09<search>`
 - `<gophertype><selector>%09<search>%09<gopher+_string>`
@@ -131,11 +132,13 @@ Where `<gopher-path>` is one of:
 ### Menu Format
 
 Each menu line follows this exact format:
+
 ```
 <type><display_string><TAB><selector><TAB><host><TAB><port><CRLF>
 ```
 
 **Components:**
+
 - **type**: Single character item type
 - **display_string**: Human-readable name (≤70 characters recommended)
 - **selector**: Selector string for retrieving this item
@@ -163,11 +166,13 @@ Each menu line follows this exact format:
 ### Menu Transaction (Type 1)
 
 **Client Request:**
+
 ```
 <selector><CRLF>
 ```
 
 **Server Response:**
+
 ```
 <type><display><TAB><selector><TAB><host><TAB><port><CRLF>
 <type><display><TAB><selector><TAB><host><TAB><port><CRLF>
@@ -178,11 +183,13 @@ Each menu line follows this exact format:
 ### Text File Transaction (Type 0)
 
 **Client Request:**
+
 ```
 <selector><CRLF>
 ```
 
 **Server Response:**
+
 ```
 <text_content>
 .<CRLF>
@@ -191,17 +198,20 @@ Each menu line follows this exact format:
 ### Search Transaction (Type 7)
 
 **Client Request:**
+
 ```
 <selector><TAB><search_string><CRLF>
 ```
 
 **Server Response:**
+
 ```
 <menu_format_results>
 .<CRLF>
 ```
 
 **Search Logic:**
+
 - Spaces typically treated as Boolean AND
 - Returns virtual directory listing of matching documents
 - Search string follows selector with TAB separator
@@ -209,11 +219,13 @@ Each menu line follows this exact format:
 ### Binary Transaction (Types 4, 5, 6, 9, g, I)
 
 **Client Request:**
+
 ```
 <selector><CRLF>
 ```
 
 **Server Response:**
+
 ```
 <binary_data>
 <connection_closes>
@@ -228,6 +240,7 @@ Each menu line follows this exact format:
 ### Overview
 
 Gopher+ provides upward-compatible extensions to base Gopher protocol, supporting:
+
 - Item attributes
 - Alternate data representations
 - Electronic forms
@@ -236,6 +249,7 @@ Gopher+ provides upward-compatible extensions to base Gopher protocol, supportin
 ### Gopher+ Item Identification
 
 In directory listings, Gopher+ items are tagged:
+
 - `+`: Standard Gopher+ item
 - `?`: Gopher+ item with electronic form (+ASK)
 
@@ -294,6 +308,7 @@ In directory listings, Gopher+ items are tagged:
 ### Security Limitations
 
 ⚠️ **Critical Security Issues:**
+
 - **No encryption**: All data transmitted in plaintext
 - **No authentication**: Passwords (if used) sent in clear
 - **No privacy**: Assume all communications are public
@@ -320,40 +335,46 @@ In directory listings, Gopher+ items are tagged:
 ### Basic Directory Listing
 
 **Request:**
+
 ```
 <empty_line>
 ```
 
 **Response:**
+
 ```
-0About Gopher	about	gopher.example.com	70
-1Documents	docs/	gopher.example.com	70
-7Search	search	search.example.com	70
+0About Gopher about gopher.example.com 70
+1Documents docs/ gopher.example.com 70
+7Search search search.example.com 70
 .
 ```
 
 ### Search Example
 
 **Request:**
+
 ```
-search	python programming
+search python programming
 ```
 
 **Response:**
+
 ```
-0Python Tutorial	tutorials/python.txt	docs.example.com	70
-0Python Reference	ref/python.txt	docs.example.com	70
+0Python Tutorial tutorials/python.txt docs.example.com 70
+0Python Reference ref/python.txt docs.example.com 70
 .
 ```
 
 ### Gopher+ Attribute Request
 
 **Request:**
+
 ```
-document.txt		!+ABSTRACT
+document.txt  !+ABSTRACT
 ```
 
 **Response:**
+
 ```
 +ABSTRACT: This document contains programming examples
 .

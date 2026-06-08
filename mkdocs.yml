@@ -52,6 +52,7 @@ nav:
       - Gemini Troubleshooting: gemini-troubleshooting.md
   - Reference:
       - Architecture: architecture.md
+      - Data Models: reference/models.md
       - Migration Guide: migration-guide.md
   - Development:
       - Contributing: contributing.md
@@ -73,6 +74,11 @@ plugins:
             separate_signature: true
             show_signature_annotations: true
             signature_crossrefs: true
+            show_if_no_docstring: true
+            members_order: source
+            show_labels: true
+            inherited_members: true
+            filters: ["!^_"]
 
 markdown_extensions:
   - admonition

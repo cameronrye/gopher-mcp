@@ -9,6 +9,7 @@ This document outlines the recommended repository settings and branch protection
 Configure the following settings for the `main` branch:
 
 #### Required Status Checks
+
 - ✅ Require status checks to pass before merging
 - ✅ Require branches to be up to date before merging
 - Required checks:
@@ -20,12 +21,14 @@ Configure the following settings for the `main` branch:
   - `docs` (Build documentation)
 
 #### Pull Request Requirements
+
 - ✅ Require a pull request before merging
 - ✅ Require approvals: **1**
 - ✅ Dismiss stale PR approvals when new commits are pushed
 - ✅ Require review from code owners (when CODEOWNERS file is present)
 
 #### Additional Restrictions
+
 - ✅ Restrict pushes that create files larger than 100 MB
 - ✅ Include administrators (recommended for consistency)
 - ✅ Allow force pushes: **Disabled**
@@ -36,6 +39,7 @@ Configure the following settings for the `main` branch:
 ### General Settings
 
 #### Features
+
 - ✅ Wikis: **Enabled** (for community documentation)
 - ✅ Issues: **Enabled**
 - ✅ Sponsorships: **Enabled** (if applicable)
@@ -43,6 +47,7 @@ Configure the following settings for the `main` branch:
 - ✅ Discussions: **Enabled** (for community Q&A)
 
 #### Pull Requests
+
 - ✅ Allow merge commits: **Enabled**
 - ✅ Allow squash merging: **Enabled** (default)
 - ✅ Allow rebase merging: **Enabled**
@@ -53,6 +58,7 @@ Configure the following settings for the `main` branch:
 ### Security Settings
 
 #### Security & Analysis
+
 - ✅ Dependency graph: **Enabled**
 - ✅ Dependabot alerts: **Enabled**
 - ✅ Dependabot security updates: **Enabled**
@@ -97,10 +103,12 @@ updates:
 ### Access & Permissions
 
 #### Collaborators and Teams
+
 - Repository owner: **cameronrye** (Admin)
 - Consider adding trusted maintainers with **Maintain** permissions
 
 #### Actions Permissions
+
 - ✅ Allow all actions and reusable workflows
 - ✅ Allow actions created by GitHub: **Enabled**
 - ✅ Allow actions by Marketplace verified creators: **Enabled**
@@ -109,6 +117,7 @@ updates:
 ### Pages Settings
 
 #### GitHub Pages
+
 - ✅ Source: **GitHub Actions**
 - ✅ Custom domain: (optional, configure if desired)
 - ✅ Enforce HTTPS: **Enabled**
@@ -116,6 +125,7 @@ updates:
 ## Environment Protection Rules
 
 ### PyPI Environment
+
 - Environment name: `pypi`
 - Protection rules:
   - ✅ Required reviewers: Repository owner
@@ -123,6 +133,7 @@ updates:
   - ✅ Deployment branches: Only protected branches
 
 ### TestPyPI Environment  
+
 - Environment name: `testpypi`
 - Protection rules:
   - ✅ Required reviewers: Repository owner
@@ -132,14 +143,17 @@ updates:
 ## Secrets and Variables
 
 ### Repository Secrets
+
 None required.
 
 ### Environment Secrets
+
 No secrets needed for OIDC-based PyPI publishing.
 
 ## Labels Configuration
 
 ### Default Labels to Add
+
 - `good first issue` - Good for newcomers
 - `help wanted` - Extra attention is needed
 - `priority: high` - High priority
@@ -182,6 +196,7 @@ mkdocs.yml @cameronrye
 ## Automation Setup
 
 ### Required GitHub Apps/Integrations
+
 1. **Dependabot**: Already built into GitHub
 2. **GitHub Actions**: Built-in CI/CD
 
@@ -212,6 +227,7 @@ After configuring these settings:
 ## Maintenance
 
 ### Regular Tasks
+
 - Review and update dependencies monthly
 - Monitor security alerts and address promptly
 - Review and merge Dependabot PRs

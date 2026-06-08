@@ -2,6 +2,9 @@
 
 This document provides a comprehensive reference for the Gopher & Gemini MCP Server API.
 
+For the exhaustive, always-in-sync field definitions of every result type, see
+the auto-generated [Data Models](reference/models.md) page.
+
 ## MCP Tools
 
 The server provides four tools: `gopher_fetch` and `gemini_fetch` for single
@@ -86,72 +89,19 @@ if result["kind"] == "error":
 
 #### Response Types
 
-##### MenuResult
+`gopher_fetch` returns one of these result objects, distinguished by the `kind`
+field. See [Data Models](reference/models.md) for the complete, always-in-sync
+field definitions generated from the source.
 
-Returned for Gopher menus (type 1) and search results (type 7).
+| `kind` | Type | Returned for |
+|--------|------|--------------|
+| `menu` | [`MenuResult`][gopher_mcp.models.MenuResult] | Gopher menus (type 1) and search results (type 7); the `items` are [`GopherMenuItem`][gopher_mcp.models.GopherMenuItem] entries |
+| `text` | [`TextResult`][gopher_mcp.models.TextResult] | Text files (type 0) |
+| `binary` | [`BinaryResult`][gopher_mcp.models.BinaryResult] | Binary item types (4, 5, 6, 9, g, I) — metadata only |
+| `error` | [`ErrorResult`][gopher_mcp.models.ErrorResult] | Errors and unsupported content |
 
-```typescript
-interface MenuResult {
-  kind: "menu";
-  items: MenuItem[];
-  server_info: ServerInfo;
-  request_info: RequestInfo;
-}
-
-interface MenuItem {
-  type: string;           // Gopher item type (0, 1, 7, etc.)
-  display_text: string;   // Human-readable text
-  selector: string;       // Gopher selector
-  host: string;          // Server hostname
-  port: number;          // Server port
-  url?: string;          // Full URL if constructible
-}
-```
-
-##### TextResult
-
-Returned for text files (type 0).
-
-```typescript
-interface TextResult {
-  kind: "text";
-  content: string;        // Text content
-  encoding: string;       // Character encoding
-  size: number;          // Content size in bytes
-  server_info: ServerInfo;
-  request_info: RequestInfo;
-}
-```
-
-##### BinaryResult
-
-Returned for binary files (types 4, 5, 6, 9, g, I). Contains metadata only.
-
-```typescript
-interface BinaryResult {
-  kind: "binary";
-  item_type: string;      // Gopher item type
-  description: string;    // File description
-  size?: number;         // File size if available
-  server_info: ServerInfo;
-  request_info: RequestInfo;
-}
-```
-
-##### ErrorResult
-
-Returned for errors or unsupported content.
-
-```typescript
-interface ErrorResult {
-  kind: "error";
-  error: string;          // Error message
-  details?: string;       // Additional details
-  suggestions?: string[]; // Troubleshooting suggestions
-  server_info?: ServerInfo;
-  request_info: RequestInfo;
-}
-```
+Every result also carries a `request_info` object (request URL, host, port, and
+timing metadata).
 
 ### `gemini_fetch`
 
@@ -271,126 +221,17 @@ if result["kind"] == "gemtext":
 
 #### Response Types
 
-##### GeminiGemtextResult
+`gemini_fetch` returns one of these result objects, distinguished by the `kind`
+field. See [Data Models](reference/models.md) for the complete field definitions.
 
-Returned for gemtext content (text/gemini MIME type).
-
-```typescript
-interface GeminiGemtextResult {
-  kind: "gemtext";
-  document: GemtextDocument;
-  raw_content: string;    // Original gemtext source
-  charset: string;        // Character encoding
-  size: number;          // Content size in bytes
-  request_info: RequestInfo;
-}
-
-interface GemtextDocument {
-  lines: GemtextLine[];
-  links: GemtextLink[];
-  headings: GemtextHeading[];
-}
-
-interface GemtextLine {
-  type: "text" | "link" | "heading1" | "heading2" | "heading3" |
-        "list_item" | "quote" | "preformat_toggle" | "preformat";
-  text: string;
-  url?: string;           // For link lines
-  alt_text?: string;      // For preformat blocks
-}
-
-interface GemtextLink {
-  url: string;
-  text?: string;          // Link text (optional)
-  line_number: number;    // Line number in document
-}
-
-interface GemtextHeading {
-  level: 1 | 2 | 3;      // Heading level
-  text: string;          // Heading text
-  line_number: number;   // Line number in document
-}
-```
-
-##### GeminiSuccessResult
-
-Returned for non-gemtext content (text, binary, etc.).
-
-```typescript
-interface GeminiSuccessResult {
-  kind: "success";
-  mime_type: GeminiMimeType;
-  content: string | bytes; // Text content or binary data
-  size: number;           // Content size in bytes
-  request_info: RequestInfo;
-}
-
-interface GeminiMimeType {
-  full_type: string;      // Complete MIME type
-  main_type: string;      // Main type (text, image, etc.)
-  sub_type: string;       // Sub type (plain, html, etc.)
-  charset?: string;       // Character encoding
-  language?: string;      // Content language
-  is_text: boolean;       // Whether content is text
-  is_gemtext: boolean;    // Whether content is gemtext
-  is_binary: boolean;     // Whether content is binary
-}
-```
-
-##### GeminiInputResult
-
-Returned for input requests (status codes 10-11).
-
-```typescript
-interface GeminiInputResult {
-  kind: "input";
-  prompt: string;         // Input prompt text
-  sensitive: boolean;     // Whether input is sensitive (password)
-  request_info: RequestInfo;
-}
-```
-
-##### GeminiRedirectResult
-
-Returned for redirects (status codes 30-31).
-
-```typescript
-interface GeminiRedirectResult {
-  kind: "redirect";
-  url: string;           // New URL to redirect to
-  permanent: boolean;    // Whether redirect is permanent
-  request_info: RequestInfo;
-}
-```
-
-##### GeminiErrorResult
-
-Returned for errors (status codes 40-69).
-
-```typescript
-interface GeminiErrorResult {
-  kind: "error";
-  status: number;        // Gemini status code
-  message: string;       // Error message
-  is_temporary: boolean; // Whether error is temporary
-  is_server_error: boolean; // Whether error is server-side
-  is_client_error: boolean; // Whether error is client-side
-  request_info: RequestInfo;
-}
-```
-
-##### GeminiCertificateResult
-
-Returned for certificate requests (status codes 60-69).
-
-```typescript
-interface GeminiCertificateResult {
-  kind: "certificate";
-  status: number;        // Gemini status code
-  message: string;       // Certificate requirement message
-  request_info: RequestInfo;
-}
-```
+| `kind` | Type | Returned for |
+|--------|------|--------------|
+| `gemtext` | [`GeminiGemtextResult`][gopher_mcp.models.GeminiGemtextResult] | `text/gemini` content, parsed into a [`GemtextDocument`][gopher_mcp.models.GemtextDocument] of [`GemtextLine`][gopher_mcp.models.GemtextLine] items |
+| `success` | [`GeminiSuccessResult`][gopher_mcp.models.GeminiSuccessResult] | Other success responses (status 20-29); the MIME type is a [`GeminiMimeType`][gopher_mcp.models.GeminiMimeType] |
+| `input` | [`GeminiInputResult`][gopher_mcp.models.GeminiInputResult] | Input prompts (status 10-11) — answer with the `gemini_fetch` `input` parameter |
+| `redirect` | [`GeminiRedirectResult`][gopher_mcp.models.GeminiRedirectResult] | Redirects (status 30-31) |
+| `error` | [`GeminiErrorResult`][gopher_mcp.models.GeminiErrorResult] | Errors (status 40-59) |
+| `certificate` | [`GeminiCertificateResult`][gopher_mcp.models.GeminiCertificateResult] | Client-certificate requests (status 60-69) |
 
 ### `gopher_batch_fetch`
 
@@ -448,30 +289,12 @@ for result in results:
 
 ## Common Types
 
-### ServerInfo
+### `request_info`
 
-Information about the Gopher server.
-
-```typescript
-interface ServerInfo {
-  host: string;          // Server hostname
-  port: number;          // Server port
-  protocol: "gopher";    // Protocol name
-}
-```
-
-### RequestInfo
-
-Information about the request.
-
-```typescript
-interface RequestInfo {
-  url: string;           // Original request URL
-  timestamp: number;     // Unix timestamp
-  protocol: "gopher" | "gemini"; // Protocol used
-  cached?: boolean;      // Whether response was cached
-}
-```
+Every result includes a `request_info` field — a free-form object
+(`dict[str, Any]`) carrying metadata about the request, such as the requested
+URL, host, port, and timing. It is not a fixed schema, so treat its keys as
+best-effort metadata rather than a guaranteed contract.
 
 ## Status Codes
 
@@ -559,6 +382,7 @@ Common Gopher errors and how to handle them:
 **Cause**: Server is unreachable or slow to respond
 
 **Solution**:
+
 ```python
 # Increase timeout in configuration
 # GOPHER_TIMEOUT_SECONDS=60
@@ -575,6 +399,7 @@ if result["kind"] == "error" and "timeout" in result["error"].lower():
 **Cause**: Malformed URL structure
 
 **Solution**:
+
 ```python
 # Ensure URL follows gopher://host[:port]/type/selector format
 valid_url = "gopher://gopher.floodgap.com/1/"
@@ -590,6 +415,7 @@ result = await gopher_fetch(valid_url)
 **Cause**: Server returned unknown or unsupported item type
 
 **Solution**:
+
 ```python
 result = await gopher_fetch("gopher://example.com/X/unknown")
 if result["kind"] == "error" and "unsupported" in result["error"].lower():
@@ -605,6 +431,7 @@ if result["kind"] == "error" and "unsupported" in result["error"].lower():
 **Cause**: Response size exceeds configured maximum
 
 **Solution**:
+
 ```python
 # Increase size limit in configuration
 # GOPHER_MAX_RESPONSE_SIZE=2097152
@@ -625,6 +452,7 @@ Common Gemini errors and how to handle them:
 **Cause**: Certificate or TLS configuration issues
 
 **Solution**:
+
 ```python
 result = await gemini_fetch("gemini://tls-error.example.com/")
 if result["kind"] == "error" and "tls" in result["error"]["message"].lower():
@@ -639,6 +467,7 @@ if result["kind"] == "error" and "tls" in result["error"]["message"].lower():
 **Cause**: Server certificate changed since first visit
 
 **Solution**:
+
 ```python
 # Certificate changed - manual intervention required
 # 1. Verify the change is legitimate
@@ -659,6 +488,7 @@ if result["kind"] == "error" and "tofu" in result["error"]["message"].lower():
 **Cause**: Server returned malformed or invalid status code
 
 **Solution**:
+
 ```python
 result = await gemini_fetch("gemini://broken-server.example.com/")
 if result["kind"] == "error" and "status" in result["error"]["message"].lower():
@@ -672,6 +502,7 @@ if result["kind"] == "error" and "status" in result["error"]["message"].lower():
 **Cause**: Response size exceeds configured maximum
 
 **Solution**:
+
 ```python
 # Increase size limit in configuration
 # GEMINI_MAX_RESPONSE_SIZE=2097152
@@ -688,6 +519,7 @@ if result["kind"] == "error" and "size" in result["error"]["message"].lower():
 **Cause**: Server not in configured allowlist
 
 **Solution**:
+
 ```python
 # Add host to allowlist in configuration
 # GEMINI_ALLOWED_HOSTS=geminiprotocol.net,example.com

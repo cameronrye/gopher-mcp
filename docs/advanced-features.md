@@ -24,6 +24,7 @@ client = GopherClient(
 ```
 
 Environment variable configuration:
+
 ```bash
 export GOPHER_ALLOWED_HOSTS="gopher.floodgap.com,gopher.quux.org"
 ```
@@ -56,6 +57,7 @@ client = GopherClient(
 ```
 
 Environment variables:
+
 ```bash
 export GOPHER_CACHE_ENABLED=true
 export GOPHER_CACHE_TTL_SECONDS=300
@@ -101,6 +103,7 @@ gopher-mcp --transport sse
 ### HTTP API
 
 The HTTP transports provide a JSON-RPC 2.0 API. Example request:
+
 ```json
 {
   "jsonrpc": "2.0",
@@ -151,11 +154,13 @@ Full support for Gopher search servers (type 7):
 ### URL Formats
 
 Standard query parameter:
+
 ```
 gopher://veronica.example.com/7/search?python
 ```
 
 Tab-encoded format:
+
 ```
 gopher://veronica.example.com/7/search%09python
 ```
@@ -224,6 +229,7 @@ GEMINI_TOFU_STORAGE_PATH=/custom/path/tofu.json
 ```
 
 **TOFU Workflow:**
+
 - First connection stores certificate fingerprint
 - Subsequent connections verify against stored fingerprint
 - Certificate changes trigger validation errors
@@ -242,6 +248,7 @@ GEMINI_CLIENT_CERTS_STORAGE_PATH=/custom/path/certs/
 ```
 
 **Features:**
+
 - Automatic certificate generation per hostname/path scope
 - Secure private key storage with owner-only (700/600) permissions
 - Certificate reuse within the same scope
@@ -269,6 +276,7 @@ GEMINI_MAX_CACHE_ENTRIES=2000
 ```
 
 **Cache Features:**
+
 - Protocol-isolated caching (separate from Gopher cache)
 - TTL-based expiration
 - LRU eviction when cache is full
@@ -286,11 +294,13 @@ GEMINI_ALLOWED_HOSTS=geminiprotocol.net,warmedal.se,kennedy.gemi.dev
 ## Security Best Practices
 
 ### Gopher Protocol
+
 1. **Use Host Allowlists**: Restrict access to trusted Gopher servers
 2. **Set Reasonable Limits**: Configure appropriate size and timeout limits
 3. **Monitor Logs**: Use structured logging for security monitoring
 
 ### Gemini Protocol
+
 1. **Enable TOFU**: Always use TOFU certificate validation in production; TLS 1.2+ is enforced automatically
 2. **Fail Closed on Bad Certificates**: Set `GEMINI_TOFU_REJECT_EXPIRED=true` to reject certificates outside their validity window
 3. **Client Certificates**: Enable automatic client certificate management for authenticated access
@@ -298,6 +308,7 @@ GEMINI_ALLOWED_HOSTS=geminiprotocol.net,warmedal.se,kennedy.gemi.dev
 5. **Certificate Monitoring**: Monitor certificate validation failures
 
 ### General
+
 1. **Regular Updates**: Keep dependencies updated for security patches
 2. **Network Isolation**: Consider running in isolated network environments
 3. **Structured Logging**: Use structured logging for security monitoring
