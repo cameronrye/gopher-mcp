@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gopher-mcp"
 version = "0.3.0"
-description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources"
+description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher and Gemini resources"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]

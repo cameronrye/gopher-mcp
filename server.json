@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.cameronrye/gopher-mcp",
+  "description": "MCP server for browsing Gopher and Gemini protocol resources safely, with SSRF protection, TLS/TOFU, and structured JSON output.",
+  "version": "0.3.0",
+  "repository": {
+    "url": "https://github.com/cameronrye/gopher-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registry_type": "pypi",
+      "registry_base_url": "https://pypi.org",
+      "identifier": "gopher-mcp",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

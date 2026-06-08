@@ -7,17 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Block CGNAT (`100.64.0.0/10`) and deprecated IPv6 site-local (`fec0::/10`) in
+  the SSRF guard, with a `not is_global` catch-all so new non-public ranges are
+  denied by default. Reject all C0 control characters (and raw spaces) in Gemini
+  URLs and the full C0 range in Gopher selectors, so no unescaped control bytes
+  can reach a remote server.
+- Disabling TOFU now logs a prominent warning (it leaves Gemini connections
+  unauthenticated under CERT_NONE TLS); a certificate already expired on first
+  use is pinned but flagged; and a status-11 input answer is no longer logged.
+
 ### Added
 
-- TBD
+- Optional `input` argument to `gemini_fetch` that percent-encodes a status-10/11
+  answer into the query string (no hand-built query strings; secrets not logged).
+- Per-host outbound rate limiting (`GOPHER_/GEMINI_REQUESTS_PER_MINUTE`, default
+  off) that also honours a Gemini status-44 SLOW_DOWN backoff.
+- Opt-in Gemini MIME content filter (`GEMINI_DENIED_MIME_TYPES`, supports
+  `type/*` wildcards).
+- LLM-facing text render cap (`GOPHER_/GEMINI_MAX_RENDERED_CHARS`, default 50000)
+  with a `truncated` flag, distinct from the network byte cap.
+- Rich tool input schemas (descriptions + examples), `readOnlyHint`/
+  `openWorldHint` tool annotations, a FastMCP `instructions` string, and
+  `--host`/`--port` flags for the sse/streamable-http transports.
 
 ### Changed
 
-- TBD
+- Gemini gemtext results no longer serialize the always-null per-line fields,
+  cutting a typical document's JSON by ~40%.
+- Gopher `ErrorResult` carries a `kind="error"` discriminator; Gemini
+  certificate results carry the 60/61/62 subcode (61/62 are rejections, not
+  prompts); relative Gemini redirects are resolved to absolute URLs.
+- `__version__` is single-sourced from the package metadata.
 
 ### Fixed
 
-- TBD
+- Gopher text responses strip the RFC 1436 `.` terminator and un-dot-stuff
+  lines; known-binary item types route to the binary processor instead of being
+  decoded as text; interactive types (telnet/tn3270/CSO) short-circuit; the
+  type-7 search field is only sent to search servers; menus split on CR/CRLF/LF;
+  and generated `nextUrl`s percent-encode the selector.
+- The Gemini 1024-byte request cap now covers the whole CRLF-terminated line.
+- Replaced the deprecated in-coroutine `asyncio.get_event_loop()` with
+  `get_running_loop()`.
 
 ## [0.3.0] - 2026-06-07
 

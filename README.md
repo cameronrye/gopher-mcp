@@ -58,7 +58,26 @@ Complete documentation is available at **[cameronrye.github.io/gopher-mcp](https
 
 ### Installation
 
-#### Option 1: Development Installation (Recommended)
+#### Option 1: Zero-install with uvx (Recommended)
+
+No clone, no checkout — [uv](https://docs.astral.sh/uv/) fetches and runs the
+published package on demand:
+
+```bash
+uvx gopher-mcp
+```
+
+#### Option 2: PyPI Installation
+
+```bash
+# Install from PyPI
+pip install gopher-mcp
+
+# Or with uv
+uv add gopher-mcp
+```
+
+#### Option 3: Development Installation
 
 ```bash
 # Clone the repository
@@ -74,33 +93,28 @@ scripts\dev-setup.bat   # Windows
 uv run task serve
 ```
 
-#### Option 2: PyPI Installation
-
-```bash
-# Install from PyPI (recommended for end users)
-pip install gopher-mcp
-
-# Or with uv
-uv add gopher-mcp
-```
-
-#### Option 3: Development Installation
-
-```bash
-# Install directly from GitHub
-uv add git+https://github.com/cameronrye/gopher-mcp.git
-
-# Or install in development mode
-git clone https://github.com/cameronrye/gopher-mcp.git
-cd gopher-mcp
-uv sync --all-extras
-```
-
 ### Claude Desktop Integration
 
-Add to your `claude_desktop_config.json`:
+Add to your `claude_desktop_config.json`. The recommended entry uses `uvx`, so
+no clone or local checkout is required:
 
-**Unix/macOS/Linux:**
+```json
+{
+  "mcpServers": {
+    "gopher": {
+      "command": "uvx",
+      "args": ["gopher-mcp"],
+      "env": {
+        "GOPHER_MAX_RESPONSE_SIZE": "1048576",
+        "GOPHER_TIMEOUT_SECONDS": "30"
+      }
+    }
+  }
+}
+```
+
+<details>
+<summary>Alternative: run from a local checkout</summary>
 
 ```json
 {
@@ -117,28 +131,10 @@ Add to your `claude_desktop_config.json`:
 }
 ```
 
-**Windows:**
+On Windows use the absolute path with escaped backslashes
+(`C:\\path\\to\\gopher-mcp`).
 
-```json
-{
-  "mcpServers": {
-    "gopher": {
-      "command": "uv",
-      "args": [
-        "--directory",
-        "C:\\path\\to\\gopher-mcp",
-        "run",
-        "task",
-        "serve"
-      ],
-      "env": {
-        "GOPHER_MAX_RESPONSE_SIZE": "1048576",
-        "GOPHER_TIMEOUT_SECONDS": "30"
-      }
-    }
-  }
-}
-```
+</details>
 
 ## Cross-Platform Development
 
