@@ -200,7 +200,7 @@ class ReleaseValidator:
             "README.md",
             "CHANGELOG.md",
             "docs/migration-guide.md",
-            "docs/release-checklist.md",
+            "docs/RELEASE_CHECKLIST.md",
         ]
 
         missing_docs = []
