@@ -6,6 +6,7 @@ from collections import OrderedDict
 
 import structlog
 
+from .cache import TTLCacheMixin
 from .gopher_transport import GopherProtocolError, decode_gopher_text, fetch_gopher
 from .models import (
     BinaryResult,
@@ -16,8 +17,15 @@ from .models import (
     MenuResult,
     TextResult,
 )
+from .ratelimit import RateLimiter
 from .ssrf import SSRFError, normalize_host, validate_target
-from .utils import detect_binary_mime_type, parse_gopher_menu, parse_gopher_url
+from .utils import (
+    detect_binary_mime_type,
+    gopher_type_category,
+    parse_gopher_menu,
+    parse_gopher_url,
+    truncate_text,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -28,9 +36,36 @@ DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
 DEFAULT_MAX_CACHE_ENTRIES = 1000
 DEFAULT_MAX_SELECTOR_LENGTH = 1024
 DEFAULT_MAX_SEARCH_LENGTH = 256
+DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 
 
-class GopherClient:
+def _strip_gopher_text_terminator(text: str) -> str:
+    """Reverse RFC 1436 text-mode framing.
+
+    Removes a trailing lone-``.`` terminator line and un-dot-stuffs lines that
+    begin with ``..`` (the protocol doubles a leading ``.``). Only a terminator
+    at the very end is removed -- servers that don't dot-stuff could otherwise
+    have a legitimate mid-document ``.`` line truncated.
+    """
+    # Split on LF but keep any trailing '\r' on each line so CRLF is preserved
+    # when we rejoin; remember a final newline so it survives the round-trip.
+    lines = text.split("\n")
+    trailing_newline = bool(lines) and lines[-1] == ""
+    if trailing_newline:
+        lines = lines[:-1]
+
+    # Drop a trailing terminator line ('.' possibly with a trailing '\r').
+    if lines and lines[-1].rstrip("\r") == ".":
+        lines = lines[:-1]
+
+    out = [line[1:] if line.startswith("..") else line for line in lines]
+    result = "\n".join(out)
+    if trailing_newline and result:
+        result += "\n"
+    return result
+
+
+class GopherClient(TTLCacheMixin[GopherFetchResponse]):
     """Async Gopher protocol client with caching and safety features."""
 
     def __init__(
@@ -45,6 +80,8 @@ class GopherClient:
         allow_local_hosts: bool = False,
         max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
+        max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
+        requests_per_minute: float = 0.0,
     ) -> None:
         """Initialize the Gopher client.
 
@@ -66,6 +103,8 @@ class GopherClient:
         self.max_cache_entries = max_cache_entries
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
+        self.max_rendered_chars = max_rendered_chars
+        self._rate_limiter = RateLimiter(requests_per_minute)
 
         self.allow_local_hosts = allow_local_hosts
 
@@ -74,8 +113,10 @@ class GopherClient:
             set(allowed_hosts) if allowed_hosts else None
         )
 
-        # Use OrderedDict for LRU cache implementation
-        self._cache: OrderedDict[str, CacheEntry] = OrderedDict()
+        # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
+        # is inherited from the mixin annotation; only the entry class differs.
+        self._cache = OrderedDict()
+        self._cache_entry_cls = CacheEntry
 
     def _validate_security(self, parsed_url: GopherURL) -> None:
         """Validate security constraints for a Gopher request.
@@ -105,15 +146,17 @@ class GopherClient:
                 f"Search query too long: {len(parsed_url.search)} > {self.max_search_length}"
             )
 
-        # Validate selector doesn't contain dangerous characters
-        if re.search(r"[\r\n\t]", parsed_url.selector):
+        # Validate selector doesn't contain dangerous characters. Reject every
+        # C0 control byte (0x00-0x1f) and DEL (0x7f), not just CR/LF/TAB: a
+        # percent-encoded NUL/ESC is decoded by parse_gopher_url and would
+        # otherwise be sent verbatim inside the single Gopher request line.
+        if re.search(r"[\x00-\x1f\x7f]", parsed_url.selector):
             raise ValueError("Selector contains invalid control characters")
 
-        # Validate search query doesn't contain dangerous characters. TAB is
-        # rejected too: the transport joins selector and search with a literal
-        # TAB, so an unescaped TAB here would inject an extra field into the
-        # single Gopher request line.
-        if parsed_url.search and re.search(r"[\r\n\t]", parsed_url.search):
+        # Same rule for the search query. TAB in particular must be rejected:
+        # the transport joins selector and search with a literal TAB, so an
+        # unescaped TAB here would inject an extra field into the request line.
+        if parsed_url.search and re.search(r"[\x00-\x1f\x7f]", parsed_url.search):
             raise ValueError("Search query contains invalid control characters")
 
         # Validate port range
@@ -162,8 +205,10 @@ class GopherClient:
 
             # Fetch the content
             response = await self._fetch_content(parsed_url)
+            # Merge (not clobber) so any fields a processor attached survive --
+            # matches the Gemini client and avoids a latent maintenance trap.
             if hasattr(response, "request_info"):
-                response.request_info = request_info
+                response.request_info.update(request_info)
 
             # Cache the response
             if self.cache_enabled:
@@ -229,6 +274,25 @@ class GopherClient:
         Returns:
             Appropriate response based on content type
         """
+        gopher_type = parsed_url.gopher_type
+        category = gopher_type_category(gopher_type)
+
+        # Interactive types (telnet/tn3270/CSO) have no Gopher-fetchable body;
+        # don't open a pointless connection (or resolve DNS) -- tell the caller
+        # how to reach the resource instead.
+        if category == "interactive":
+            return ErrorResult(
+                error={
+                    "code": "NOT_FETCHABLE",
+                    "message": (
+                        f"Gopher item type '{gopher_type}' is interactive "
+                        f"(telnet/tn3270/CSO) and has no fetchable content; "
+                        f"connect to {parsed_url.host}:{parsed_url.port} with an "
+                        f"appropriate client."
+                    ),
+                }
+            )
+
         # SSRF guard: reject internal/loopback/link-local targets before
         # connecting, and pin the connection to the exact IPs we validated so
         # the transport can't re-resolve to a rebinding answer.
@@ -238,25 +302,31 @@ class GopherClient:
             allow_local=self.allow_local_hosts,
         )
 
+        # Politeness: space out requests to the same (often small) host.
+        await self._rate_limiter.acquire(parsed_url.host)
+
+        # RFC 1436 only defines the <TAB>query field for type-7 (Index-Search)
+        # servers; never forward a stray search to a plain selector.
+        search = parsed_url.search if gopher_type == "7" else None
+
         raw = await fetch_gopher(
             parsed_url.host,
             parsed_url.port,
             parsed_url.selector,
-            parsed_url.search,
+            search,
             max_bytes=self.max_response_size,
             timeout=self.timeout_seconds,
             connect_addresses=connect_addresses,
         )
 
-        gopher_type = parsed_url.gopher_type
-        if gopher_type in ("1", "7"):
+        if category == "menu":
             # Menu/directory or search results (which are menus)
             return self._process_menu_response(raw)
-        elif gopher_type in ("4", "5", "6", "9", "g", "I"):
+        elif category == "binary":
             # Binary content - return metadata only
             return self._process_binary_response(raw)
         else:
-            # Text (type 0) and unknown types - try as text
+            # Text (type 0, h/HTML, i/info) and unknown types - try as text
             return self._process_text_response(raw)
 
     def _process_menu_response(self, raw: bytes) -> MenuResult:
@@ -288,6 +358,10 @@ class GopherClient:
         """
         text_content, charset = decode_gopher_text(raw)
 
+        # Reverse RFC 1436 text-mode framing before sanitizing: drop a trailing
+        # lone-'.' terminator line and un-dot-stuff lines beginning with '..'.
+        text_content = _strip_gopher_text_terminator(text_content)
+
         # Strip control characters except newlines, carriage returns and tabs.
         sanitized_text = "".join(
             char
@@ -295,10 +369,15 @@ class GopherClient:
             if char.isprintable() or char in ("\n", "\t", "\r")
         )
 
+        # Cap the text handed to the LLM (distinct from the network byte cap);
+        # `bytes` still reports the full original size.
+        rendered, truncated = truncate_text(sanitized_text, self.max_rendered_chars)
+
         return TextResult(
-            text=sanitized_text,
+            text=rendered,
             bytes=len(raw),
             charset=charset,
+            truncated=truncated,
         )
 
     # Note: Search is handled by _process_menu_response since search results are menus
@@ -317,60 +396,7 @@ class GopherClient:
             mimeType=detect_binary_mime_type(raw),
         )
 
-    def _get_cached_response(self, url: str) -> GopherFetchResponse | None:
-        """Get cached response if available and not expired.
-
-        Args:
-            url: Gopher URL
-
-        Returns:
-            Cached response or None
-
-        """
-        if not self.cache_enabled or url not in self._cache:
-            return None
-
-        entry = self._cache[url]
-        current_time = time.time()
-
-        if entry.is_expired(current_time):
-            del self._cache[url]
-            return None
-
-        # Move to end to mark as recently used (LRU)
-        self._cache.move_to_end(url)
-        return entry.value
-
-    def _cache_response(self, url: str, response: GopherFetchResponse) -> None:
-        """Cache a response using LRU eviction strategy.
-
-        Args:
-            url: Gopher URL
-            response: Response to cache
-
-        """
-        if not self.cache_enabled:
-            return
-
-        # Evict least recently used entry if cache is full
-        if (
-            self._cache
-            and len(self._cache) >= self.max_cache_entries
-            and url not in self._cache
-        ):
-            # Remove first item (least recently used)
-            self._cache.popitem(last=False)
-
-        entry = CacheEntry(
-            key=url,
-            value=response,
-            timestamp=time.time(),
-            ttl=self.cache_ttl_seconds,
-        )
-
-        # Add or update entry and move to end (most recently used)
-        self._cache[url] = entry
-        self._cache.move_to_end(url)
+    # _get_cached_response / _cache_response are provided by TTLCacheMixin.
 
     async def close(self) -> None:
         """Close the client and cleanup resources."""

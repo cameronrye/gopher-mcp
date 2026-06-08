@@ -119,6 +119,44 @@ class TestGeminiURLParsing:
         with pytest.raises(ValueError, match=r"Invalid port number|Port out of range"):
             parse_gemini_url("gemini://example.org:70000/")
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "gemini://example.org/a\x00b",  # NUL
+            "gemini://example.org/a\x0bb",  # vertical tab
+            "gemini://example.org/a\x0cb",  # form feed
+            "gemini://example.org/a\rb",  # CR (urlparse silently strips this)
+            "gemini://example.org/a\nb",  # LF (request-line injection shape)
+            "gemini://example.org/a\tb",  # TAB
+            "gemini://example.org/a\x7fb",  # DEL
+        ],
+    )
+    def test_control_characters_rejected(self, url):
+        """Raw control characters anywhere in the URL must be rejected.
+
+        urlparse silently strips CR/LF/TAB, which would otherwise mask a
+        request-line injection attempt; other C0 bytes (NUL/VT/FF) survive into
+        the on-wire request verbatim. Both must fail closed.
+        """
+        with pytest.raises(ValueError, match="control character"):
+            parse_gemini_url(url)
+
+    def test_raw_space_in_path_rejected(self):
+        """A raw (unencoded) space in the path yields a malformed request line."""
+        with pytest.raises(ValueError, match="space"):
+            parse_gemini_url("gemini://example.org/a b")
+
+    def test_url_wire_length_includes_crlf(self):
+        """The on-wire request is ``<url>\\r\\n``; the 1024-byte Gemini cap
+        covers the whole line, so the URL itself must be <= 1022 bytes."""
+        base = "gemini://example.org/"  # 21 bytes
+        ok = base + "a" * (1022 - len(base))  # 1022-byte URL -> 1024 on wire
+        assert parse_gemini_url(ok).host == "example.org"
+
+        too_long = base + "a" * (1023 - len(base))  # 1023-byte URL -> 1025 wire
+        with pytest.raises(ValueError, match="1024 bytes"):
+            parse_gemini_url(too_long)
+
 
 class TestGeminiURLFormatting:
     """Test Gemini URL formatting functionality."""
@@ -517,6 +555,30 @@ class TestGemtextParsingRobustness:
 
         document = parse_gemtext("a\r\nb\nc")
         assert len(document.lines) == 3
+
+    def test_heading_without_space_is_parsed(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        line = parse_gemtext("#NoSpace").lines[0]
+        assert line.type == "heading1"
+        assert line.heading.text == "NoSpace"
+
+    def test_extra_hash_not_kept_in_heading_text(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        # A 4th '#' is content, not a 4th level: cap at H3 and don't leak '#'.
+        line = parse_gemtext("#### four").lines[0]
+        assert line.type == "heading3"
+        assert line.heading.text == "four"
+
+    def test_quote_strips_only_one_leading_space(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        # Convention removes at most one space after '>', preserving intentional
+        # inner indentation of the quoted text.
+        line = parse_gemtext(">  two leading spaces").lines[0]
+        assert line.type == "quote"
+        assert line.quote.text == " two leading spaces"
 
 
 class TestGeminiResponseErrorMessages:

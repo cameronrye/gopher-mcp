@@ -16,6 +16,11 @@ from .utils import atomic_write_json, get_home_directory
 
 logger = structlog.get_logger(__name__)
 
+# Minimum seconds between best-effort last_seen flushes to disk. A new pin or a
+# fingerprint change always persists immediately; only the read-path last_seen
+# touch is throttled.
+SAVE_THROTTLE_SECONDS = 60.0
+
 
 def _parse_expiry(cert_info: dict[str, Any] | None) -> float | None:
     """Extract a certificate expiry (UNIX timestamp) from cert info.
@@ -77,6 +82,8 @@ class TOFUManager:
 
         self.storage_path = storage_path
         self._entries: dict[str, TOFUEntry] = {}
+        # Throttle best-effort last_seen flushes (see validate_certificate).
+        self._last_save_time = 0.0
         self._load_entries()
 
     def _get_key(self, host: str, port: int) -> str:
@@ -180,6 +187,7 @@ class TOFUManager:
 
             self._entries[key] = new_entry
             self._save_entries()
+            self._last_save_time = current_time
 
             logger.info(
                 "New certificate trusted (TOFU)",
@@ -188,7 +196,15 @@ class TOFUManager:
                 fingerprint=cert_fingerprint[:16] + "...",
             )
 
-            return True, f"New certificate for {host}:{port} trusted on first use"
+            message = f"New certificate for {host}:{port} trusted on first use"
+            # Pin it regardless, but flag a cert that is ALREADY expired on first
+            # contact -- a strong signal that something is off.
+            if expires is not None and expires < current_time:
+                message += " (warning: certificate is already expired)"
+                logger.warning(
+                    "First-use certificate is already expired", host=host, port=port
+                )
+            return True, message
 
         else:
             # Check if certificate has changed (constant-time comparison)
@@ -213,9 +229,14 @@ class TOFUManager:
 
                 raise TOFUValidationError(warning, existing_entry)
 
-            # Certificate matches - update last seen time
+            # Certificate matches - update last seen time. This is NOT a
+            # security-relevant change, so don't rewrite the whole trust store on
+            # every request (I/O amplification under batch/polling load); flush
+            # at most once per SAVE_THROTTLE_SECONDS.
             existing_entry.last_seen = current_time
-            self._save_entries()
+            if current_time - self._last_save_time >= SAVE_THROTTLE_SECONDS:
+                self._save_entries()
+                self._last_save_time = current_time
 
             # Check if certificate is expired
             if existing_entry.is_expired(current_time):

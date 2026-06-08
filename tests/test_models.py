@@ -163,6 +163,14 @@ class TestErrorResult:
         assert result.error["code"] == "TIMEOUT"
         assert result.error["message"] == "Connection timeout"
 
+    def test_error_result_has_kind_discriminator(self):
+        """ErrorResult carries kind='error' so 'kind' is a reliable
+        discriminator across every Gopher result (matching MenuResult/TextResult
+        /BinaryResult and GeminiErrorResult)."""
+        result = ErrorResult(error={"code": "X", "message": "y"})
+        assert result.kind == "error"
+        assert result.model_dump()["kind"] == "error"
+
 
 class TestGopherURL:
     """Test GopherURL model."""

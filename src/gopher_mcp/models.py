@@ -5,7 +5,13 @@ from enum import Enum, IntEnum
 from typing import Any, Generic, Literal, TypeVar
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_serializer, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_serializer,
+    field_validator,
+    model_serializer,
+)
 
 
 class GopherFetchRequest(BaseModel):
@@ -64,6 +70,11 @@ class TextResult(BaseModel):
     charset: str = Field(default="utf-8", description="Character encoding")
     bytes: int = Field(..., ge=0, description="Size of content in bytes")
     text: str = Field(..., description="Text content")
+    truncated: bool = Field(
+        default=False,
+        description="True if `text` was truncated to the render limit (`bytes` "
+        "still reports the full original size)",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -93,6 +104,9 @@ class BinaryResult(BaseModel):
 class ErrorResult(BaseModel):
     """Result model for error responses."""
 
+    # 'kind' makes the result self-describing and a reliable discriminator
+    # across every Gopher result type (and matches GeminiErrorResult).
+    kind: Literal["error"] = "error"
     error: dict[str, str] = Field(..., description="Error information")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
@@ -347,6 +361,11 @@ class GeminiSuccessResult(BaseModel):
     )
     content: str | bytes = Field(..., description="Response content")
     size: int = Field(..., ge=0, description="Content size in bytes")
+    truncated: bool = Field(
+        default=False,
+        description="True if text `content` was truncated to the render limit "
+        "(`size` still reports the full original size). Never set for binary.",
+    )
 
     @field_serializer("content")
     def _serialize_content(self, v: str | bytes) -> str:
@@ -410,7 +429,18 @@ class GeminiCertificateResult(BaseModel):
 
     kind: Literal["certificate"] = "certificate"
     message: str = Field(..., description="Certificate-related message")
-    required: bool = Field(default=True, description="Whether certificate is required")
+    status: int = Field(
+        default=60,
+        ge=60,
+        le=69,
+        description="Gemini certificate status code: 60 required, 61 not "
+        "authorized, 62 not valid",
+    )
+    required: bool = Field(
+        default=True,
+        description="Whether the server is prompting for a certificate (status "
+        "60). False for 61/62, which are rejections of a presented identity.",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -513,6 +543,18 @@ class GemtextLine(BaseModel):
     preformat: GemtextPreformat | None = Field(
         None, description="Preformat data (for preformat lines)"
     )
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        """Drop the always-null per-line fields on serialization.
+
+        Every line only populates the one structured field matching its type, so
+        the other six (link/level/alt_text/heading/list_item/quote/preformat)
+        were emitted as ``null`` on every line -- pure token bloat for the LLM.
+        Attribute access is unaffected; only the serialized dict is trimmed.
+        """
+        data: dict[str, Any] = handler(self)
+        return {k: v for k, v in data.items() if v is not None}
 
 
 class GemtextDocument(BaseModel):

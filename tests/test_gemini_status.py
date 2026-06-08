@@ -422,8 +422,30 @@ class TestProcessGeminiResponse:
 
         assert isinstance(result, GeminiRedirectResult)
         assert result.kind == "redirect"
-        assert result.new_url == "/new-location"
+        # The relative target is resolved against the request URL so the caller
+        # gets an absolute URL it can re-fetch (and SSRF-validate).
+        assert result.new_url == "gemini://example.org/new-location"
         assert result.permanent is False
+
+    def test_redirect_resolves_sibling_relative_target(self):
+        """A bare relative reference resolves against the request path."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.TEMPORARY_REDIRECT, meta="sibling", body=None
+        )
+        result = process_gemini_response(response, "gemini://example.org/dir/old")
+        assert isinstance(result, GeminiRedirectResult)
+        assert result.new_url == "gemini://example.org/dir/sibling"
+
+    def test_redirect_preserves_absolute_cross_scheme_target(self):
+        """An absolute target (its own scheme) is passed through unchanged."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.PERMANENT_REDIRECT,
+            meta="https://example.com/web",
+            body=None,
+        )
+        result = process_gemini_response(response, "gemini://example.org/old")
+        assert isinstance(result, GeminiRedirectResult)
+        assert result.new_url == "https://example.com/web"
 
     def test_permanent_redirect_response(self):
         """Test permanent redirect response processing."""
@@ -437,6 +459,56 @@ class TestProcessGeminiResponse:
 
         assert isinstance(result, GeminiRedirectResult)
         assert result.permanent is True
+
+    def test_success_text_response_truncates_to_render_limit(self):
+        """A text/* body beyond the render cap is truncated and flagged."""
+        response = GeminiResponse(status=20, meta="text/plain", body=b"abcdefghij")
+        result = process_gemini_response(
+            response, "gemini://example.org/", max_rendered_chars=5
+        )
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.content == "abcde"
+        assert result.truncated is True
+
+    def test_success_text_response_not_truncated_under_limit(self):
+        response = GeminiResponse(status=20, meta="text/plain", body=b"short")
+        result = process_gemini_response(
+            response, "gemini://example.org/", max_rendered_chars=100
+        )
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.truncated is False
+
+    def test_denied_mime_type_is_filtered(self):
+        """A response whose MIME matches the deny list is rejected, not returned."""
+        from gopher_mcp.models import GeminiErrorResult
+
+        response = GeminiResponse(status=20, meta="text/html", body=b"<h1>hi</h1>")
+        result = process_gemini_response(
+            response,
+            "gemini://example.org/",
+            denied_mime_types=frozenset({"text/html"}),
+        )
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CONTENT_FILTERED"
+
+    def test_denied_mime_wildcard_is_filtered(self):
+        from gopher_mcp.models import GeminiErrorResult
+
+        response = GeminiResponse(status=20, meta="image/png", body=b"\x89PNG")
+        result = process_gemini_response(
+            response, "gemini://example.org/", denied_mime_types=frozenset({"image/*"})
+        )
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CONTENT_FILTERED"
+
+    def test_non_denied_mime_passes(self):
+        response = GeminiResponse(status=20, meta="text/plain", body=b"ok")
+        result = process_gemini_response(
+            response,
+            "gemini://example.org/",
+            denied_mime_types=frozenset({"text/html"}),
+        )
+        assert isinstance(result, GeminiSuccessResult)
 
     def test_temporary_error_response(self):
         """Test temporary error response processing."""
@@ -479,6 +551,37 @@ class TestProcessGeminiResponse:
         assert result.kind == "certificate"
         assert result.message == "Certificate required for access"
         assert result.required is True
+        assert result.status == 60
+
+    def test_certificate_not_authorized_is_a_rejection(self):
+        """Status 61 (NOT_AUTHORIZED) is a rejection, not a prompt for a cert."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.CERTIFICATE_NOT_AUTHORIZED,
+            meta="Certificate not authorized",
+            body=None,
+        )
+
+        result = process_gemini_response(response, "gemini://example.org/private")
+
+        assert isinstance(result, GeminiCertificateResult)
+        assert result.status == 61
+        # The presented identity was refused; the caller must NOT re-prompt for
+        # a (fresh) certificate as if none had been sent.
+        assert result.required is False
+
+    def test_certificate_not_valid_is_a_rejection(self):
+        """Status 62 (NOT_VALID) is a rejection (expired/malformed cert)."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.CERTIFICATE_NOT_VALID,
+            meta="Certificate not valid",
+            body=None,
+        )
+
+        result = process_gemini_response(response, "gemini://example.org/private")
+
+        assert isinstance(result, GeminiCertificateResult)
+        assert result.status == 62
+        assert result.required is False
 
     def test_success_response_empty_body(self):
         """Test success response with empty body."""

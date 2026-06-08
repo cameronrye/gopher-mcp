@@ -63,6 +63,21 @@ class GopherConfig(BaseSettings):
         ge=1,
         le=4096,
     )
+    max_rendered_chars: int = Field(
+        default=50000,
+        description="LLM-facing cap on returned text characters (distinct from "
+        "the network byte cap); 0 = unlimited. Truncation is flagged on the "
+        "result.",
+        ge=0,
+        le=10485760,
+    )
+    requests_per_minute: float = Field(
+        default=0.0,
+        description="Per-host outbound request rate cap (politeness for small "
+        "Gopher servers); 0 = unlimited.",
+        ge=0,
+        le=6000,
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="GOPHER_",
@@ -139,6 +154,27 @@ class GeminiConfig(BaseSettings):
         default=None,
         description="Client certificates storage directory path",
     )
+    max_rendered_chars: int = Field(
+        default=50000,
+        description="LLM-facing cap on returned text characters (distinct from "
+        "the network byte cap); 0 = unlimited. Truncation is flagged on the "
+        "result.",
+        ge=0,
+        le=10485760,
+    )
+    requests_per_minute: float = Field(
+        default=0.0,
+        description="Per-host outbound request rate cap (politeness for small "
+        "Gemini servers); 0 = unlimited. A status-44 SLOW_DOWN is always "
+        "honoured regardless of this setting.",
+        ge=0,
+        le=6000,
+    )
+    denied_mime_types: list[str] = Field(
+        default_factory=list,
+        description="MIME types (or `type/*` wildcards) to reject as filtered "
+        "content, e.g. 'text/html,image/*'; empty = no content filtering.",
+    )
 
     model_config = SettingsConfigDict(
         env_prefix="GEMINI_",
@@ -157,6 +193,16 @@ class GeminiConfig(BaseSettings):
         if isinstance(v, list):
             return v
         return [host.strip() for host in v.split(",") if host.strip()]
+
+    @field_validator("denied_mime_types", mode="before")
+    @classmethod
+    def parse_denied_mime_types(cls, v: None | str | list[str]) -> list[str]:
+        """Parse a comma-separated MIME deny list from an environment variable."""
+        if v is None or v == "":
+            return []
+        if isinstance(v, list):
+            return v
+        return [m.strip().lower() for m in v.split(",") if m.strip()]
 
 
 class ServerConfig(BaseSettings):

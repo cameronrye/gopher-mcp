@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any, Optional, Union
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 from .models import (
     GeminiCertificateResult,
@@ -197,8 +197,10 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         # than dropping the whole menu item.
         port = int(parts[3]) if parts[3].isascii() and parts[3].isdigit() else 70
 
-        # Construct the next URL
-        next_url = f"gopher://{host}:{port}/{item_type}{selector}"
+        # Construct the next URL. Percent-encode the selector (keeping '/')
+        # so a selector containing spaces, '?', '#' or '%' round-trips back
+        # through parse_gopher_url instead of mis-splitting into a bogus query.
+        next_url = f"gopher://{host}:{port}/{item_type}{quote(selector, safe='/')}"
 
         return GopherMenuItem(
             type=item_type,
@@ -224,7 +226,12 @@ def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
     """
     items = []
 
-    for line in content.split("\n"):
+    # Normalize all three RFC 1436 line endings (CRLF), bare LF and legacy
+    # bare CR before splitting -- a CR-only server would otherwise collapse the
+    # whole menu into one unparseable line. Avoid str.splitlines(), which also
+    # breaks on VT/FF/NEL and could split a display string mid-field.
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    for line in normalized.split("\n"):
         item = parse_menu_line(line)
         if item:
             items.append(item)
@@ -345,6 +352,56 @@ def guess_mime_type(gopher_type: str, selector: str = "") -> str:
     return mime_type
 
 
+# Canonical Gopher item-type -> handling category. Single source of truth so
+# the fetch dispatcher and MIME guessing agree on what each type is, instead of
+# maintaining divergent ad-hoc sets. Categories: "menu", "text", "binary",
+# "interactive" (no fetchable body). Unknown types fall back to best-effort text.
+_GOPHER_TYPE_CATEGORY: dict[str, str] = {
+    "0": "text",  # plain text file
+    "1": "menu",  # directory/menu
+    "7": "menu",  # search server (results are a menu)
+    "h": "text",  # HTML (served as text/html)
+    "i": "text",  # informational line
+    "3": "text",  # error
+    "4": "binary",  # BinHexed Macintosh file
+    "5": "binary",  # DOS binary / archive
+    "6": "binary",  # uuencoded file
+    "9": "binary",  # generic binary
+    "g": "binary",  # GIF image
+    "I": "binary",  # image
+    "d": "binary",  # document (PDF/word) by common convention
+    "s": "binary",  # sound
+    ";": "binary",  # video
+    "p": "binary",  # PNG (common extension)
+    "M": "binary",  # MIME multipart message
+    "<": "binary",  # sound (legacy)
+    "2": "interactive",  # CSO name/phone-book server
+    "8": "interactive",  # Telnet session
+    "T": "interactive",  # tn3270 session
+}
+
+
+def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
+    """Truncate ``text`` to an LLM-facing character budget.
+
+    Distinct from the network response-size cap: a 1 MB text page is well under
+    the byte limit yet still ~250k tokens. Returns ``(text, truncated)``; a
+    ``max_chars`` of 0 means unlimited (the truncation is opt-out).
+    """
+    if max_chars and len(text) > max_chars:
+        return text[:max_chars], True
+    return text, False
+
+
+def gopher_type_category(gopher_type: str) -> str:
+    """Return the handling category for a Gopher item type.
+
+    One of ``"menu"``, ``"text"``, ``"binary"`` or ``"interactive"``. Unknown
+    types default to ``"text"`` (best-effort), matching historical behaviour.
+    """
+    return _GOPHER_TYPE_CATEGORY.get(gopher_type, "text")
+
+
 def validate_gopher_response(content: bytes, max_size: int) -> None:
     """Validate a Gopher response.
 
@@ -384,9 +441,18 @@ def parse_gemini_url(url: str) -> GeminiURL:
     if not url.startswith("gemini://"):
         raise ValueError("URL must start with 'gemini://'")
 
-    # Check URL length limit (1024 bytes as per Gemini spec)
-    if len(url.encode("utf-8")) > 1024:
-        raise ValueError("URL must not exceed 1024 bytes")
+    # Reject raw ASCII control characters (C0 range + DEL) anywhere in the URL.
+    # ``urlparse`` silently *strips* CR/LF/TAB, which would otherwise mask a
+    # request-line injection attempt; other C0 bytes (NUL/VT/FF) survive into
+    # the on-wire ``<url>\r\n`` request verbatim. Both must fail closed.
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
+        raise ValueError("URL must not contain control characters")
+
+    # Check URL length limit. The spec's 1024-byte cap applies to the whole
+    # CRLF-terminated request line (``<url>\r\n``), so the URL itself must be
+    # <= 1022 bytes -- not 1024.
+    if len(url.encode("utf-8")) + len(b"\r\n") > 1024:
+        raise ValueError("URL must not exceed 1024 bytes (request line incl. CRLF)")
 
     # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
     # accessed, so the access must live inside the try block for the friendly
@@ -413,6 +479,11 @@ def parse_gemini_url(url: str) -> GeminiURL:
     host = parsed.hostname
     path = parsed.path or "/"  # Default to root path
     query = parsed.query or None  # Query string for user input
+
+    # A raw (unencoded) space in the path/query produces a malformed request
+    # line -- URLs must percent-encode spaces. Reject rather than send garbage.
+    if " " in path or (query is not None and " " in query):
+        raise ValueError("URL path/query must not contain a raw space")
 
     # Reject an explicit invalid port instead of silently coercing it (``0`` is
     # falsy, so the old ``parsed.port or 1965`` rewrote it to the default).
@@ -657,8 +728,10 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
         GemtextLine object if this is a heading, None otherwise
     """
 
+    # Strip the leading marker run, then any extra '#'s (a 4th '#' is content,
+    # not a 4th level -- gemtext only defines H1-H3), then surrounding space.
     if line_content.startswith("###"):
-        heading_text = line_content[3:].strip()
+        heading_text = line_content[3:].lstrip("#").strip()
         heading_obj = GemtextHeading(
             level=3, text=heading_text, raw_content=line_content
         )
@@ -666,7 +739,7 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
             GemtextLineType.HEADING_3, line_content, heading=heading_obj, level=3
         )
     elif line_content.startswith("##"):
-        heading_text = line_content[2:].strip()
+        heading_text = line_content[2:].lstrip("#").strip()
         heading_obj = GemtextHeading(
             level=2, text=heading_text, raw_content=line_content
         )
@@ -674,7 +747,7 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
             GemtextLineType.HEADING_2, line_content, heading=heading_obj, level=2
         )
     elif line_content.startswith("#"):
-        heading_text = line_content[1:].strip()
+        heading_text = line_content[1:].lstrip("#").strip()
         heading_obj = GemtextHeading(
             level=1, text=heading_text, raw_content=line_content
         )
@@ -742,7 +815,9 @@ def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
     """
 
     if line_content.startswith(">"):
-        quote_text = line_content[1:].strip()
+        # Remove at most a single space after '>', preserving any intentional
+        # inner indentation of the quoted text (the gemtext convention).
+        quote_text = line_content[1:].removeprefix(" ")
         quote_obj = GemtextQuote(text=quote_text, raw_content=line_content)
         return _create_gemtext_line(
             GemtextLineType.QUOTE, line_content, quote=quote_obj
@@ -1158,8 +1233,24 @@ def validate_gemini_mime_type(mime_type: "GeminiMimeType") -> bool:
     return True
 
 
+def mime_is_denied(full_type: str, denied: "frozenset[str] | set[str]") -> bool:
+    """Whether ``full_type`` matches a deny-list entry (exact or ``type/*``)."""
+    if not denied:
+        return False
+    full = full_type.lower()
+    if full in denied:
+        return True
+    top = full.split("/", 1)[0]
+    return f"{top}/*" in denied
+
+
 def process_gemini_response(
-    response: "GeminiResponse", request_url: str, request_time: float | None = None
+    response: "GeminiResponse",
+    request_url: str,
+    request_time: float | None = None,
+    *,
+    max_rendered_chars: int = 0,
+    denied_mime_types: "frozenset[str] | None" = None,
 ) -> "GeminiFetchResponse":
     """Process Gemini response based on status code.
 
@@ -1167,6 +1258,10 @@ def process_gemini_response(
         response: Parsed Gemini response
         request_url: Original request URL
         request_time: Request timestamp (defaults to current time)
+        max_rendered_chars: LLM-facing cap on returned text characters
+            (0 = unlimited). Only applies to textual success bodies.
+        denied_mime_types: MIME types (or ``type/*`` wildcards) to reject on a
+            success response; empty/None = no content filtering.
 
     Returns:
         Appropriate response result object based on status code
@@ -1197,7 +1292,13 @@ def process_gemini_response(
 
     # Success: status codes 20 through 29
     elif 20 <= status_code <= 29:
-        return _process_success_response(meta, body, request_info)
+        return _process_success_response(
+            meta,
+            body,
+            request_info,
+            max_rendered_chars=max_rendered_chars,
+            denied_mime_types=denied_mime_types,
+        )
 
     # Redirect: status codes 30 through 39
     elif 30 <= status_code <= 39:
@@ -1213,7 +1314,7 @@ def process_gemini_response(
 
     # Client certificate required (60-69)
     elif 60 <= status_code <= 69:
-        return _process_certificate_response(meta, request_info)
+        return _process_certificate_response(status_code, meta, request_info)
 
     else:
         # This shouldn't happen due to validation in parse_gemini_response
@@ -1251,17 +1352,26 @@ def _process_input_response(
 
 
 def _process_success_response(
-    meta: str, body: bytes | None, request_info: dict[str, Any]
-) -> Union["GeminiSuccessResult", "GeminiGemtextResult"]:
+    meta: str,
+    body: bytes | None,
+    request_info: dict[str, Any],
+    *,
+    max_rendered_chars: int = 0,
+    denied_mime_types: "frozenset[str] | None" = None,
+) -> Union["GeminiSuccessResult", "GeminiGemtextResult", "GeminiErrorResult"]:
     """Process success response (status 20-29).
 
     Args:
         meta: MIME type string
         body: Response body bytes
         request_info: Request information
+        max_rendered_chars: LLM-facing cap on returned text characters
+            (0 = unlimited); applies to textual bodies only, never binary.
+        denied_mime_types: MIME types (or ``type/*``) to reject as filtered.
 
     Returns:
-        GeminiSuccessResult or GeminiGemtextResult based on content type
+        GeminiSuccessResult / GeminiGemtextResult, or GeminiErrorResult if the
+        content type is on the deny list.
 
     Raises:
         ValueError: If MIME type is invalid or body is missing
@@ -1298,6 +1408,18 @@ def _process_success_response(
 
     size = len(body)
 
+    # Content filtering: reject a denied MIME type before decoding/returning it.
+    if denied_mime_types and mime_is_denied(mime_type.full_type, denied_mime_types):
+        return GeminiErrorResult(
+            error={
+                "code": "CONTENT_FILTERED",
+                "message": f"Content type '{mime_type.full_type}' is blocked by "
+                f"the configured content filter",
+                "mimeType": mime_type.full_type,
+            },
+            requestInfo=request_info,
+        )
+
     # Handle gemtext content specially
     if mime_type.is_gemtext:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
@@ -1318,10 +1440,13 @@ def _process_success_response(
     elif mime_type.is_text:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        # Cap the text handed to the LLM; `size` still reports the full bytes.
+        rendered, truncated = truncate_text(content, max_rendered_chars)
         return GeminiSuccessResult(
             mimeType=mime_type,
-            content=content,
+            content=rendered,
             size=size,
+            truncated=truncated,
             requestInfo=request_info,
         )
 
@@ -1380,11 +1505,37 @@ def _process_redirect_response(
 
     permanent = status_code == GeminiStatusCode.PERMANENT_REDIRECT.value
 
+    base_url = str(request_info.get("url", ""))
+    resolved = _resolve_gemini_reference(base_url, meta) if base_url else meta
+
     return GeminiRedirectResult(
-        newUrl=meta,
+        newUrl=resolved,
         permanent=permanent,
         requestInfo=request_info,
     )
+
+
+def _resolve_gemini_reference(base_url: str, target: str) -> str:
+    """Resolve a (possibly relative) Gemini redirect target against ``base_url``.
+
+    ``urllib.parse.urljoin`` doesn't treat ``gemini`` as a hierarchical scheme,
+    so relative references would pass through unresolved. Resolve under an
+    ``https`` placeholder (which urljoin understands) and swap the scheme back.
+    An absolute reference that carries its own scheme (gemini://, https://, ...)
+    is returned unchanged so the caller/SSRF layer can inspect cross-scheme or
+    cross-host redirects.
+    """
+    if urlparse(target).scheme:  # already absolute
+        return target
+
+    if not base_url.startswith("gemini://"):
+        return urljoin(base_url, target)
+
+    placeholder_base = "https://" + base_url[len("gemini://") :]
+    joined = urljoin(placeholder_base, target)
+    if joined.startswith("https://"):
+        return "gemini://" + joined[len("https://") :]
+    return joined
 
 
 def _process_error_response(
@@ -1416,20 +1567,34 @@ def _process_error_response(
 
 
 def _process_certificate_response(
-    meta: str, request_info: dict[str, Any]
+    status_code: int, meta: str, request_info: dict[str, Any]
 ) -> "GeminiCertificateResult":
     """Process certificate request response (status 60-62).
 
+    The three subcodes mean different things and must not be collapsed:
+
+    * 60 CERTIFICATE_REQUIRED -- the server is prompting the client to present
+      a certificate and retry (``required=True``).
+    * 61 CERTIFICATE_NOT_AUTHORIZED -- the presented identity was refused.
+    * 62 CERTIFICATE_NOT_VALID -- the presented certificate is expired/invalid.
+
+    61 and 62 are *rejections*, so ``required`` is False: re-prompting for a
+    fresh certificate (as if none had been sent) would just loop.
+
     Args:
-        meta: Certificate-related message
-        request_info: Request information
+        status_code: Gemini status code (60-69).
+        meta: Certificate-related message.
+        request_info: Request information.
 
     Returns:
-        GeminiCertificateResult object
+        GeminiCertificateResult object.
     """
+
+    required = status_code == GeminiStatusCode.CERTIFICATE_REQUIRED.value
 
     return GeminiCertificateResult(
         message=meta,
-        required=True,
+        status=status_code,
+        required=required,
         requestInfo=request_info,
     )

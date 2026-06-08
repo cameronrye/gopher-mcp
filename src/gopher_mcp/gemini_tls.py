@@ -174,7 +174,7 @@ class GeminiTLSClient:
             sock.settimeout(timeout)
 
             # Connect to the pinned IP (no DNS re-resolution).
-            await asyncio.get_event_loop().run_in_executor(
+            await asyncio.get_running_loop().run_in_executor(
                 None, sock.connect, (target_ip, port)
             )
 
@@ -187,7 +187,9 @@ class GeminiTLSClient:
             )
 
             # Perform TLS handshake
-            await asyncio.get_event_loop().run_in_executor(None, ssl_sock.do_handshake)
+            await asyncio.get_running_loop().run_in_executor(
+                None, ssl_sock.do_handshake
+            )
 
             # Get connection information
             connection_time = time.time() - start_time
@@ -301,7 +303,7 @@ class GeminiTLSClient:
         """
         try:
             # Send TLS close_notify alert
-            await asyncio.get_event_loop().run_in_executor(None, ssl_sock.unwrap)
+            await asyncio.get_running_loop().run_in_executor(None, ssl_sock.unwrap)
         except Exception as e:
             logger.warning("Error during TLS close_notify", error=str(e))
         finally:
@@ -322,7 +324,9 @@ class GeminiTLSClient:
             TLSConnectionError: If send fails
         """
         try:
-            await asyncio.get_event_loop().run_in_executor(None, ssl_sock.sendall, data)
+            await asyncio.get_running_loop().run_in_executor(
+                None, ssl_sock.sendall, data
+            )
         except Exception as e:
             raise TLSConnectionError(f"Failed to send data: {e}", e) from e
 

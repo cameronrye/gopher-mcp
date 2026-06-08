@@ -84,12 +84,14 @@ class TaskRunner:
             },
             # Code quality
             "lint": {
-                "cmd": "ruff check src/ tests/",
+                # Whole-repo to match CI (`ruff check .`); scoping to src/tests
+                # lets violations in task.py/scripts/ pass locally but fail CI.
+                "cmd": "ruff check .",
                 "desc": "Run ruff linting",
                 "category": "Code Quality",
             },
             "format": {
-                "cmd": "ruff format src/ tests/",
+                "cmd": "ruff format .",
                 "desc": "Format code with ruff",
                 "category": "Code Quality",
             },

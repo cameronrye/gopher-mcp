@@ -26,6 +26,12 @@ class SSRFError(ValueError):
     """Raised when a target host/address is blocked by the SSRF policy."""
 
 
+# Deprecated IPv6 site-local prefix. CPython reports ``fec0::/10`` as
+# ``is_global=True`` (it predates the modern special-registry rules), so the
+# generic ``not is_global`` catch-all below would miss it -- block it explicitly.
+_IPV6_SITE_LOCAL = ipaddress.ip_network("fec0::/10")
+
+
 # Ports for non-Gopher/Gemini services an SSRF could otherwise be steered to
 # poke. Blocked as defense-in-depth -- this complements (does not replace) the
 # internal-address checks. Gopher (70) and Gemini (1965) are deliberately absent.
@@ -84,6 +90,10 @@ def classify_blocked_ip(value: str) -> str | None:
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
 
+    # Deprecated IPv6 site-local needs an explicit check (see _IPV6_SITE_LOCAL).
+    if isinstance(ip, ipaddress.IPv6Address) and ip in _IPV6_SITE_LOCAL:
+        return "site-local"
+
     # Order matters: check specific categories before the broad is_private,
     # which in CPython also covers loopback/link-local/unspecified ranges.
     if ip.is_loopback:
@@ -98,6 +108,13 @@ def classify_blocked_ip(value: str) -> str | None:
         return "private"
     if ip.is_reserved:
         return "reserved"
+
+    # Catch-all: anything not globally routable that the specific checks above
+    # missed -- CGNAT (RFC 6598, 100.64.0.0/10), benchmarking, future-use, etc.
+    # Inverting on is_global future-proofs the denylist against new non-public
+    # ranges without enumerating each one.
+    if not ip.is_global:
+        return "non-global"
     return None
 
 
@@ -106,7 +123,7 @@ async def resolve_host(host: str, port: int) -> list[str]:
 
     Isolated in its own function so tests can stub DNS deterministically.
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     return [info[4][0] for info in infos]
 

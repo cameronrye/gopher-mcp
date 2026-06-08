@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "gopher-mcp"
 version = "0.3.0"
-description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher resources"
+description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher and Gemini resources"
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]
@@ -204,9 +204,10 @@ exclude_lines = [
 dev-setup = "bash scripts/dev-setup.sh"
 install-hooks = "pre-commit install"
 
-# Code quality
-lint = "ruff check src/ tests/"
-format = "ruff format src/ tests/"
+# Code quality (whole-repo to match CI's `ruff check .`; scoping to src/tests
+# hides violations in task.py/scripts/ that CI would still fail on)
+lint = "ruff check ."
+format = "ruff format ."
 typecheck = "mypy src/ --ignore-missing-imports"
 quality = "uv run task lint && uv run task typecheck && uv run task test"
 

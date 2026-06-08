@@ -1,10 +1,13 @@
 """Main MCP server implementation for Gopher and Gemini protocols."""
 
 import asyncio
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
+from urllib.parse import quote
 
 import structlog
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from .config import get_config
 from .gemini_client import GeminiClient
@@ -13,8 +16,69 @@ from .models import GeminiFetchRequest, GopherFetchRequest
 
 logger = structlog.get_logger(__name__)
 
+# High-level guidance surfaced to the model by MCP clients.
+SERVER_INSTRUCTIONS = (
+    "Browse Gopher and Gemini resources. Use gopher_fetch for gopher:// URLs and "
+    "gemini_fetch for gemini:// URLs; the *_batch_fetch variants take several "
+    "URLs at once. Navigate by following the `nextUrl` field of Gopher menu "
+    "items and the `links` of Gemini gemtext documents. Binary and oversize "
+    "bodies are returned as metadata only (no raw bytes). On a Gemini status-10 "
+    "or status-11 (input) response, call gemini_fetch again with the `input` "
+    "argument set to the user's answer rather than building a query string by "
+    "hand. All fetches are read-only and may reach arbitrary external hosts."
+)
+
+# Read-only network fetchers reaching arbitrary external hosts -- exactly what
+# readOnlyHint/openWorldHint signal to clients for consent and safe invocation.
+_FETCH_ANNOTATIONS = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+
+# Rich, LLM-facing parameter schemas. Description + examples reach the model via
+# FastMCP's generated inputSchema; we deliberately do NOT add a `pattern`
+# constraint so an invalid URL still returns a structured error (the no-raise
+# contract) instead of a FastMCP ToolError.
+_GopherUrl = Annotated[
+    str,
+    Field(
+        description=(
+            "A full gopher:// URL. The first path character is the item type "
+            "(1=menu, 0=text file, 7=search). Follow `nextUrl` from menu items "
+            "to navigate. Example: gopher://gopher.floodgap.com/1/"
+        ),
+        examples=[
+            "gopher://gopher.floodgap.com/1/",
+            "gopher://gopher.floodgap.com/0/gopher/proxy",
+            "gopher://gopher.floodgap.com/7/v2/vs",
+        ],
+    ),
+]
+_GeminiUrl = Annotated[
+    str,
+    Field(
+        description=(
+            "A full gemini:// URL, e.g. gemini://geminiprotocol.net/ . On a "
+            "status-10/11 input response, call again with the `input` argument "
+            "set to the user's answer instead of hand-building a query string."
+        ),
+        examples=[
+            "gemini://geminiprotocol.net/",
+            "gemini://kennedy.gemi.dev/",
+        ],
+    ),
+]
+_GeminiInput = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Optional answer to a Gemini status-10/11 input prompt. It is "
+            "percent-encoded and sent as the query string, so pass the raw "
+            "answer (spaces, &, = and unicode are handled for you). Replaces any "
+            "query already present in `url`."
+        ),
+    ),
+]
+
 # Initialize FastMCP server
-mcp = FastMCP("gopher-mcp")
+mcp = FastMCP("gopher-mcp", instructions=SERVER_INSTRUCTIONS)
 
 # Bounds for the batch tools: cap the list length and the number of in-flight
 # connections so a caller (or attacker-steered model) cannot fan out an
@@ -62,6 +126,8 @@ class ClientManager:
                     allow_local_hosts=gopher_config.allow_local_hosts,
                     max_selector_length=gopher_config.max_selector_length,
                     max_search_length=gopher_config.max_search_length,
+                    max_rendered_chars=gopher_config.max_rendered_chars,
+                    requests_per_minute=gopher_config.requests_per_minute,
                 )
                 logger.info(
                     "Gopher client initialized",
@@ -102,6 +168,9 @@ class ClientManager:
                     tofu_storage_path=tofu_path,
                     client_certs_enabled=gemini_config.client_certs_enabled,
                     client_certs_storage_path=client_certs_path,
+                    max_rendered_chars=gemini_config.max_rendered_chars,
+                    requests_per_minute=gemini_config.requests_per_minute,
+                    denied_mime_types=gemini_config.denied_mime_types,
                 )
                 logger.info(
                     "Gemini client initialized",
@@ -135,8 +204,8 @@ async def get_client_manager() -> ClientManager:
     return _client_manager
 
 
-@mcp.tool()
-async def gopher_fetch(url: str) -> dict[str, Any]:
+@mcp.tool(annotations=_FETCH_ANNOTATIONS, title="Fetch Gopher resource")
+async def gopher_fetch(url: _GopherUrl) -> dict[str, Any]:
     """Fetch Gopher menus or text by URL.
 
     Supports all standard Gopher item types including menus (type 1),
@@ -175,8 +244,8 @@ async def gopher_fetch(url: str) -> dict[str, Any]:
         ).model_dump()
 
 
-@mcp.tool()
-async def gemini_fetch(url: str) -> dict[str, Any]:
+@mcp.tool(annotations=_FETCH_ANNOTATIONS, title="Fetch Gemini resource")
+async def gemini_fetch(url: _GeminiUrl, input: _GeminiInput = None) -> dict[str, Any]:
     """Fetch Gemini content by URL.
 
     Supports the Gemini protocol with TLS, TOFU certificate validation,
@@ -185,14 +254,25 @@ async def gemini_fetch(url: str) -> dict[str, Any]:
 
     Args:
         url: Full Gemini URL to fetch (e.g., gemini://gemini.circumlunar.space/)
+        input: Optional answer to a status-10/11 input prompt; it is
+            percent-encoded and sent as the query string.
 
     """
     from .models import GeminiErrorResult
 
+    # When answering a status-10/11 prompt, percent-encode the raw input and set
+    # it as the query string so the model never hand-builds query strings (and
+    # spaces/&/=/unicode survive). Replaces any query/fragment already present.
+    effective_url = url
+    if input is not None:
+        base = url.split("#", 1)[0].split("?", 1)[0]
+        effective_url = f"{base}?{quote(input, safe='')}"
+
     # Validate separately so a bad URL becomes a sanitized, structured error
     # instead of a raised ValidationError surfaced to the model as a ToolError.
+    # Log only the base `url`, never the (possibly sensitive) input answer.
     try:
-        request = GeminiFetchRequest(url=url)
+        request = GeminiFetchRequest(url=effective_url)
     except Exception as e:
         logger.info("Rejected invalid Gemini URL", url=url, error=str(e))
         return GeminiErrorResult(
@@ -213,7 +293,7 @@ async def gemini_fetch(url: str) -> dict[str, Any]:
         ).model_dump()
 
 
-@mcp.tool()
+@mcp.tool(annotations=_FETCH_ANNOTATIONS, title="Fetch multiple Gopher resources")
 async def gopher_batch_fetch(urls: list[str]) -> list[dict[str, Any]]:
     """Fetch multiple Gopher URLs in parallel for improved performance.
 
@@ -282,7 +362,7 @@ async def gopher_batch_fetch(urls: list[str]) -> list[dict[str, Any]]:
     return list(results)
 
 
-@mcp.tool()
+@mcp.tool(annotations=_FETCH_ANNOTATIONS, title="Fetch multiple Gemini resources")
 async def gemini_batch_fetch(urls: list[str]) -> list[dict[str, Any]]:
     """Fetch multiple Gemini URLs in parallel for improved performance.
 

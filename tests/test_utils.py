@@ -9,8 +9,23 @@ from gopher_mcp.utils import (
     parse_gopher_url,
     parse_menu_line,
     sanitize_selector,
+    truncate_text,
     validate_gopher_response,
 )
+
+
+class TestTruncateText:
+    """Test the LLM-facing render-limit helper."""
+
+    def test_under_limit_unchanged(self):
+        assert truncate_text("hello", 10) == ("hello", False)
+
+    def test_over_limit_flagged(self):
+        assert truncate_text("hello world", 5) == ("hello", True)
+
+    def test_zero_means_unlimited(self):
+        big = "x" * 10000
+        assert truncate_text(big, 0) == (big, False)
 
 
 class TestParseGopherUrl:

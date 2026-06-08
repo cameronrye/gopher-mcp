@@ -6,6 +6,7 @@ from collections import OrderedDict
 
 import structlog
 
+from .cache import TTLCacheMixin
 from .client_certs import ClientCertificateManager
 from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnectionError
 from .models import (
@@ -16,6 +17,7 @@ from .models import (
     GeminiURL,
     TOFUEntry,
 )
+from .ratelimit import RateLimiter
 from .ssrf import SSRFError, normalize_host, validate_target
 from .tofu import TOFUManager, TOFUValidationError
 from .utils import (
@@ -31,9 +33,10 @@ DEFAULT_MAX_RESPONSE_SIZE = 1024 * 1024  # 1MB
 DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
 DEFAULT_MAX_CACHE_ENTRIES = 1000
+DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 
 
-class GeminiClient:
+class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
     """Async Gemini protocol client with TLS, caching and safety features."""
 
     def __init__(
@@ -51,6 +54,9 @@ class GeminiClient:
         tofu_storage_path: str | None = None,
         client_certs_enabled: bool = True,
         client_certs_storage_path: str | None = None,
+        max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
+        requests_per_minute: float = 0.0,
+        denied_mime_types: list[str] | None = None,
     ) -> None:
         """Initialize the Gemini client.
 
@@ -72,6 +78,9 @@ class GeminiClient:
         self.cache_enabled = cache_enabled
         self.cache_ttl_seconds = cache_ttl_seconds
         self.max_cache_entries = max_cache_entries
+        self.max_rendered_chars = max_rendered_chars
+        self._rate_limiter = RateLimiter(requests_per_minute)
+        self.denied_mime_types = frozenset(denied_mime_types or ())
         self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
         self.allow_local_hosts = allow_local_hosts
         self.tofu_enabled = tofu_enabled
@@ -86,6 +95,15 @@ class GeminiClient:
         self.tofu_manager: TOFUManager | None = None
         if self.tofu_enabled:
             self.tofu_manager = TOFUManager(tofu_storage_path)
+        else:
+            # Gemini TLS runs with CERT_NONE, so TOFU is the ONLY peer
+            # authentication. Disabling it leaves every connection unauthenticated
+            # and trivially MITM-able -- make that loud rather than a silent toggle.
+            logger.warning(
+                "TOFU is DISABLED: Gemini connections are unauthenticated "
+                "(CERT_NONE TLS with no certificate pinning) and vulnerable to "
+                "active MITM. Re-enable TOFU unless you fully trust the network."
+            )
 
         # Initialize client certificate manager
         self.client_cert_manager: ClientCertificateManager | None = None
@@ -94,8 +112,10 @@ class GeminiClient:
                 client_certs_storage_path
             )
 
-        # Use OrderedDict for LRU cache implementation
-        self._cache: OrderedDict[str, GeminiCacheEntry] = OrderedDict()
+        # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
+        # is inherited from the mixin annotation; only the entry class differs.
+        self._cache = OrderedDict()
+        self._cache_entry_cls = GeminiCacheEntry
 
     def _validate_security(self, parsed_url: GeminiURL) -> None:
         """Validate security constraints for a Gemini request.
@@ -137,9 +157,11 @@ class GeminiClient:
             if self.cache_enabled:
                 cached_response = self._get_cached_response(url)
                 if cached_response:
+                    # Log without the query string: a status-10/11 answer (which
+                    # the caller percent-encodes into the query) may be a secret.
                     logger.debug(
                         "Cache hit",
-                        url=url,
+                        url=f"gemini://{parsed_url.host}:{parsed_url.port}{parsed_url.path}",
                         cached=True,
                         response_type=getattr(cached_response, "kind", "unknown"),
                         response_size=getattr(cached_response, "size", 0),
@@ -159,6 +181,11 @@ class GeminiClient:
             # Fetch the content
             response = await self._fetch_content(parsed_url)
 
+            # Honour a server SLOW_DOWN (status 44): back off this host for the
+            # advertised number of seconds (meta) regardless of the configured
+            # rate limit, so we don't keep hammering a server asking us to wait.
+            self._maybe_honor_slow_down(parsed_url.host, response)
+
             # Add request info to response
             if hasattr(response, "request_info"):
                 response.request_info.update(request_info)
@@ -175,15 +202,16 @@ class GeminiClient:
             ):
                 self._cache_response(url, response)
 
-            # Full URL/path/query are request metadata; keep them at DEBUG so
-            # default INFO logs don't record every browsed resource/query.
+            # Host/port/path are request metadata; keep them at DEBUG so default
+            # INFO logs don't record every browsed resource. The query is NOT
+            # logged: a status-10/11 input answer is carried there and may be a
+            # secret (status 11). Record only whether a query was present.
             logger.debug(
                 "Gemini fetch successful",
-                url=url,
                 host=parsed_url.host,
                 port=parsed_url.port,
                 path=parsed_url.path,
-                query=parsed_url.query,
+                has_query=bool(parsed_url.query),
                 response_type=getattr(response, "kind", "unknown"),
                 response_size=getattr(response, "size", 0),
                 cached=False,
@@ -228,6 +256,23 @@ class GeminiClient:
             requestInfo={"url": url, "timestamp": time.time()},
         )
 
+    def _maybe_honor_slow_down(self, host: str, response: GeminiFetchResponse) -> None:
+        """If ``response`` is a status-44 SLOW_DOWN, back off this host.
+
+        The Gemini spec says the meta of a 44 is the number of seconds to wait;
+        fall back to a conservative default if it isn't a plain number.
+        """
+        if not isinstance(response, GeminiErrorResult):
+            return
+        if response.error.get("status") != 44:
+            return
+        message = response.error.get("message", "")
+        try:
+            seconds = float(str(message).strip())
+        except (TypeError, ValueError):
+            seconds = 60.0
+        self._rate_limiter.penalize(host, seconds)
+
     async def _fetch_content(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
         """Fetch content from parsed Gemini URL using TLS.
 
@@ -253,6 +298,10 @@ class GeminiClient:
             connect_ip = next(
                 (a for a in connect_addresses if ":" not in a), connect_addresses[0]
             )
+
+            # Politeness: space out requests to the same host (and honour any
+            # outstanding status-44 backoff for it).
+            await self._rate_limiter.acquire(parsed_url.host)
 
             # Check for client certificate
             client_cert_path = None
@@ -365,7 +414,13 @@ class GeminiClient:
             parsed_response = parse_gemini_response(raw_response)
 
             # Process response based on status code
-            result = process_gemini_response(parsed_response, request_url, time.time())
+            result = process_gemini_response(
+                parsed_response,
+                request_url,
+                time.time(),
+                max_rendered_chars=self.max_rendered_chars,
+                denied_mime_types=self.denied_mime_types,
+            )
 
             # Add connection info to request info
             if hasattr(result, "request_info"):
@@ -390,60 +445,7 @@ class GeminiClient:
             if ssl_sock:
                 await self.tls_client.close(ssl_sock)
 
-    def _get_cached_response(self, url: str) -> GeminiFetchResponse | None:
-        """Get cached response if available and not expired.
-
-        Args:
-            url: Gemini URL
-
-        Returns:
-            Cached response or None
-
-        """
-        if not self.cache_enabled or url not in self._cache:
-            return None
-
-        entry = self._cache[url]
-        current_time = time.time()
-
-        if entry.is_expired(current_time):
-            del self._cache[url]
-            return None
-
-        # Move to end to mark as recently used (LRU)
-        self._cache.move_to_end(url)
-        return entry.value
-
-    def _cache_response(self, url: str, response: GeminiFetchResponse) -> None:
-        """Cache a response using LRU eviction strategy.
-
-        Args:
-            url: Gemini URL
-            response: Response to cache
-
-        """
-        if not self.cache_enabled:
-            return
-
-        # Evict least recently used entry if cache is full
-        if (
-            self._cache
-            and len(self._cache) >= self.max_cache_entries
-            and url not in self._cache
-        ):
-            # Remove first item (least recently used)
-            self._cache.popitem(last=False)
-
-        entry = GeminiCacheEntry(
-            key=url,
-            value=response,
-            timestamp=time.time(),
-            ttl=self.cache_ttl_seconds,
-        )
-
-        # Add or update entry and move to end (most recently used)
-        self._cache[url] = entry
-        self._cache.move_to_end(url)
+    # _get_cached_response / _cache_response are provided by TTLCacheMixin.
 
     def update_tofu_certificate(
         self, host: str, port: int, cert_fingerprint: str, force: bool = False

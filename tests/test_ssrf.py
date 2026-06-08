@@ -39,6 +39,9 @@ class TestClassifyBlockedIp:
             ("0.0.0.0", "unspecified"),
             ("224.0.0.1", "multicast"),
             ("::ffff:127.0.0.1", "loopback"),  # IPv4-mapped IPv6
+            ("100.64.0.1", "non-global"),  # CGNAT / RFC 6598
+            ("100.127.255.255", "non-global"),  # CGNAT upper bound
+            ("fec0::1", "site-local"),  # deprecated IPv6 site-local
         ],
     )
     def test_blocked_ips(self, ip, reason):
@@ -62,7 +65,15 @@ class TestValidateTarget:
 
     @pytest.mark.parametrize(
         "host",
-        ["127.0.0.1", "::1", "10.0.0.5", "169.254.169.254", "[::ffff:127.0.0.1]"],
+        [
+            "127.0.0.1",
+            "::1",
+            "10.0.0.5",
+            "169.254.169.254",
+            "[::ffff:127.0.0.1]",
+            "100.64.0.1",  # CGNAT (RFC 6598) — used for internal infra
+            "[fec0::1]",  # deprecated IPv6 site-local
+        ],
     )
     async def test_internal_ip_literal_blocked(self, host):
         with pytest.raises(SSRFError, match="Blocked"):

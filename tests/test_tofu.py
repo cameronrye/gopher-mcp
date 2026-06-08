@@ -223,6 +223,41 @@ class TestTOFUManager:
             entry = manager._entries["example.com:1965"]
             assert entry.expires is None
 
+    def test_validate_certificate_first_use_expired_warns(self):
+        """A cert already past notAfter on first use is pinned but flagged."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+
+            cert_info = {"notAfter": "Jan 01 00:00:00 2020 GMT"}
+            with patch("time.time", return_value=1893456000):  # year ~2030
+                is_valid, warning = manager.validate_certificate(
+                    "example.com", 1965, "abc123", cert_info
+                )
+
+            assert is_valid is True  # TOFU still pins it
+            assert warning is not None
+            assert "expired" in warning.lower()
+
+    def test_last_seen_save_is_throttled(self):
+        """A matching re-validation only touches last_seen; it must not rewrite
+        the whole trust store to disk on every request (I/O amplification)."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+
+            with patch("time.time", return_value=1000):
+                manager.validate_certificate("h.example", 1965, "fp")  # first-use save
+
+            with patch.object(manager, "_save_entries") as mock_save:
+                with patch("time.time", return_value=1010):  # within throttle window
+                    manager.validate_certificate("h.example", 1965, "fp")
+                assert mock_save.call_count == 0  # last_seen touch, no disk write
+
+                with patch("time.time", return_value=2000):  # > interval later
+                    manager.validate_certificate("h.example", 1965, "fp")
+                assert mock_save.call_count == 1  # now flushed
+
     def test_validate_certificate_sha256_prefix(self):
         """Test validating certificate with sha256: prefix."""
         with tempfile.TemporaryDirectory() as temp_dir:

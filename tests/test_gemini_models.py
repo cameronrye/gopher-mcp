@@ -337,6 +337,29 @@ class TestGemtextModels:
         assert line.level is None
         assert line.alt_text is None
 
+    def test_gemtext_line_serialization_omits_null_fields(self):
+        """The serialized line drops the always-null per-line fields to cut LLM
+        token cost (a text line carried 7 null fields before)."""
+        line = GemtextLine(type=GemtextLineType.TEXT, content="hello")
+        assert line.model_dump() == {"type": "text", "content": "hello"}
+
+    def test_gemtext_line_serialization_keeps_populated_fields(self):
+        """Populated structured fields still serialize."""
+        from gopher_mcp.models import GemtextHeading
+
+        line = GemtextLine(
+            type=GemtextLineType.HEADING_1,
+            content="# Hi",
+            level=1,
+            heading=GemtextHeading(level=1, text="Hi", raw_content="# Hi"),
+        )
+        dumped = line.model_dump()
+        assert dumped["level"] == 1
+        assert dumped["heading"]["text"] == "Hi"
+        # ...but the unrelated null fields are gone.
+        for absent in ("link", "alt_text", "list_item", "quote", "preformat"):
+            assert absent not in dumped
+
     def test_gemtext_line_link(self):
         """Test link line."""
         link = GemtextLink(url="/about", text="About")
