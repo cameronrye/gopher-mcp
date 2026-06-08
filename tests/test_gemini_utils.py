@@ -146,6 +146,17 @@ class TestGeminiURLParsing:
         with pytest.raises(ValueError, match="space"):
             parse_gemini_url("gemini://example.org/a b")
 
+    def test_url_wire_length_includes_crlf(self):
+        """The on-wire request is ``<url>\\r\\n``; the 1024-byte Gemini cap
+        covers the whole line, so the URL itself must be <= 1022 bytes."""
+        base = "gemini://example.org/"  # 21 bytes
+        ok = base + "a" * (1022 - len(base))  # 1022-byte URL -> 1024 on wire
+        assert parse_gemini_url(ok).host == "example.org"
+
+        too_long = base + "a" * (1023 - len(base))  # 1023-byte URL -> 1025 wire
+        with pytest.raises(ValueError, match="1024 bytes"):
+            parse_gemini_url(too_long)
+
 
 class TestGeminiURLFormatting:
     """Test Gemini URL formatting functionality."""
@@ -544,6 +555,30 @@ class TestGemtextParsingRobustness:
 
         document = parse_gemtext("a\r\nb\nc")
         assert len(document.lines) == 3
+
+    def test_heading_without_space_is_parsed(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        line = parse_gemtext("#NoSpace").lines[0]
+        assert line.type == "heading1"
+        assert line.heading.text == "NoSpace"
+
+    def test_extra_hash_not_kept_in_heading_text(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        # A 4th '#' is content, not a 4th level: cap at H3 and don't leak '#'.
+        line = parse_gemtext("#### four").lines[0]
+        assert line.type == "heading3"
+        assert line.heading.text == "four"
+
+    def test_quote_strips_only_one_leading_space(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        # Convention removes at most one space after '>', preserving intentional
+        # inner indentation of the quoted text.
+        line = parse_gemtext(">  two leading spaces").lines[0]
+        assert line.type == "quote"
+        assert line.quote.text == " two leading spaces"
 
 
 class TestGeminiResponseErrorMessages:

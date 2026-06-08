@@ -422,8 +422,30 @@ class TestProcessGeminiResponse:
 
         assert isinstance(result, GeminiRedirectResult)
         assert result.kind == "redirect"
-        assert result.new_url == "/new-location"
+        # The relative target is resolved against the request URL so the caller
+        # gets an absolute URL it can re-fetch (and SSRF-validate).
+        assert result.new_url == "gemini://example.org/new-location"
         assert result.permanent is False
+
+    def test_redirect_resolves_sibling_relative_target(self):
+        """A bare relative reference resolves against the request path."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.TEMPORARY_REDIRECT, meta="sibling", body=None
+        )
+        result = process_gemini_response(response, "gemini://example.org/dir/old")
+        assert isinstance(result, GeminiRedirectResult)
+        assert result.new_url == "gemini://example.org/dir/sibling"
+
+    def test_redirect_preserves_absolute_cross_scheme_target(self):
+        """An absolute target (its own scheme) is passed through unchanged."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.PERMANENT_REDIRECT,
+            meta="https://example.com/web",
+            body=None,
+        )
+        result = process_gemini_response(response, "gemini://example.org/old")
+        assert isinstance(result, GeminiRedirectResult)
+        assert result.new_url == "https://example.com/web"
 
     def test_permanent_redirect_response(self):
         """Test permanent redirect response processing."""

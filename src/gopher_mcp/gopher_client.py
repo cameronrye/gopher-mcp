@@ -17,7 +17,12 @@ from .models import (
     TextResult,
 )
 from .ssrf import SSRFError, normalize_host, validate_target
-from .utils import detect_binary_mime_type, parse_gopher_menu, parse_gopher_url
+from .utils import (
+    detect_binary_mime_type,
+    gopher_type_category,
+    parse_gopher_menu,
+    parse_gopher_url,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -28,6 +33,32 @@ DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
 DEFAULT_MAX_CACHE_ENTRIES = 1000
 DEFAULT_MAX_SELECTOR_LENGTH = 1024
 DEFAULT_MAX_SEARCH_LENGTH = 256
+
+
+def _strip_gopher_text_terminator(text: str) -> str:
+    """Reverse RFC 1436 text-mode framing.
+
+    Removes a trailing lone-``.`` terminator line and un-dot-stuffs lines that
+    begin with ``..`` (the protocol doubles a leading ``.``). Only a terminator
+    at the very end is removed -- servers that don't dot-stuff could otherwise
+    have a legitimate mid-document ``.`` line truncated.
+    """
+    # Split on LF but keep any trailing '\r' on each line so CRLF is preserved
+    # when we rejoin; remember a final newline so it survives the round-trip.
+    lines = text.split("\n")
+    trailing_newline = bool(lines) and lines[-1] == ""
+    if trailing_newline:
+        lines = lines[:-1]
+
+    # Drop a trailing terminator line ('.' possibly with a trailing '\r').
+    if lines and lines[-1].rstrip("\r") == ".":
+        lines = lines[:-1]
+
+    out = [line[1:] if line.startswith("..") else line for line in lines]
+    result = "\n".join(out)
+    if trailing_newline and result:
+        result += "\n"
+    return result
 
 
 class GopherClient:
@@ -231,6 +262,25 @@ class GopherClient:
         Returns:
             Appropriate response based on content type
         """
+        gopher_type = parsed_url.gopher_type
+        category = gopher_type_category(gopher_type)
+
+        # Interactive types (telnet/tn3270/CSO) have no Gopher-fetchable body;
+        # don't open a pointless connection (or resolve DNS) -- tell the caller
+        # how to reach the resource instead.
+        if category == "interactive":
+            return ErrorResult(
+                error={
+                    "code": "NOT_FETCHABLE",
+                    "message": (
+                        f"Gopher item type '{gopher_type}' is interactive "
+                        f"(telnet/tn3270/CSO) and has no fetchable content; "
+                        f"connect to {parsed_url.host}:{parsed_url.port} with an "
+                        f"appropriate client."
+                    ),
+                }
+            )
+
         # SSRF guard: reject internal/loopback/link-local targets before
         # connecting, and pin the connection to the exact IPs we validated so
         # the transport can't re-resolve to a rebinding answer.
@@ -240,25 +290,28 @@ class GopherClient:
             allow_local=self.allow_local_hosts,
         )
 
+        # RFC 1436 only defines the <TAB>query field for type-7 (Index-Search)
+        # servers; never forward a stray search to a plain selector.
+        search = parsed_url.search if gopher_type == "7" else None
+
         raw = await fetch_gopher(
             parsed_url.host,
             parsed_url.port,
             parsed_url.selector,
-            parsed_url.search,
+            search,
             max_bytes=self.max_response_size,
             timeout=self.timeout_seconds,
             connect_addresses=connect_addresses,
         )
 
-        gopher_type = parsed_url.gopher_type
-        if gopher_type in ("1", "7"):
+        if category == "menu":
             # Menu/directory or search results (which are menus)
             return self._process_menu_response(raw)
-        elif gopher_type in ("4", "5", "6", "9", "g", "I"):
+        elif category == "binary":
             # Binary content - return metadata only
             return self._process_binary_response(raw)
         else:
-            # Text (type 0) and unknown types - try as text
+            # Text (type 0, h/HTML, i/info) and unknown types - try as text
             return self._process_text_response(raw)
 
     def _process_menu_response(self, raw: bytes) -> MenuResult:
@@ -289,6 +342,10 @@ class GopherClient:
             Text result
         """
         text_content, charset = decode_gopher_text(raw)
+
+        # Reverse RFC 1436 text-mode framing before sanitizing: drop a trailing
+        # lone-'.' terminator line and un-dot-stuff lines beginning with '..'.
+        text_content = _strip_gopher_text_terminator(text_content)
 
         # Strip control characters except newlines, carriage returns and tabs.
         sanitized_text = "".join(

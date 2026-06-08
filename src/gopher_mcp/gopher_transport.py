@@ -28,8 +28,13 @@ class GopherProtocolError(Exception):
 
 
 def build_request(selector: str, search: str | None = None) -> bytes:
-    """Build the Gopher request line: ``selector[<TAB>search]<CR><LF>``."""
-    line = f"{selector}\t{search}" if search else selector
+    """Build the Gopher request line: ``selector[<TAB>search]<CR><LF>``.
+
+    ``search`` is distinguished by ``is not None`` (not truthiness), so an
+    explicit empty type-7 query still sends the ``<TAB>`` field -- an index
+    server then sees an empty query rather than a bare selector.
+    """
+    line = f"{selector}\t{search}" if search is not None else selector
     return line.encode("utf-8", errors="strict") + b"\r\n"
 
 

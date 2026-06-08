@@ -25,6 +25,14 @@ def test_build_request_with_search():
     assert build_request("/find", "python") == b"/find\tpython\r\n"
 
 
+def test_build_request_empty_type7_query_sends_tab():
+    # An explicit empty type-7 query ("") must still send the TAB field so an
+    # index server sees an empty query rather than a bare selector. None (no
+    # query) sends just the selector.
+    assert build_request("/find", "") == b"/find\t\r\n"
+    assert build_request("/find", None) == b"/find\r\n"
+
+
 def test_decode_utf8():
     assert decode_gopher_text("héllo".encode()) == ("héllo", "utf-8")
 

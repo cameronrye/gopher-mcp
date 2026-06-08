@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any, Optional, Union
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse
 
 from .models import (
     GeminiCertificateResult,
@@ -197,8 +197,10 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         # than dropping the whole menu item.
         port = int(parts[3]) if parts[3].isascii() and parts[3].isdigit() else 70
 
-        # Construct the next URL
-        next_url = f"gopher://{host}:{port}/{item_type}{selector}"
+        # Construct the next URL. Percent-encode the selector (keeping '/')
+        # so a selector containing spaces, '?', '#' or '%' round-trips back
+        # through parse_gopher_url instead of mis-splitting into a bogus query.
+        next_url = f"gopher://{host}:{port}/{item_type}{quote(selector, safe='/')}"
 
         return GopherMenuItem(
             type=item_type,
@@ -224,7 +226,12 @@ def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
     """
     items = []
 
-    for line in content.split("\n"):
+    # Normalize all three RFC 1436 line endings (CRLF), bare LF and legacy
+    # bare CR before splitting -- a CR-only server would otherwise collapse the
+    # whole menu into one unparseable line. Avoid str.splitlines(), which also
+    # breaks on VT/FF/NEL and could split a display string mid-field.
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+    for line in normalized.split("\n"):
         item = parse_menu_line(line)
         if item:
             items.append(item)
@@ -345,6 +352,44 @@ def guess_mime_type(gopher_type: str, selector: str = "") -> str:
     return mime_type
 
 
+# Canonical Gopher item-type -> handling category. Single source of truth so
+# the fetch dispatcher and MIME guessing agree on what each type is, instead of
+# maintaining divergent ad-hoc sets. Categories: "menu", "text", "binary",
+# "interactive" (no fetchable body). Unknown types fall back to best-effort text.
+_GOPHER_TYPE_CATEGORY: dict[str, str] = {
+    "0": "text",  # plain text file
+    "1": "menu",  # directory/menu
+    "7": "menu",  # search server (results are a menu)
+    "h": "text",  # HTML (served as text/html)
+    "i": "text",  # informational line
+    "3": "text",  # error
+    "4": "binary",  # BinHexed Macintosh file
+    "5": "binary",  # DOS binary / archive
+    "6": "binary",  # uuencoded file
+    "9": "binary",  # generic binary
+    "g": "binary",  # GIF image
+    "I": "binary",  # image
+    "d": "binary",  # document (PDF/word) by common convention
+    "s": "binary",  # sound
+    ";": "binary",  # video
+    "p": "binary",  # PNG (common extension)
+    "M": "binary",  # MIME multipart message
+    "<": "binary",  # sound (legacy)
+    "2": "interactive",  # CSO name/phone-book server
+    "8": "interactive",  # Telnet session
+    "T": "interactive",  # tn3270 session
+}
+
+
+def gopher_type_category(gopher_type: str) -> str:
+    """Return the handling category for a Gopher item type.
+
+    One of ``"menu"``, ``"text"``, ``"binary"`` or ``"interactive"``. Unknown
+    types default to ``"text"`` (best-effort), matching historical behaviour.
+    """
+    return _GOPHER_TYPE_CATEGORY.get(gopher_type, "text")
+
+
 def validate_gopher_response(content: bytes, max_size: int) -> None:
     """Validate a Gopher response.
 
@@ -391,9 +436,11 @@ def parse_gemini_url(url: str) -> GeminiURL:
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
         raise ValueError("URL must not contain control characters")
 
-    # Check URL length limit (1024 bytes as per Gemini spec)
-    if len(url.encode("utf-8")) > 1024:
-        raise ValueError("URL must not exceed 1024 bytes")
+    # Check URL length limit. The spec's 1024-byte cap applies to the whole
+    # CRLF-terminated request line (``<url>\r\n``), so the URL itself must be
+    # <= 1022 bytes -- not 1024.
+    if len(url.encode("utf-8")) + len(b"\r\n") > 1024:
+        raise ValueError("URL must not exceed 1024 bytes (request line incl. CRLF)")
 
     # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
     # accessed, so the access must live inside the try block for the friendly
@@ -669,8 +716,10 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
         GemtextLine object if this is a heading, None otherwise
     """
 
+    # Strip the leading marker run, then any extra '#'s (a 4th '#' is content,
+    # not a 4th level -- gemtext only defines H1-H3), then surrounding space.
     if line_content.startswith("###"):
-        heading_text = line_content[3:].strip()
+        heading_text = line_content[3:].lstrip("#").strip()
         heading_obj = GemtextHeading(
             level=3, text=heading_text, raw_content=line_content
         )
@@ -678,7 +727,7 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
             GemtextLineType.HEADING_3, line_content, heading=heading_obj, level=3
         )
     elif line_content.startswith("##"):
-        heading_text = line_content[2:].strip()
+        heading_text = line_content[2:].lstrip("#").strip()
         heading_obj = GemtextHeading(
             level=2, text=heading_text, raw_content=line_content
         )
@@ -686,7 +735,7 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
             GemtextLineType.HEADING_2, line_content, heading=heading_obj, level=2
         )
     elif line_content.startswith("#"):
-        heading_text = line_content[1:].strip()
+        heading_text = line_content[1:].lstrip("#").strip()
         heading_obj = GemtextHeading(
             level=1, text=heading_text, raw_content=line_content
         )
@@ -754,7 +803,9 @@ def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
     """
 
     if line_content.startswith(">"):
-        quote_text = line_content[1:].strip()
+        # Remove at most a single space after '>', preserving any intentional
+        # inner indentation of the quoted text (the gemtext convention).
+        quote_text = line_content[1:].removeprefix(" ")
         quote_obj = GemtextQuote(text=quote_text, raw_content=line_content)
         return _create_gemtext_line(
             GemtextLineType.QUOTE, line_content, quote=quote_obj
@@ -1392,11 +1443,37 @@ def _process_redirect_response(
 
     permanent = status_code == GeminiStatusCode.PERMANENT_REDIRECT.value
 
+    base_url = str(request_info.get("url", ""))
+    resolved = _resolve_gemini_reference(base_url, meta) if base_url else meta
+
     return GeminiRedirectResult(
-        newUrl=meta,
+        newUrl=resolved,
         permanent=permanent,
         requestInfo=request_info,
     )
+
+
+def _resolve_gemini_reference(base_url: str, target: str) -> str:
+    """Resolve a (possibly relative) Gemini redirect target against ``base_url``.
+
+    ``urllib.parse.urljoin`` doesn't treat ``gemini`` as a hierarchical scheme,
+    so relative references would pass through unresolved. Resolve under an
+    ``https`` placeholder (which urljoin understands) and swap the scheme back.
+    An absolute reference that carries its own scheme (gemini://, https://, ...)
+    is returned unchanged so the caller/SSRF layer can inspect cross-scheme or
+    cross-host redirects.
+    """
+    if urlparse(target).scheme:  # already absolute
+        return target
+
+    if not base_url.startswith("gemini://"):
+        return urljoin(base_url, target)
+
+    placeholder_base = "https://" + base_url[len("gemini://") :]
+    joined = urljoin(placeholder_base, target)
+    if joined.startswith("https://"):
+        return "gemini://" + joined[len("https://") :]
+    return joined
 
 
 def _process_error_response(

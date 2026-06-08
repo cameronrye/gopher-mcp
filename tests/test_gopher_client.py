@@ -510,6 +510,43 @@ class TestResponseProcessing:
         assert result.text == "HelloWorld\r\nTest\t"
         assert result.charset == "utf-8"
 
+    def test_process_text_response_strips_terminator_and_undot_stuffs(self):
+        """RFC 1436 text framing is reversed: drop the lone '.' terminator and
+        un-dot-stuff lines beginning with '..'."""
+        client = GopherClient()
+        raw = b"..dotted\r\nnormal line\r\n.\r\n"
+
+        result = client._process_text_response(raw)
+
+        assert result.text == ".dotted\r\nnormal line\r\n"
+        assert result.bytes == len(raw)  # byte count still reflects raw input
+
+    def test_process_text_response_without_terminator_unchanged(self):
+        """Text that isn't dot-terminated is returned verbatim."""
+        client = GopherClient()
+        result = client._process_text_response(b"just text\nno terminator")
+        assert result.text == "just text\nno terminator"
+
+    def test_process_menu_response_handles_cr_only_line_endings(self):
+        """Legacy CR-only line separators are split, not merged into one line."""
+        client = GopherClient()
+        raw = b"0A\tselA\texample.com\t70\r0B\tselB\texample.com\t70\r"
+        result = client._process_menu_response(raw)
+        assert [i.title for i in result.items] == ["A", "B"]
+
+    def test_menu_next_url_percent_encodes_selector(self):
+        """A selector with spaces/'?' is percent-encoded so nextUrl round-trips."""
+        from gopher_mcp.utils import parse_gopher_url
+
+        client = GopherClient()
+        raw = b"0Spaced\t/path with space?q\texample.com\t70\r\n.\r\n"
+        item = client._process_menu_response(raw).items[0]
+
+        assert " " not in item.next_url
+        assert item.next_url == "gopher://example.com:70/0/path%20with%20space%3Fq"
+        # The generated URL must parse back to the original selector.
+        assert parse_gopher_url(item.next_url).selector == "/path with space?q"
+
     def test_process_text_response_latin1_fallback(self):
         """Non-UTF-8 (legacy latin-1) content decodes via fallback."""
         client = GopherClient()
@@ -661,6 +698,55 @@ class TestFetchContentMethod:
             result = await client._fetch_content(parsed_url)
         assert isinstance(result, TextResult)
         assert result.text == "unknown content"
+
+    @pytest.mark.asyncio
+    async def test_fetch_content_does_not_forward_search_for_non_search_types(self):
+        """A stray search on a non-type-7 URL must not be sent as a type-7 query
+        (RFC 1436 only defines the <TAB>query field for Index-Search servers)."""
+        client = GopherClient()
+        parsed_url = GopherURL(
+            host="example.com",
+            port=70,
+            gopherType="0",
+            selector="/file",
+            search="stray",
+        )
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"hi"),
+        ) as mock_fetch:
+            await client._fetch_content(parsed_url)
+        assert mock_fetch.await_args.args[3] is None  # search positional arg
+
+    @pytest.mark.asyncio
+    async def test_fetch_content_interactive_type_not_fetched(self):
+        """Telnet/tn3270/CSO types have no fetchable body; no connection opens."""
+        client = GopherClient()
+        parsed_url = GopherURL(
+            host="example.com", port=70, gopherType="8", selector="/login", search=None
+        )
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher", new=AsyncMock()
+        ) as mock_fetch:
+            result = await client._fetch_content(parsed_url)
+        mock_fetch.assert_not_awaited()
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "NOT_FETCHABLE"
+
+    @pytest.mark.asyncio
+    async def test_fetch_content_routes_sound_type_to_binary(self):
+        """Known-binary types (e.g. 's'/sound) go to the binary processor, not
+        the text path that would latin-1-mangle them."""
+        client = GopherClient()
+        parsed_url = GopherURL(
+            host="example.com", port=70, gopherType="s", selector="/a.wav", search=None
+        )
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"RIFF\x00\x00\x00\x00WAVE"),
+        ):
+            result = await client._fetch_content(parsed_url)
+        assert isinstance(result, BinaryResult)
 
     @pytest.mark.asyncio
     async def test_fetch_content_transport_error_propagates(self):
