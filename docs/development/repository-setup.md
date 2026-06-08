@@ -132,7 +132,7 @@ updates:
 ## Secrets and Variables
 
 ### Repository Secrets
-- `CODECOV_TOKEN`: For code coverage reporting (if using Codecov)
+None required.
 
 ### Environment Secrets
 No secrets needed for OIDC-based PyPI publishing.
@@ -182,9 +182,8 @@ mkdocs.yml @cameronrye
 ## Automation Setup
 
 ### Required GitHub Apps/Integrations
-1. **Codecov** (optional): For code coverage reporting
-2. **Dependabot**: Already built into GitHub
-3. **GitHub Actions**: Built-in CI/CD
+1. **Dependabot**: Already built into GitHub
+2. **GitHub Actions**: Built-in CI/CD
 
 ### PyPI Trusted Publishing Setup
 
