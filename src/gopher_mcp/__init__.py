@@ -4,7 +4,15 @@ This package provides a cross-platform MCP server that allows LLMs to browse
 Gopher and Gemini resources safely and efficiently.
 """
 
-__version__ = "0.3.0"
+from importlib.metadata import PackageNotFoundError, version
+
+try:
+    # Single source of truth: the version declared in pyproject.toml. Deriving
+    # it here removes the hardcoded copy that could silently drift from the tag.
+    __version__ = version("gopher-mcp")
+except PackageNotFoundError:  # pragma: no cover - source tree without install
+    __version__ = "0.0.0+unknown"
+
 __author__ = "Gopher MCP Team"
 __email__ = "team@gopher-mcp.dev"
 __license__ = "MIT"
