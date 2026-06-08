@@ -93,6 +93,9 @@ class BinaryResult(BaseModel):
 class ErrorResult(BaseModel):
     """Result model for error responses."""
 
+    # 'kind' makes the result self-describing and a reliable discriminator
+    # across every Gopher result type (and matches GeminiErrorResult).
+    kind: Literal["error"] = "error"
     error: dict[str, str] = Field(..., description="Error information")
     request_info: dict[str, Any] = Field(
         default_factory=dict,

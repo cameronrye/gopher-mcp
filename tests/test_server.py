@@ -424,6 +424,108 @@ class TestMCPServer:
         # Note: Detailed tool inspection would require accessing FastMCP internals
         # which may not be stable API, so we keep this test simple
 
+    def test_server_has_instructions(self):
+        """FastMCP is given an instructions string surfaced to the model."""
+        assert mcp.instructions
+        assert "gopher" in mcp.instructions.lower()
+        assert "gemini" in mcp.instructions.lower()
+
+
+class TestLiveToolSchema:
+    """The schema the LLM actually receives must carry usage guidance (the rich
+    tools.py defs were dead code; the live decorator schema was a bare
+    url:string)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["gopher_fetch", "gemini_fetch"])
+    async def test_fetch_tool_schema_has_description_and_examples(self, name):
+        tools = {t.name: t for t in await mcp.list_tools()}
+        tool = tools[name]
+        url_schema = tool.inputSchema["properties"]["url"]
+        assert url_schema.get("description"), "url param must describe itself"
+        assert url_schema.get("examples"), "url param must carry examples"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "name",
+        ["gopher_fetch", "gemini_fetch", "gopher_batch_fetch", "gemini_batch_fetch"],
+    )
+    async def test_fetch_tools_are_annotated_read_only_open_world(self, name):
+        tools = {t.name: t for t in await mcp.list_tools()}
+        ann = tools[name].annotations
+        assert ann is not None
+        assert ann.readOnlyHint is True
+        assert ann.openWorldHint is True
+
+    @pytest.mark.asyncio
+    async def test_gemini_fetch_exposes_input_param(self):
+        tools = {t.name: t for t in await mcp.list_tools()}
+        schema = tools["gemini_fetch"].inputSchema
+        assert "input" in schema["properties"]
+        assert "input" not in schema.get("required", [])  # optional param
+
+
+class TestGeminiInputRoundTrip:
+    """gemini_fetch percent-encodes the status-10/11 answer so the model never
+    hand-builds query strings."""
+
+    @pytest.mark.asyncio
+    async def test_input_is_percent_encoded_into_query(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.model_dump.return_value = {"kind": "input"}
+        mock_client.fetch.return_value = mock_response
+        mock_manager = AsyncMock()
+        mock_manager.get_gemini_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            await gemini_fetch("gemini://example.org/search", input="a b&c=d")
+
+        # The raw answer must arrive percent-encoded, replacing any query.
+        fetched = mock_client.fetch.call_args.args[0]
+        assert fetched == "gemini://example.org/search?a%20b%26c%3Dd"
+
+    @pytest.mark.asyncio
+    async def test_input_replaces_existing_query_and_fragment(self):
+        mock_client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.model_dump.return_value = {"kind": "input"}
+        mock_client.fetch.return_value = mock_response
+        mock_manager = AsyncMock()
+        mock_manager.get_gemini_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=mock_manager):
+            await gemini_fetch("gemini://example.org/p?old#frag", input="new")
+
+        assert mock_client.fetch.call_args.args[0] == "gemini://example.org/p?new"
+
+
+class TestEntrypointTransportArgs:
+    """The CLI must let an operator bind host/port for the http/sse transports."""
+
+    def test_host_and_port_flow_into_fastmcp_settings(self):
+        from gopher_mcp import __main__ as entry
+        from gopher_mcp.server import mcp as server_mcp
+
+        argv = [
+            "prog",
+            "--transport",
+            "streamable-http",
+            "--host",
+            "0.0.0.0",
+            "--port",
+            "9999",
+        ]
+        with (
+            patch("sys.argv", argv),
+            patch.object(server_mcp, "run") as mock_run,
+        ):
+            entry.main()
+
+        mock_run.assert_called_once()
+        assert server_mcp.settings.host == "0.0.0.0"
+        assert server_mcp.settings.port == 9999
+
 
 class TestEnvironmentVariables:
     """Test environment variable handling."""

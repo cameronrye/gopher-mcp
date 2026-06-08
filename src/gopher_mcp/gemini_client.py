@@ -137,9 +137,11 @@ class GeminiClient:
             if self.cache_enabled:
                 cached_response = self._get_cached_response(url)
                 if cached_response:
+                    # Log without the query string: a status-10/11 answer (which
+                    # the caller percent-encodes into the query) may be a secret.
                     logger.debug(
                         "Cache hit",
-                        url=url,
+                        url=f"gemini://{parsed_url.host}:{parsed_url.port}{parsed_url.path}",
                         cached=True,
                         response_type=getattr(cached_response, "kind", "unknown"),
                         response_size=getattr(cached_response, "size", 0),
@@ -175,15 +177,16 @@ class GeminiClient:
             ):
                 self._cache_response(url, response)
 
-            # Full URL/path/query are request metadata; keep them at DEBUG so
-            # default INFO logs don't record every browsed resource/query.
+            # Host/port/path are request metadata; keep them at DEBUG so default
+            # INFO logs don't record every browsed resource. The query is NOT
+            # logged: a status-10/11 input answer is carried there and may be a
+            # secret (status 11). Record only whether a query was present.
             logger.debug(
                 "Gemini fetch successful",
-                url=url,
                 host=parsed_url.host,
                 port=parsed_url.port,
                 path=parsed_url.path,
-                query=parsed_url.query,
+                has_query=bool(parsed_url.query),
                 response_type=getattr(response, "kind", "unknown"),
                 response_size=getattr(response, "size", 0),
                 cached=False,
