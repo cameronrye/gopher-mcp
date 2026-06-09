@@ -81,7 +81,7 @@ elif result["kind"] == "error":
 ### Navigation Patterns
 
 1. **Start with root menu**: `gopher://hostname/1/`
-2. **Follow menu items**: Use the `url` field from menu items
+2. **Follow menu items**: Use the `next_url` field from menu items
 3. **Handle search servers**: Type 7 items require search terms
 4. **Respect binary files**: Don't fetch large binary content
 

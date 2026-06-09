@@ -20,7 +20,7 @@ logger = structlog.get_logger(__name__)
 SERVER_INSTRUCTIONS = (
     "Browse Gopher and Gemini resources. Use gopher_fetch for gopher:// URLs and "
     "gemini_fetch for gemini:// URLs; the *_batch_fetch variants take several "
-    "URLs at once. Navigate by following the `nextUrl` field of Gopher menu "
+    "URLs at once. Navigate by following the `next_url` field of Gopher menu "
     "items and the `links` of Gemini gemtext documents. Binary and oversize "
     "bodies are returned as metadata only (no raw bytes). On a Gemini status-10 "
     "or status-11 (input) response, call gemini_fetch again with the `input` "
@@ -41,7 +41,7 @@ _GopherUrl = Annotated[
     Field(
         description=(
             "A full gopher:// URL. The first path character is the item type "
-            "(1=menu, 0=text file, 7=search). Follow `nextUrl` from menu items "
+            "(1=menu, 0=text file, 7=search). Follow `next_url` from menu items "
             "to navigate. Example: gopher://gopher.floodgap.com/1/"
         ),
         examples=[

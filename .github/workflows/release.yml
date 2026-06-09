@@ -96,7 +96,16 @@ jobs:
             echo "Please update pyproject.toml version to match the tag"
             exit 1
           fi
-          echo "✅ Version consistency validated"
+
+          # server.json is the MCP registry manifest; keep its two version
+          # fields in lockstep with the tag so the registry can't ship stale.
+          SERVER_JSON_MISMATCH=$(python -c "import json,sys; d=json.load(open('server.json')); v=sys.argv[1]; bad=[x for x in [d.get('version')] + [p.get('version') for p in d.get('packages', [])] if x != v]; print(' '.join(bad))" "$VERSION")
+          if [[ -n "$SERVER_JSON_MISMATCH" ]]; then
+            echo "❌ server.json version mismatch (expected $VERSION, found: $SERVER_JSON_MISMATCH)"
+            echo "Please update server.json version fields to match the tag"
+            exit 1
+          fi
+          echo "✅ Version consistency validated (pyproject.toml + server.json)"
 
       - name: Validate changelog
         run: |
