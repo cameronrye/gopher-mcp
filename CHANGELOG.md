@@ -41,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The unused `http`/`aiohttp` optional dependency, the never-read
   `development_mode` setting, and the test-only `create_tls_client` factory.
+- The `GeminiGemtextResult.summary`, `.plain_text` and `.structured_content`
+  helper properties: they were never serialized by `model_dump()` so the MCP
+  tools never exposed them (dead LLM-facing API). The parsed `document` and
+  `raw_content` carry the same information.
 
 ### Fixed
 
