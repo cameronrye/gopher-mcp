@@ -1,0 +1,44 @@
+# Keep the Docker build context (and image) small and free of local/secret
+# state. The Dockerfile builds a wheel from `COPY . .`, so anything not needed
+# to build that wheel should be excluded -- especially .git and any local env.
+
+# Version control
+.git/
+.gitignore
+.github/
+
+# Local environment / secrets
+.env
+*.env
+!config/example.env
+.venv/
+venv/
+env/
+
+# Python build/test artifacts and caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+coverage.json
+*-report.json
+
+# Docs site build
+site/
+
+# Editor / OS / tooling
+.vscode/
+.idea/
+.claude/
+.DS_Store
+
+# Docker
+Dockerfile
+.dockerignore

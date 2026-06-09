@@ -556,7 +556,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "bandit", marker = "extra == 'dev'", specifier = ">=1.7.5" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'test'", specifier = ">=7.3.0" },
-    { name = "cryptography", specifier = ">=41.0.0" },
+    { name = "cryptography", specifier = ">=43.0.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
     { name = "mkdocs-autorefs", marker = "extra == 'docs'", specifier = ">=0.5.0" },
