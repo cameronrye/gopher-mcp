@@ -1,9 +1,9 @@
-"""Tests for Gemini TLS client implementation."""
+"""Tests for Gemini TLS client implementation (native asyncio transport)."""
 
 import asyncio
+import hashlib
 import socket
 import ssl
-import threading
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -11,51 +11,21 @@ import pytest
 from gopher_mcp.gemini_tls import (
     GeminiTLSClient,
     TLSConfig,
+    TLSConnection,
     TLSConnectionError,
 )
 
 
-class TestTLSExecutorIsolation:
-    """Blocking Gemini TLS I/O must run on a dedicated thread pool.
-
-    loop.getaddrinfo() (the SSRF DNS check for BOTH Gopher and Gemini) runs on
-    the default executor. If Gemini's blocking socket ops shared that pool, a
-    handful of stalled/hostile Gemini reads would saturate it and stall DNS for
-    every request, turning one slow server into a whole-server DoS.
-    """
-
-    @pytest.mark.asyncio
-    async def test_gemini_tls_io_does_not_starve_default_executor(self):
-        from gopher_mcp import gemini_tls
-
-        loop = asyncio.get_running_loop()
-        release = threading.Event()
-        executor = gemini_tls._TLS_IO_EXECUTOR
-
-        # Saturate the dedicated TLS pool with blocked workers.
-        stuck = [
-            loop.run_in_executor(executor, release.wait)
-            for _ in range(executor._max_workers + 4)
-        ]
-        try:
-            # The default executor (where getaddrinfo runs) must stay responsive
-            # even though the dedicated TLS pool is fully blocked.
-            result = await asyncio.wait_for(
-                loop.run_in_executor(None, lambda: "ok"), timeout=5.0
-            )
-            assert result == "ok"
-        finally:
-            release.set()
-            await asyncio.gather(*stuck, return_exceptions=True)
+def _conn(reader=None, writer=None) -> TLSConnection:
+    """Build a TLSConnection from a reader/writer (real or mock)."""
+    return TLSConnection(reader=reader or Mock(), writer=writer or Mock())
 
 
 class TestTLSConfig:
     """Test TLS configuration."""
 
     def test_default_config(self):
-        """Test default TLS configuration."""
         config = TLSConfig()
-
         assert config.min_version == "TLSv1.2"
         assert config.verify_mode == ssl.CERT_NONE
         assert config.client_cert_path is None
@@ -63,7 +33,6 @@ class TestTLSConfig:
         assert config.timeout_seconds == 30.0
 
     def test_custom_config(self):
-        """Test custom TLS configuration."""
         config = TLSConfig(
             min_version="TLSv1.3",
             verify_mode=ssl.CERT_REQUIRED,
@@ -71,7 +40,6 @@ class TestTLSConfig:
             client_key_path="/path/to/key.pem",
             timeout_seconds=60.0,
         )
-
         assert config.min_version == "TLSv1.3"
         assert config.verify_mode == ssl.CERT_REQUIRED
         assert config.client_cert_path == "/path/to/cert.pem"
@@ -79,434 +47,265 @@ class TestTLSConfig:
         assert config.timeout_seconds == 60.0
 
     def test_invalid_tls_version(self):
-        """Test that invalid TLS versions are rejected."""
         with pytest.raises(ValueError, match="Unsupported TLS version"):
             TLSConfig(min_version="TLSv1.1")
 
     def test_invalid_timeout(self):
-        """Test that invalid timeouts are rejected."""
         with pytest.raises(ValueError, match="Timeout must be positive"):
             TLSConfig(timeout_seconds=0)
-
         with pytest.raises(ValueError, match="Timeout must be positive"):
             TLSConfig(timeout_seconds=-1)
 
     def test_cert_without_key(self):
-        """Test that cert without key is rejected."""
         with pytest.raises(ValueError, match="Client key path required"):
             TLSConfig(client_cert_path="/path/to/cert.pem")
 
     def test_key_without_cert(self):
-        """Test that key without cert is rejected."""
         with pytest.raises(ValueError, match="Client cert path required"):
             TLSConfig(client_key_path="/path/to/key.pem")
+
+    def test_tls_config_edge_cases(self):
+        assert TLSConfig(timeout_seconds=0.1).timeout_seconds == 0.1
+        assert TLSConfig(timeout_seconds=3600.0).timeout_seconds == 3600.0
 
 
 class TestTLSConnectionError:
     """Test TLS connection error."""
 
     def test_basic_error(self):
-        """Test basic error creation."""
         error = TLSConnectionError("Connection failed")
-
         assert str(error) == "Connection failed"
         assert error.original_error is None
 
     def test_error_with_original(self):
-        """Test error with original exception."""
         original = ConnectionRefusedError("Connection refused")
         error = TLSConnectionError("TLS failed", original)
-
         assert str(error) == "TLS failed"
         assert error.original_error == original
 
 
-class TestGeminiTLSClient:
-    """Test Gemini TLS client."""
+class TestSSLContext:
+    """Test SSL context construction."""
 
     def test_client_initialization(self):
-        """Test client initialization."""
         client = GeminiTLSClient()
-
         assert client.config.min_version == "TLSv1.2"
         assert client._ssl_context is None
 
     def test_client_with_custom_config(self):
-        """Test client with custom configuration."""
         config = TLSConfig(min_version="TLSv1.3", timeout_seconds=60.0)
         client = GeminiTLSClient(config)
-
         assert client.config == config
 
     def test_ssl_context_creation(self):
-        """Test SSL context creation."""
-        client = GeminiTLSClient()
-        context = client.ssl_context
-
+        context = GeminiTLSClient().ssl_context
         assert isinstance(context, ssl.SSLContext)
         assert context.minimum_version == ssl.TLSVersion.TLSv1_2
         assert context.check_hostname is False
         assert context.verify_mode == ssl.CERT_NONE
 
     def test_ssl_context_tls13(self):
-        """Test SSL context with TLS 1.3."""
-        config = TLSConfig(min_version="TLSv1.3")
-        client = GeminiTLSClient(config)
-        context = client.ssl_context
-
+        context = GeminiTLSClient(TLSConfig(min_version="TLSv1.3")).ssl_context
         assert context.minimum_version == ssl.TLSVersion.TLSv1_3
 
     def test_ssl_context_does_not_narrow_cipher_suites(self):
         """The TLS 1.2 cipher list must not be narrowed to a few AEAD-only ECDHE
         suites: that drops ECDHE-CBC and DHE suites and risks handshake failures
-        with conforming Gemini servers. Peer auth is via TOFU pinning, so the
-        channel cipher choice is not the security control -- keep Python's
-        secure defaults. A narrowed list yields ~9 ciphers; the default ~17."""
-        client = GeminiTLSClient()
-        assert len(client.ssl_context.get_ciphers()) > 12
+        with conforming Gemini servers. Peer auth is via TOFU pinning, so keep
+        Python's secure defaults. A narrowed list yields ~9 ciphers; default ~17."""
+        assert len(GeminiTLSClient().ssl_context.get_ciphers()) > 12
 
     def test_ssl_context_caching(self):
-        """Test that SSL context is cached."""
         client = GeminiTLSClient()
-        context1 = client.ssl_context
-        context2 = client.ssl_context
-
-        assert context1 is context2
+        assert client.ssl_context is client.ssl_context
 
     @patch("ssl.SSLContext.load_cert_chain")
     def test_ssl_context_with_client_cert(self, mock_load_cert):
-        """Test SSL context with client certificate."""
         config = TLSConfig(
             client_cert_path="/path/to/cert.pem", client_key_path="/path/to/key.pem"
         )
-        client = GeminiTLSClient(config)
-
-        # Access ssl_context to trigger creation
-        _ = client.ssl_context
-
+        _ = GeminiTLSClient(config).ssl_context
         mock_load_cert.assert_called_once_with("/path/to/cert.pem", "/path/to/key.pem")
 
     @patch("ssl.create_default_context")
     def test_ssl_context_creation_error(self, mock_create_context):
-        """Test SSL context creation error handling."""
         mock_create_context.side_effect = Exception("SSL error")
-        client = GeminiTLSClient()
-
         with pytest.raises(TLSConnectionError, match="Failed to create SSL context"):
-            _ = client.ssl_context
-
-    @pytest.mark.asyncio
-    @patch("socket.socket")
-    @patch("asyncio.get_running_loop")
-    async def test_connect_success(self, mock_get_loop, mock_socket):
-        """Test successful TLS connection."""
-        # Mock socket and SSL socket
-        mock_sock = Mock()
-        mock_ssl_sock = Mock()
-        mock_ssl_sock.version.return_value = "TLSv1.2"
-        mock_ssl_sock.cipher.return_value = (
-            "ECDHE-RSA-AES256-GCM-SHA384",
-            "TLSv1.2",
-            256,
-        )
-        mock_ssl_sock.getpeercert.return_value = {"subject": [["CN", "example.org"]]}
-        mock_ssl_sock.getpeercert.return_value = b"fake_cert_data"
-        mock_ssl_sock.server_hostname = "example.org"
-
-        mock_socket.return_value = mock_sock
-
-        # Mock event loop executor
-        mock_loop = Mock()
-        mock_loop.run_in_executor = AsyncMock()
-        mock_get_loop.return_value = mock_loop
-
-        # Mock SSL context
-        client = GeminiTLSClient()
-        client._ssl_context = Mock()
-        client._ssl_context.wrap_socket.return_value = mock_ssl_sock
-
-        # Test connection
-        ssl_sock, info = await client.connect("example.org", 1965)
-
-        assert ssl_sock == mock_ssl_sock
-        assert "connection_time" in info
-        assert info["tls_version"] == "TLSv1.2"
-        assert info["sni_hostname"] == "example.org"
-
-    @pytest.mark.asyncio
-    @patch("socket.socket")
-    async def test_connect_timeout(self, mock_socket):
-        """Test connection timeout."""
-        mock_sock = Mock()
-        mock_sock.connect.side_effect = TimeoutError()
-        mock_socket.return_value = mock_sock
-
-        client = GeminiTLSClient()
-
-        with pytest.raises(TLSConnectionError, match="Connection timeout"):
-            await client.connect("example.org", 1965, timeout=1.0)
-
-    @pytest.mark.asyncio
-    @patch("socket.socket")
-    async def test_connect_dns_error(self, mock_socket):
-        """Test DNS resolution error."""
-        mock_sock = Mock()
-        mock_sock.connect.side_effect = socket.gaierror("Name resolution failed")
-        mock_socket.return_value = mock_sock
-
-        client = GeminiTLSClient()
-
-        with pytest.raises(TLSConnectionError, match="DNS resolution failed"):
-            await client.connect("nonexistent.example", 1965)
-
-    @pytest.mark.asyncio
-    @patch("socket.socket")
-    async def test_connect_refused(self, mock_socket):
-        """Test connection refused."""
-        mock_sock = Mock()
-        mock_sock.connect.side_effect = ConnectionRefusedError()
-        mock_socket.return_value = mock_sock
-
-        client = GeminiTLSClient()
-
-        with pytest.raises(TLSConnectionError, match="Connection refused"):
-            await client.connect("example.org", 1965)
-
-    @pytest.mark.asyncio
-    @patch("socket.socket")
-    @patch("asyncio.get_running_loop")
-    async def test_connect_ssl_error(self, mock_get_loop, mock_socket):
-        """Test SSL handshake error."""
-        mock_sock = Mock()
-        mock_ssl_sock = Mock()
-        mock_ssl_sock.do_handshake.side_effect = ssl.SSLError("Handshake failed")
-
-        mock_socket.return_value = mock_sock
-
-        # Mock event loop executor
-        mock_loop = Mock()
-        mock_loop.run_in_executor = AsyncMock()
-        mock_loop.run_in_executor.side_effect = [None, ssl.SSLError("Handshake failed")]
-        mock_get_loop.return_value = mock_loop
-
-        # Mock SSL context
-        client = GeminiTLSClient()
-        client._ssl_context = Mock()
-        client._ssl_context.wrap_socket.return_value = mock_ssl_sock
-
-        with pytest.raises(TLSConnectionError, match="TLS handshake failed"):
-            await client.connect("example.org", 1965)
-
-    @pytest.mark.asyncio
-    async def test_close_connection(self):
-        """Test closing TLS connection."""
-        mock_ssl_sock = Mock()
-        client = GeminiTLSClient()
-
-        with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = Mock()
-            mock_loop.run_in_executor = AsyncMock()
-            mock_get_loop.return_value = mock_loop
-
-            await client.close(mock_ssl_sock)
-
-            # Verify unwrap was called (close_notify)
-            mock_loop.run_in_executor.assert_called_once()
-            mock_ssl_sock.close.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_close_connection_error(self):
-        """Test closing connection with errors."""
-        mock_ssl_sock = Mock()
-        mock_ssl_sock.unwrap.side_effect = Exception("Unwrap failed")
-        mock_ssl_sock.close.side_effect = Exception("Close failed")
-
-        client = GeminiTLSClient()
-
-        with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = Mock()
-            mock_loop.run_in_executor = AsyncMock(
-                side_effect=Exception("Unwrap failed")
-            )
-            mock_get_loop.return_value = mock_loop
-
-            # Should not raise exception despite errors
-            await client.close(mock_ssl_sock)
-
-    @pytest.mark.asyncio
-    async def test_send_data(self):
-        """Test sending data over TLS."""
-        mock_ssl_sock = Mock()
-        client = GeminiTLSClient()
-        data = b"gemini://example.org/\r\n"
-
-        with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = Mock()
-            mock_loop.run_in_executor = AsyncMock()
-            mock_get_loop.return_value = mock_loop
-
-            await client.send_data(mock_ssl_sock, data)
-
-            mock_loop.run_in_executor.assert_called_once()
-
-    @pytest.mark.asyncio
-    async def test_send_data_error(self):
-        """Test send data error handling."""
-        mock_ssl_sock = Mock()
-        client = GeminiTLSClient()
-
-        with patch("asyncio.get_running_loop") as mock_get_loop:
-            mock_loop = Mock()
-            mock_loop.run_in_executor = AsyncMock(side_effect=Exception("Send failed"))
-            mock_get_loop.return_value = mock_loop
-
-            with pytest.raises(TLSConnectionError, match="Failed to send data"):
-                await client.send_data(mock_ssl_sock, b"data")
-
-    @pytest.mark.asyncio
-    async def test_receive_data(self):
-        """Test receiving data over TLS (chunks then EOF)."""
-        mock_ssl_sock = Mock()
-        client = GeminiTLSClient()
-
-        mock_ssl_sock.recv.side_effect = [b"20 text/gemini\r\n", b"Hello", b""]
-
-        data = await client.receive_data(mock_ssl_sock)
-
-        assert data == b"20 text/gemini\r\nHello"
-
-    @pytest.mark.asyncio
-    async def test_receive_data_error(self):
-        """Test receive data error handling."""
-        mock_ssl_sock = Mock()
-        client = GeminiTLSClient()
-
-        mock_ssl_sock.recv.side_effect = Exception("Receive failed")
-
-        with pytest.raises(TLSConnectionError, match="Failed to receive data"):
-            await client.receive_data(mock_ssl_sock)
-
-    @pytest.mark.asyncio
-    async def test_receive_data_rejects_oversize(self):
-        """An over-limit response is rejected, not silently truncated."""
-        mock_ssl_sock = Mock()
-        client = GeminiTLSClient()
-
-        # Fills the cap, and the over-limit probe still returns data.
-        mock_ssl_sock.recv.side_effect = [b"x" * 1024, b"more"]
-
-        with pytest.raises(TLSConnectionError, match="exceeds maximum size"):
-            await client.receive_data(mock_ssl_sock, max_size=1024)
-
-    @pytest.mark.asyncio
-    async def test_receive_data_accepts_exactly_max_size(self):
-        """A response of exactly max_size bytes must be accepted, not turned
-        into a TLS error, even when the server holds the connection open
-        (delayed/absent close_notify) so the over-limit probe times out."""
-        mock_ssl_sock = Mock()
-        client = GeminiTLSClient()
-
-        # Body fills the cap exactly; the over-limit probe then blocks and
-        # times out instead of returning data or EOF.
-        mock_ssl_sock.recv.side_effect = [b"x" * 1024, TimeoutError()]
-
-        result = await client.receive_data(mock_ssl_sock, max_size=1024)
-
-        assert result == b"x" * 1024
-
-    def test_get_connection_info(self):
-        """Test extracting connection information."""
-        mock_ssl_sock = Mock()
-        mock_ssl_sock.version.return_value = "TLSv1.3"
-        mock_ssl_sock.cipher.return_value = ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
-        mock_ssl_sock.getpeercert.side_effect = [
-            {"subject": [["CN", "example.org"]]},  # First call (text form)
-            b"fake_cert_data",  # Second call (binary form)
-        ]
-        mock_ssl_sock.server_hostname = "example.org"
-
-        client = GeminiTLSClient()
-
-        with patch("hashlib.sha256") as mock_sha256:
-            mock_sha256.return_value.hexdigest.return_value = "abcdef123456"
-
-            info = client._get_connection_info(mock_ssl_sock, 1.5)
-
-            assert info["connection_time"] == 1.5
-            assert info["tls_version"] == "TLSv1.3"
-            assert info["cipher"] == "TLS_AES_256_GCM_SHA384"
-            assert info["cipher_strength"] == 256
-            assert info["sni_hostname"] == "example.org"
-            assert info["cert_fingerprint"] == "sha256:abcdef123456"
-
-    def test_get_connection_info_error(self):
-        """Test connection info extraction with errors."""
-        mock_ssl_sock = Mock()
-        mock_ssl_sock.version.side_effect = Exception("Version error")
-
-        client = GeminiTLSClient()
-        info = client._get_connection_info(mock_ssl_sock, 1.0)
-
-        assert info["connection_time"] == 1.0
-        assert "error" in info
-
-
-class TestGeminiTLSAdditionalCoverage:
-    """Test additional TLS functionality for better coverage."""
+            _ = GeminiTLSClient().ssl_context
 
     def test_ssl_context_creation_with_invalid_cert_path(self):
-        """Test SSL context creation with invalid certificate path."""
         config = TLSConfig(
             client_cert_path="/nonexistent/cert.pem",
             client_key_path="/nonexistent/key.pem",
         )
-        client = GeminiTLSClient(config)
-
-        # A missing cert/key file is wrapped as a TLSConnectionError.
         with pytest.raises(TLSConnectionError):
-            client._create_ssl_context()
+            GeminiTLSClient(config)._create_ssl_context()
+
+
+class TestConnectErrorMapping:
+    """connect() maps transport errors to TLSConnectionError without hitting the
+    network (asyncio.open_connection is patched)."""
 
     @pytest.mark.asyncio
-    async def test_connection_cleanup_on_error(self):
-        """Test that connections are properly cleaned up on errors."""
-        client = GeminiTLSClient()
-
-        # Mock socket creation to fail
-        with patch("socket.socket") as mock_socket:
-            mock_socket.side_effect = OSError("Connection failed")
-
-            with pytest.raises(TLSConnectionError):
-                await client.connect("nonexistent.example.com", 1965)
+    async def test_timeout(self):
+        with patch("asyncio.open_connection", AsyncMock(side_effect=TimeoutError())):
+            with pytest.raises(TLSConnectionError, match="Connection timeout"):
+                await GeminiTLSClient().connect("example.org", 1965, timeout=1.0)
 
     @pytest.mark.asyncio
-    async def test_receive_data_with_large_response(self):
-        """Test receiving large response data."""
-        client = GeminiTLSClient()
+    async def test_dns_error(self):
+        with patch(
+            "asyncio.open_connection",
+            AsyncMock(side_effect=socket.gaierror("name resolution failed")),
+        ):
+            with pytest.raises(TLSConnectionError, match="DNS resolution failed"):
+                await GeminiTLSClient().connect("nonexistent.invalid", 1965)
 
-        # Mock SSL socket
-        mock_sock = Mock()
-        large_data = b"x" * 2048  # Larger than typical buffer
-        mock_sock.recv.side_effect = [large_data[:1024], large_data[1024:], b""]
+    @pytest.mark.asyncio
+    async def test_refused(self):
+        with patch(
+            "asyncio.open_connection", AsyncMock(side_effect=ConnectionRefusedError())
+        ):
+            with pytest.raises(TLSConnectionError, match="Connection refused"):
+                await GeminiTLSClient().connect("example.org", 1965)
 
-        result = await client.receive_data(mock_sock, max_size=2048)
-        assert result == large_data
+    @pytest.mark.asyncio
+    async def test_ssl_error(self):
+        with patch(
+            "asyncio.open_connection",
+            AsyncMock(side_effect=ssl.SSLError("handshake failed")),
+        ):
+            with pytest.raises(TLSConnectionError, match="TLS handshake failed"):
+                await GeminiTLSClient().connect("example.org", 1965)
 
-    def test_tls_config_edge_cases(self):
-        """Test TLS config edge cases for better coverage."""
-        # Test with minimum valid timeout
-        config = TLSConfig(timeout_seconds=0.1)
-        assert config.timeout_seconds == 0.1
+    @pytest.mark.asyncio
+    async def test_generic_oserror(self):
+        with patch("asyncio.open_connection", AsyncMock(side_effect=OSError("boom"))):
+            with pytest.raises(TLSConnectionError, match="Connection failed"):
+                await GeminiTLSClient().connect("example.org", 1965)
 
-        # Test with very high timeout
-        config = TLSConfig(timeout_seconds=3600.0)
-        assert config.timeout_seconds == 3600.0
+
+class TestSendReceiveClose:
+    """send_data/receive_data/close operate on the native asyncio streams."""
+
+    @pytest.mark.asyncio
+    async def test_send_data(self):
+        writer = Mock()
+        writer.write = Mock()
+        writer.drain = AsyncMock()
+        await GeminiTLSClient().send_data(_conn(writer=writer), b"gemini://x/\r\n")
+        writer.write.assert_called_once_with(b"gemini://x/\r\n")
+        writer.drain.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_send_data_error(self):
+        writer = Mock()
+        writer.write = Mock(side_effect=RuntimeError("boom"))
+        with pytest.raises(TLSConnectionError, match="Failed to send data"):
+            await GeminiTLSClient().send_data(_conn(writer=writer), b"data")
+
+    @pytest.mark.asyncio
+    async def test_close_connection(self):
+        writer = Mock()
+        writer.close = Mock()
+        writer.wait_closed = AsyncMock()
+        await GeminiTLSClient().close(_conn(writer=writer))
+        writer.close.assert_called_once()
+        writer.wait_closed.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_close_suppresses_errors(self):
+        writer = Mock()
+        writer.close = Mock()
+        writer.wait_closed = AsyncMock(side_effect=RuntimeError("boom"))
+        # Must not raise even if wait_closed errors.
+        await GeminiTLSClient().close(_conn(writer=writer))
+
+    @pytest.mark.asyncio
+    async def test_receive_reads_until_eof(self):
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"20 text/gemini\r\nHello")
+        reader.feed_eof()
+        data = await GeminiTLSClient().receive_data(_conn(reader=reader))
+        assert data == b"20 text/gemini\r\nHello"
+
+    @pytest.mark.asyncio
+    async def test_receive_rejects_oversize(self):
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"x" * 2048)
+        reader.feed_eof()
+        with pytest.raises(TLSConnectionError, match="exceeds maximum size"):
+            await GeminiTLSClient().receive_data(_conn(reader=reader), max_size=1024)
+
+    @pytest.mark.asyncio
+    async def test_receive_accepts_exactly_max_size_on_eof(self):
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"x" * 1024)
+        reader.feed_eof()
+        result = await GeminiTLSClient().receive_data(
+            _conn(reader=reader), max_size=1024
+        )
+        assert result == b"x" * 1024
+
+    @pytest.mark.asyncio
+    async def test_receive_accepts_exactly_max_size_when_held_open(self, monkeypatch):
+        """A complete, exactly-max_size response whose server holds the
+        connection open (no EOF) is accepted once the short probe times out,
+        rather than spuriously erroring."""
+        monkeypatch.setattr("gopher_mcp.gemini_tls.PROBE_TIMEOUT_SECONDS", 0.05)
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"x" * 1024)  # no feed_eof: connection stays open
+        result = await GeminiTLSClient().receive_data(
+            _conn(reader=reader), max_size=1024
+        )
+        assert result == b"x" * 1024
+
+    @pytest.mark.asyncio
+    async def test_receive_error_wrapped(self):
+        reader = Mock()
+        reader.read = AsyncMock(side_effect=RuntimeError("boom"))
+        with pytest.raises(TLSConnectionError, match="Failed to receive data"):
+            await GeminiTLSClient().receive_data(_conn(reader=reader))
+
+
+class TestConnectionInfo:
+    """_get_connection_info derives details (incl. fingerprint) from the SSL
+    object, working under CERT_NONE where getpeercert() (dict form) is empty."""
+
+    def test_get_connection_info(self):
+        ssl_obj = Mock()
+        ssl_obj.getpeercert.return_value = b"fake_cert_data"
+        ssl_obj.cipher.return_value = ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
+        ssl_obj.version.return_value = "TLSv1.3"
+        ssl_obj.server_hostname = "example.org"
+
+        info = GeminiTLSClient()._get_connection_info(ssl_obj, 1.5)
+
+        assert info["connection_time"] == 1.5
+        assert info["tls_version"] == "TLSv1.3"
+        assert info["cipher"] == "TLS_AES_256_GCM_SHA384"
+        assert info["cipher_strength"] == 256
+        assert info["sni_hostname"] == "example.org"
+        expected = "sha256:" + hashlib.sha256(b"fake_cert_data").hexdigest()
+        assert info["cert_fingerprint"] == expected
+
+    def test_get_connection_info_error(self):
+        ssl_obj = Mock()
+        ssl_obj.getpeercert.side_effect = Exception("boom")
+        info = GeminiTLSClient()._get_connection_info(ssl_obj, 1.0)
+        assert info["connection_time"] == 1.0
+        assert "error" in info
+
+    def test_get_connection_info_no_ssl_object(self):
+        info = GeminiTLSClient()._get_connection_info(None, 1.0)
+        assert info["connection_time"] == 1.0
+        assert "error" in info
 
 
 def _make_self_signed_cert(tmp_path):
     """Write a self-signed cert+key to ``tmp_path`` and return (cert_pem_path,
     key_pem_path, der_sha256_hex)."""
     import datetime
-    import hashlib
 
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
@@ -546,13 +345,9 @@ def _make_self_signed_cert(tmp_path):
 
 
 class TestRealTLSHandshake:
-    """Drive connect()/send/receive against a REAL loopback TLS server.
-
-    Every other TLS test mocks socket/wrap_socket/do_handshake, so the success
-    path (SNI delivery, handshake, fingerprint extraction from the real peer
-    DER -- the foundation TOFU depends on) is never behaviorally exercised.
-    These tests close that gap and also cover the dedicated-executor I/O path.
-    """
+    """Drive connect()/send/receive/close against a REAL loopback TLS server,
+    behaviorally exercising SNI delivery, the handshake, and fingerprint
+    extraction from the real peer DER (the foundation TOFU depends on)."""
 
     @pytest.mark.asyncio
     async def test_real_handshake_extracts_matching_fingerprint(self, tmp_path):
@@ -561,14 +356,10 @@ class TestRealTLSHandshake:
         seen_sni: list[str | None] = []
         server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         server_ctx.load_cert_chain(cert_path, key_path)
-
-        def _capture_sni(sslobj, server_name, sslctx):
-            seen_sni.append(server_name)
-
-        server_ctx.sni_callback = _capture_sni
+        server_ctx.sni_callback = lambda sslobj, name, ctx: seen_sni.append(name)
 
         async def handle(reader, writer):
-            await reader.readline()  # consume the request line
+            await reader.readline()
             writer.write(b"20 text/gemini\r\nhello\r\n")
             await writer.drain()
             writer.close()
@@ -578,21 +369,19 @@ class TestRealTLSHandshake:
 
         client = GeminiTLSClient(TLSConfig())
         try:
-            ssl_sock, info = await client.connect(
+            conn, info = await client.connect(
                 "localhost", port, connect_ip="127.0.0.1", timeout=5.0
             )
             try:
-                # The fingerprint TOFU pins must be sha256 of the real peer DER.
                 assert info["cert_fingerprint"] == f"sha256:{expected_sha256}"
                 assert info["tls_version"] in ("TLSv1.2", "TLSv1.3")
-                # SNI must carry the hostname (not the pinned IP) for vhosting.
                 assert seen_sni and seen_sni[0] == "localhost"
 
-                await client.send_data(ssl_sock, b"gemini://localhost/\r\n")
-                body = await client.receive_data(ssl_sock, max_size=1024)
+                await client.send_data(conn, b"gemini://localhost/\r\n")
+                body = await client.receive_data(conn, max_size=1024)
                 assert body == b"20 text/gemini\r\nhello\r\n"
             finally:
-                await client.close(ssl_sock)
+                await client.close(conn)
         finally:
             server.close()
             await server.wait_closed()
@@ -605,7 +394,7 @@ class TestRealTLSHandshake:
 
         async def handle(reader, writer):
             await reader.readline()
-            writer.write(b"x" * 4096)  # exceeds the 1024 cap below
+            writer.write(b"x" * 4096)
             await writer.drain()
             writer.close()
 
@@ -614,16 +403,58 @@ class TestRealTLSHandshake:
 
         client = GeminiTLSClient(TLSConfig())
         try:
-            ssl_sock, _ = await client.connect(
+            conn, _ = await client.connect(
                 "localhost", port, connect_ip="127.0.0.1", timeout=5.0
             )
             try:
-                await client.send_data(ssl_sock, b"gemini://localhost/\r\n")
+                await client.send_data(conn, b"gemini://localhost/\r\n")
                 with pytest.raises(TLSConnectionError, match="exceeds maximum size"):
-                    await client.receive_data(ssl_sock, max_size=1024)
+                    await client.receive_data(conn, max_size=1024)
             finally:
-                await client.close(ssl_sock)
+                await client.close(conn)
         finally:
+            server.close()
+            await server.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_slow_loris_read_is_cancellable(self, tmp_path):
+        """A peer that completes the handshake then dribbles bytes forever is cut
+        off at the wait_for deadline -- native asyncio makes the read genuinely
+        cancellable (the old run_in_executor design could not be)."""
+        cert_path, key_path, _ = _make_self_signed_cert(tmp_path)
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(cert_path, key_path)
+
+        stop = asyncio.Event()
+
+        async def handle(reader, writer):
+            await reader.readline()
+            try:
+                while not stop.is_set():
+                    writer.write(b"x")
+                    await writer.drain()
+                    await asyncio.sleep(0.05)
+            except (ConnectionError, OSError):
+                pass
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_ctx)
+        port = server.sockets[0].getsockname()[1]
+
+        client = GeminiTLSClient(TLSConfig())
+        try:
+            conn, _ = await client.connect(
+                "localhost", port, connect_ip="127.0.0.1", timeout=5.0
+            )
+            try:
+                await client.send_data(conn, b"gemini://localhost/\r\n")
+                with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+                    await asyncio.wait_for(
+                        client.receive_data(conn, max_size=10_000_000), timeout=0.3
+                    )
+            finally:
+                await client.close(conn)
+        finally:
+            stop.set()
             server.close()
             await server.wait_closed()
 

@@ -352,7 +352,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             Appropriate response based on status code
 
         """
-        ssl_sock = None
+        connection = None
         try:
             # SSRF guard: reject internal/loopback/link-local targets before
             # opening the TLS connection, and pin the connection to a validated
@@ -412,7 +412,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 )
                 # Create temporary TLS client with client certificate
                 temp_tls_client = GeminiTLSClient(tls_config)
-                ssl_sock, connection_info = await temp_tls_client.connect(
+                connection, connection_info = await temp_tls_client.connect(
                     parsed_url.host,
                     parsed_url.port,
                     timeout=self.timeout_seconds,
@@ -420,7 +420,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 )
             else:
                 # Use default TLS client
-                ssl_sock, connection_info = await self.tls_client.connect(
+                connection, connection_info = await self.tls_client.connect(
                     parsed_url.host,
                     parsed_url.port,
                     timeout=self.timeout_seconds,
@@ -478,13 +478,14 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             request_data = f"{request_url}\r\n".encode()
 
             # Send request
-            await self.tls_client.send_data(ssl_sock, request_data)
+            await self.tls_client.send_data(connection, request_data)
 
-            # Receive response under an overall deadline. The per-recv socket
-            # timeout alone gives no total bound, so a server dripping one byte
-            # at a time could hold the connection open indefinitely (slow loris).
+            # Receive the response under an overall read deadline. With native
+            # asyncio TLS the read is genuinely cancellable, so a slow-loris peer
+            # dripping bytes is actually cut off at the deadline (no thread is
+            # left parked on a blocking recv).
             raw_response = await asyncio.wait_for(
-                self.tls_client.receive_data(ssl_sock, self.max_response_size),
+                self.tls_client.receive_data(connection, self.max_response_size),
                 timeout=self.timeout_seconds,
             )
 
@@ -525,8 +526,8 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             raise
         finally:
             # Always close the connection
-            if ssl_sock:
-                await self.tls_client.close(ssl_sock)
+            if connection:
+                await self.tls_client.close(connection)
 
     # _get_cached_response / _cache_response are provided by TTLCacheMixin.
 

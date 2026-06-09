@@ -1,11 +1,19 @@
-"""TLS client implementation for Gemini protocol with SNI support."""
+"""TLS client implementation for Gemini protocol with SNI support.
+
+Uses native asyncio TLS (``asyncio.open_connection(ssl=...)``) so connect,
+handshake and every read are genuinely cancellable: a per-request
+``asyncio.wait_for`` deadline actually unblocks a stalled/slow-loris peer
+instead of leaving a thread parked on a blocking ``recv`` (the previous
+``run_in_executor`` design could not be cancelled and shared a thread pool with
+DNS resolution). No worker threads are held, so one slow Gemini server can no
+longer degrade unrelated requests.
+"""
 
 import asyncio
 import contextlib
 import socket
 import ssl
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,19 +21,12 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
-# Dedicated thread pool for the blocking TLS socket operations (connect, TLS
-# handshake, recv, sendall, unwrap). Gemini has no native-asyncio TLS transport
-# yet, so these run via run_in_executor. Keeping them OFF the default loop
-# executor matters for safety: loop.getaddrinfo() -- the SSRF DNS resolution
-# performed before EVERY Gopher and Gemini connection -- also runs on the
-# default executor. If Gemini's blocking reads shared that pool, a handful of
-# stalled or hostile Gemini peers could saturate it and stall DNS (and thus the
-# SSRF guard) for every request, turning one slow server into a whole-server
-# DoS. Isolating Gemini I/O here contains that blast radius to Gemini alone.
-_TLS_IO_THREADS = 16
-_TLS_IO_EXECUTOR = ThreadPoolExecutor(
-    max_workers=_TLS_IO_THREADS, thread_name_prefix="gemini-tls-io"
-)
+READ_CHUNK = 65536
+# Short probe deadline used once the size cap is reached: a server that sent
+# exactly ``max_size`` bytes and then holds the connection open (delayed/absent
+# close_notify) would otherwise block until the request deadline. A probe
+# timeout means "no more data is forthcoming", so treat the response as complete.
+PROBE_TIMEOUT_SECONDS = 1.0
 
 
 @dataclass
@@ -59,6 +60,14 @@ class TLSConnectionError(Exception):
     def __init__(self, message: str, original_error: Exception | None = None):
         super().__init__(message)
         self.original_error = original_error
+
+
+@dataclass
+class TLSConnection:
+    """An established Gemini TLS connection (native asyncio streams)."""
+
+    reader: asyncio.StreamReader
+    writer: asyncio.StreamWriter
 
 
 class GeminiTLSClient:
@@ -138,21 +147,24 @@ class GeminiTLSClient:
         timeout: float | None = None,
         *,
         connect_ip: str | None = None,
-    ) -> tuple[ssl.SSLSocket, dict[str, Any]]:
-        """Establish TLS connection with SNI support.
+    ) -> tuple[TLSConnection, dict[str, Any]]:
+        """Establish a TLS connection with SNI support.
 
         Args:
             host: Hostname (used for SNI and TOFU; never re-resolved here).
             port: Port number (default: 1965)
-            timeout: Connection timeout (uses config default if None)
+            timeout: Overall deadline for connect + TLS handshake (uses config
+                default if None). Native asyncio makes this genuinely
+                cancellable.
             connect_ip: Pre-validated IP to connect to. When given, the socket
-                targets this IP (with a matching address family) instead of
-                re-resolving ``host`` -- this pins the connection to the address
-                the SSRF guard vetted, closing the DNS-rebinding window, while
-                ``host`` is still sent as SNI so virtual hosting/TOFU work.
+                targets this IP literal (which ``getaddrinfo`` returns verbatim,
+                so there is no DNS re-resolution) instead of ``host`` -- this
+                pins the connection to the address the SSRF guard vetted, closing
+                the DNS-rebinding window, while ``host`` is still sent as SNI so
+                virtual hosting/TOFU work.
 
         Returns:
-            Tuple of (SSL socket, connection info)
+            Tuple of (TLSConnection, connection info)
 
         Raises:
             TLSConnectionError: If connection fails
@@ -160,7 +172,7 @@ class GeminiTLSClient:
         # Host-level SSRF/allowlist validation is performed by the caller
         # (GeminiClient) before reaching the transport.
         timeout = timeout or self.config.timeout_seconds
-        target_ip = connect_ip or host
+        target = connect_ip or host
 
         logger.info(
             "Establishing TLS connection",
@@ -171,100 +183,78 @@ class GeminiTLSClient:
         )
 
         start_time = time.time()
-
-        sock: socket.socket | None = None
-        ssl_sock: ssl.SSLSocket | None = None
         try:
-            # Match the socket family to the pinned IP so IPv6 targets work too
-            # (the old AF_INET-only socket silently failed on AAAA-only hosts).
-            family = socket.AF_INET6 if ":" in target_ip else socket.AF_INET
-            sock = socket.socket(family, socket.SOCK_STREAM)
-            sock.settimeout(timeout)
-
-            # Connect to the pinned IP (no DNS re-resolution).
-            await asyncio.get_running_loop().run_in_executor(
-                _TLS_IO_EXECUTOR, sock.connect, (target_ip, port)
+            # ssl + server_hostname runs the TLS handshake during connection
+            # setup and sends SNI. wait_for bounds connect AND handshake under a
+            # single cancellable deadline.
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(
+                    host=target,
+                    port=port,
+                    ssl=self.ssl_context,
+                    server_hostname=host,
+                ),
+                timeout=timeout,
             )
-
-            # Wrap socket with TLS, sending the hostname as SNI (mandatory for
-            # Gemini); wrap_socket takes ownership of sock on success.
-            ssl_sock = self.ssl_context.wrap_socket(
-                sock,
-                server_hostname=host,  # This enables SNI
-                do_handshake_on_connect=False,
-            )
-
-            # Perform TLS handshake
-            await asyncio.get_running_loop().run_in_executor(
-                _TLS_IO_EXECUTOR, ssl_sock.do_handshake
-            )
-
-            # Get connection information
-            connection_time = time.time() - start_time
-            connection_info = self._get_connection_info(ssl_sock, connection_time)
-
-            logger.info(
-                "TLS connection established",
-                host=host,
-                port=port,
-                connection_time=connection_time,
-                tls_version=connection_info.get("tls_version"),
-                cipher=connection_info.get("cipher"),
-            )
-
-            return ssl_sock, connection_info
-
-        except Exception as e:
-            # Close whatever we opened so a failed connect/handshake can't leak
-            # a file descriptor (repeated failures would otherwise exhaust FDs).
-            if ssl_sock is not None:
-                with contextlib.suppress(OSError):
-                    ssl_sock.close()
-            elif sock is not None:
-                with contextlib.suppress(OSError):
-                    sock.close()
-
-            if isinstance(e, TimeoutError):
-                raise TLSConnectionError(
-                    f"Connection timeout after {timeout} seconds"
-                ) from e
-            if isinstance(e, socket.gaierror):
-                raise TLSConnectionError(
-                    f"DNS resolution failed for {host}: {e}", e
-                ) from e
-            if isinstance(e, ConnectionRefusedError):
-                raise TLSConnectionError(f"Connection refused by {host}:{port}") from e
-            if isinstance(e, ssl.SSLError):
-                raise TLSConnectionError(f"TLS handshake failed: {e}", e) from e
+        except TimeoutError as e:
+            raise TLSConnectionError(
+                f"Connection timeout after {timeout} seconds"
+            ) from e
+        except socket.gaierror as e:
+            raise TLSConnectionError(f"DNS resolution failed for {host}: {e}", e) from e
+        except ConnectionRefusedError as e:
+            raise TLSConnectionError(f"Connection refused by {host}:{port}") from e
+        except ssl.SSLError as e:
+            raise TLSConnectionError(f"TLS handshake failed: {e}", e) from e
+        except OSError as e:
             raise TLSConnectionError(f"Connection failed: {e}", e) from e
 
+        ssl_object = writer.get_extra_info("ssl_object")
+        connection_info = self._get_connection_info(
+            ssl_object, time.time() - start_time
+        )
+
+        logger.info(
+            "TLS connection established",
+            host=host,
+            port=port,
+            connection_time=connection_info.get("connection_time"),
+            tls_version=connection_info.get("tls_version"),
+            cipher=connection_info.get("cipher"),
+        )
+
+        return TLSConnection(reader=reader, writer=writer), connection_info
+
     def _get_connection_info(
-        self, ssl_sock: ssl.SSLSocket, connection_time: float
+        self, ssl_object: ssl.SSLObject | None, connection_time: float
     ) -> dict[str, Any]:
-        """Extract connection information from SSL socket.
+        """Extract connection information from the TLS object.
 
         Args:
-            ssl_sock: Connected SSL socket
-            connection_time: Time taken to establish connection
+            ssl_object: The negotiated ``ssl.SSLObject`` (from the asyncio
+                transport's ``ssl_object`` extra info), or None if unavailable.
+            connection_time: Time taken to establish the connection.
 
         Returns:
             Dictionary with connection information
         """
+        if ssl_object is None:  # pragma: no cover - defensive
+            return {"connection_time": connection_time, "error": "no ssl object"}
         try:
-            peer_cert = ssl_sock.getpeercert(binary_form=True)
-            # Under CERT_NONE getpeercert() returns {}, so derive cert details
-            # from the DER instead (this is where the expiry actually lives).
+            peer_cert = ssl_object.getpeercert(binary_form=True)
+            # Under CERT_NONE getpeercert() (dict form) is empty, so derive cert
+            # details from the DER instead (this is where the expiry lives).
             peer_cert_info = self._parse_peer_cert(peer_cert)
-            cipher = ssl_sock.cipher()
+            cipher = ssl_object.cipher()
 
             info: dict[str, Any] = {
                 "connection_time": connection_time,
-                "tls_version": ssl_sock.version(),
+                "tls_version": ssl_object.version(),
                 "cipher": cipher[0] if cipher else None,
                 "cipher_strength": cipher[2] if cipher else None,
                 "peer_cert_der": peer_cert,
                 "peer_cert_info": peer_cert_info,
-                "sni_hostname": ssl_sock.server_hostname,
+                "sni_hostname": ssl_object.server_hostname,
             }
 
             # Add certificate fingerprint if available
@@ -303,52 +293,43 @@ class GeminiTLSClient:
             logger.warning("Failed to parse peer certificate", error=str(e))
             return {}
 
-    async def close(self, ssl_sock: ssl.SSLSocket) -> None:
-        """Close TLS connection gracefully with close_notify.
+    async def close(self, conn: TLSConnection) -> None:
+        """Close a TLS connection gracefully.
 
         Args:
-            ssl_sock: SSL socket to close
+            conn: The connection to close
         """
-        try:
-            # Send TLS close_notify alert
-            await asyncio.get_running_loop().run_in_executor(
-                _TLS_IO_EXECUTOR, ssl_sock.unwrap
-            )
-        except Exception as e:
-            logger.warning("Error during TLS close_notify", error=str(e))
-        finally:
-            # Close the underlying socket
-            try:
-                ssl_sock.close()
-            except Exception as e:
-                logger.warning("Error closing socket", error=str(e))
+        conn.writer.close()
+        # Best-effort: ignore errors (incl. SSL close_notify hiccups) so they
+        # don't mask the result the caller already obtained.
+        with contextlib.suppress(Exception):
+            await conn.writer.wait_closed()
 
-    async def send_data(self, ssl_sock: ssl.SSLSocket, data: bytes) -> None:
-        """Send data over TLS connection.
+    async def send_data(self, conn: TLSConnection, data: bytes) -> None:
+        """Send data over the TLS connection.
 
         Args:
-            ssl_sock: Connected SSL socket
+            conn: Connected TLS connection
             data: Data to send
 
         Raises:
             TLSConnectionError: If send fails
         """
         try:
-            await asyncio.get_running_loop().run_in_executor(
-                _TLS_IO_EXECUTOR, ssl_sock.sendall, data
-            )
+            conn.writer.write(data)
+            await conn.writer.drain()
         except Exception as e:
             raise TLSConnectionError(f"Failed to send data: {e}", e) from e
 
     async def receive_data(
         self,
-        ssl_sock: ssl.SSLSocket,
+        conn: TLSConnection,
         max_size: int = 1024 * 1024,  # 1MB default
     ) -> bytes:
-        """Receive data from TLS connection.
+        """Receive data from the TLS connection, bounded by ``max_size``.
 
         Args:
-            ssl_sock: Connected SSL socket
+            conn: Connected TLS connection
             max_size: Maximum data size to receive
 
         Returns:
@@ -357,37 +338,27 @@ class GeminiTLSClient:
         Raises:
             TLSConnectionError: If receive fails or the response exceeds max_size.
         """
-        loop = asyncio.get_running_loop()
+        reader = conn.reader
         try:
             chunks: list[bytes] = []
             total = 0
             while total < max_size:
-                chunk = await loop.run_in_executor(
-                    _TLS_IO_EXECUTOR, ssl_sock.recv, min(4096, max_size - total)
-                )
+                chunk = await reader.read(min(READ_CHUNK, max_size - total))
                 if not chunk:
                     return b"".join(chunks)
                 chunks.append(chunk)
                 total += len(chunk)
 
             # Hit the cap without EOF: probe one more byte so an over-limit
-            # response is REJECTED rather than silently truncated (which would
-            # hand the model a corrupted, incomplete document as if complete).
-            #
-            # Use a short timeout for the probe: a server that sent a body of
-            # exactly max_size bytes and then holds the connection open
-            # (delayed or absent close_notify) would otherwise block this
-            # recv until the socket deadline and turn a complete, valid
-            # response into a spurious error. A probe timeout means "no more
-            # data is forthcoming", so treat the response as complete.
-            prev_timeout = ssl_sock.gettimeout()
-            ssl_sock.settimeout(1.0)
+            # response is REJECTED rather than silently truncated. Use a short
+            # probe deadline so a complete, exactly-max_size response whose
+            # server holds the connection open is still treated as complete.
             try:
-                extra = await loop.run_in_executor(_TLS_IO_EXECUTOR, ssl_sock.recv, 1)
-            except (TimeoutError, ssl.SSLError, OSError):
+                extra = await asyncio.wait_for(
+                    reader.read(1), timeout=PROBE_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
                 extra = b""
-            finally:
-                ssl_sock.settimeout(prev_timeout)
             if extra:
                 raise TLSConnectionError(
                     f"Response exceeds maximum size of {max_size} bytes"

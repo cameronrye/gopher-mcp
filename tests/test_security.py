@@ -110,28 +110,31 @@ class TestResourceExhaustion:
     async def test_response_size_limits(self):
         """Oversized responses are rejected by the REAL receive_data cap.
 
-        The 1KB cap lives inside receive_data, so we drive the real method and
-        mock only the raw socket recv -- the previous version mocked
+        The 1KB cap lives inside receive_data, so we drive the real method over a
+        real asyncio stream fed past the cap -- the previous version mocked
         receive_data itself, which bypassed the very logic under test.
         """
+        import asyncio
+
+        from gopher_mcp.gemini_tls import TLSConnection
+
         client = GeminiClient(max_response_size=1024, tofu_enabled=False)
 
-        mock_sock = Mock()
-        # Fill exactly to the cap, then a probe byte proves more data remained.
-        mock_sock.recv.side_effect = [b"A" * 1024, b"A"]
-        mock_sock.gettimeout.return_value = 5.0
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"A" * 2048)  # exceeds the 1 KB cap
+        reader.feed_eof()
+        conn = TLSConnection(reader=reader, writer=Mock())
 
         with (
-            patch.object(client.tls_client, "connect", return_value=(mock_sock, {})),
+            patch.object(client.tls_client, "connect", return_value=(conn, {})),
             patch.object(client.tls_client, "send_data"),
             patch.object(client.tls_client, "close"),
         ):
             result = await client.fetch("gemini://example.com/")
 
+        # The real receive_data loop hit the cap and rejected the response.
         assert isinstance(result, GeminiErrorResult)
         assert result.error["code"] == "TLS_ERROR"
-        # Proves the real loop ran: an initial read plus the over-limit probe.
-        assert mock_sock.recv.call_count >= 2
 
     @pytest.mark.asyncio
     async def test_timeout_protection(self):
