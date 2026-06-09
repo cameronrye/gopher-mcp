@@ -80,6 +80,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: list[str] | None = None,
         allow_local_hosts: bool = False,
+        allowed_ports: list[int] | None = None,
         max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
@@ -121,6 +122,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         )
 
         self.allow_local_hosts = allow_local_hosts
+        self.allowed_ports = allowed_ports
 
         # Convert allowed hosts to a set for faster lookup
         self.allowed_hosts: set[str] | None = (
@@ -328,6 +330,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
                     parsed_url.host,
                     parsed_url.port,
                     allow_local=self.allow_local_hosts,
+                    allowed_ports=self.allowed_ports,
                 ),
                 timeout=self.timeout_seconds,
             )

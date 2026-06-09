@@ -51,6 +51,12 @@ class GopherConfig(BaseSettings):
         description="Allow connections to loopback/private/internal addresses "
         "(disabled by default to prevent SSRF)",
     )
+    allowed_ports: list[int] | None = Field(
+        default=None,
+        description="Optional positive port allowlist (comma-separated, e.g. "
+        "70). When set, only these ports may be connected to, closing the "
+        "arbitrary-port port-scanning gap. None = any non-dangerous port.",
+    )
     max_selector_length: int = Field(
         default=1024,
         description="Maximum selector string length",
@@ -113,6 +119,16 @@ class GopherConfig(BaseSettings):
             return v  # type: ignore[unreachable]
         return [host.strip() for host in v.split(",") if host.strip()]
 
+    @field_validator("allowed_ports", mode="before")
+    @classmethod
+    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
+        """Parse a comma-separated port allowlist from an environment variable."""
+        if v is None or v == "":
+            return None
+        if isinstance(v, list):
+            return [int(p) for p in v]
+        return [int(p.strip()) for p in str(v).split(",") if p.strip()]
+
 
 class GeminiConfig(BaseSettings):
     """Configuration for Gemini protocol client."""
@@ -153,6 +169,12 @@ class GeminiConfig(BaseSettings):
         default=False,
         description="Allow connections to loopback/private/internal addresses "
         "(disabled by default to prevent SSRF)",
+    )
+    allowed_ports: list[int] | None = Field(
+        default=None,
+        description="Optional positive port allowlist (comma-separated, e.g. "
+        "1965). When set, only these ports may be connected to, closing the "
+        "arbitrary-port port-scanning gap. None = any non-dangerous port.",
     )
     tofu_enabled: bool = Field(
         default=True,
@@ -224,6 +246,16 @@ class GeminiConfig(BaseSettings):
         if isinstance(v, list):
             return v
         return [host.strip() for host in v.split(",") if host.strip()]
+
+    @field_validator("allowed_ports", mode="before")
+    @classmethod
+    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
+        """Parse a comma-separated port allowlist from an environment variable."""
+        if v is None or v == "":
+            return None
+        if isinstance(v, list):
+            return [int(p) for p in v]
+        return [int(p.strip()) for p in str(v).split(",") if p.strip()]
 
     @field_validator("denied_mime_types", mode="before")
     @classmethod

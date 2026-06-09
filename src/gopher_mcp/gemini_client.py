@@ -68,6 +68,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: list[str] | None = None,
         allow_local_hosts: bool = False,
+        allowed_ports: list[int] | None = None,
         tls_config: TLSConfig | None = None,
         tofu_enabled: bool = True,
         tofu_storage_path: str | None = None,
@@ -113,6 +114,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         self.denied_mime_types = frozenset(denied_mime_types or ())
         self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
         self.allow_local_hosts = allow_local_hosts
+        self.allowed_ports = allowed_ports
         self.tofu_enabled = tofu_enabled
         self.client_certs_enabled = client_certs_enabled
 
@@ -364,6 +366,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                     parsed_url.host,
                     parsed_url.port,
                     allow_local=self.allow_local_hosts,
+                    allowed_ports=self.allowed_ports,
                 ),
                 timeout=self.timeout_seconds,
             )

@@ -134,6 +134,7 @@ async def validate_target(
     *,
     allow_local: bool = False,
     allowed_hosts: Iterable[str] | None = None,
+    allowed_ports: Iterable[int] | None = None,
 ) -> list[str]:
     """Validate a connection target and return the vetted IP(s) to connect to.
 
@@ -148,6 +149,10 @@ async def validate_target(
         allow_local: If True, skip the internal-address checks (opt-in).
         allowed_hosts: Optional iterable of permitted hostnames; when provided,
             ``host`` must normalize to one of them.
+        allowed_ports: Optional iterable of permitted ports; when provided, only
+            these ports are reachable (a positive allowlist that closes the
+            arbitrary-port / port-scanning gap left by the DANGEROUS_PORTS
+            denylist). When ``None`` the denylist alone applies.
 
     Returns:
         The validated IP address strings to connect to, in resolution order.
@@ -162,6 +167,12 @@ async def validate_target(
         normalize_host(h) for h in allowed_hosts
     }:
         raise SSRFError(f"Host not allowed: {host}")
+
+    # Positive allowlist (opt-in): when configured, only these ports are
+    # reachable -- this closes the port-scanning gap the DANGEROUS_PORTS
+    # denylist leaves open (any non-listed port on a public host).
+    if allowed_ports is not None and port not in set(allowed_ports):
+        raise SSRFError(f"Port not allowed: {port}")
 
     # Defense-in-depth: refuse well-known non-protocol service ports regardless
     # of how the host resolves.
