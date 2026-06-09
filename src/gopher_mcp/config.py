@@ -283,11 +283,6 @@ class ServerConfig(BaseSettings):
         default=None,
         description="Log file path (optional, logs to stdout if not set)",
     )
-    development_mode: bool = Field(
-        default=False,
-        description="Enable development mode",
-    )
-
     model_config = SettingsConfigDict(
         # Namespace server settings so common ambient vars (LOG_LEVEL,
         # DEVELOPMENT_MODE, ...) set by other tooling don't silently bleed in.

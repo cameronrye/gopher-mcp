@@ -12,7 +12,6 @@ from gopher_mcp.gemini_tls import (
     GeminiTLSClient,
     TLSConfig,
     TLSConnectionError,
-    create_tls_client,
 )
 
 
@@ -450,34 +449,6 @@ class TestGeminiTLSClient:
 
         assert info["connection_time"] == 1.0
         assert "error" in info
-
-
-class TestCreateTLSClient:
-    """Test TLS client factory function."""
-
-    def test_create_default_client(self):
-        """Test creating client with defaults."""
-        client = create_tls_client()
-
-        assert isinstance(client, GeminiTLSClient)
-        assert client.config.min_version == "TLSv1.2"
-        assert client.config.timeout_seconds == 30.0
-
-    def test_create_custom_client(self):
-        """Test creating client with custom settings."""
-        client = create_tls_client(
-            min_version="TLSv1.3",
-            timeout_seconds=60.0,
-            client_cert_path="/cert.pem",
-            client_key_path="/key.pem",
-            verify_mode=ssl.CERT_REQUIRED,
-        )
-
-        assert client.config.min_version == "TLSv1.3"
-        assert client.config.timeout_seconds == 60.0
-        assert client.config.client_cert_path == "/cert.pem"
-        assert client.config.client_key_path == "/key.pem"
-        assert client.config.verify_mode == ssl.CERT_REQUIRED
 
 
 class TestGeminiTLSAdditionalCoverage:

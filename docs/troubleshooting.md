@@ -173,7 +173,7 @@ The Claude Desktop configuration file location depends on your operating system:
 
 - Gopher settings use the `GOPHER_` prefix (for example `GOPHER_TIMEOUT_SECONDS`).
 - Gemini settings use the `GEMINI_` prefix (for example `GEMINI_TIMEOUT_SECONDS`).
-- Server and logging settings use the `GOPHER_MCP_` prefix (for example `GOPHER_MCP_LOG_LEVEL`, `GOPHER_MCP_DEVELOPMENT_MODE`).
+- Server and logging settings use the `GOPHER_MCP_` prefix (for example `GOPHER_MCP_LOG_LEVEL`, `GOPHER_MCP_LOG_FILE_PATH`).
 
 !!! warning
     Unprefixed names such as a bare `LOG_LEVEL` or `TIMEOUT_SECONDS` are **ignored**. Always use the prefixed form. Variable names are case-sensitive, and boolean values must be exactly `true` or `false`.

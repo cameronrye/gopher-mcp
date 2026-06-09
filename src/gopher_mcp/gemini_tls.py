@@ -398,33 +398,3 @@ class GeminiTLSClient:
             raise
         except Exception as e:
             raise TLSConnectionError(f"Failed to receive data: {e}", e) from e
-
-
-def create_tls_client(
-    min_version: str = "TLSv1.2",
-    timeout_seconds: float = 30.0,
-    client_cert_path: str | None = None,
-    client_key_path: str | None = None,
-    verify_mode: ssl.VerifyMode = ssl.CERT_NONE,
-) -> GeminiTLSClient:
-    """Create a configured TLS client for Gemini connections.
-
-    Args:
-        min_version: Minimum TLS version ("TLSv1.2" or "TLSv1.3")
-        timeout_seconds: Connection timeout
-        client_cert_path: Path to client certificate file
-        client_key_path: Path to client private key file
-        verify_mode: Certificate verification mode
-
-    Returns:
-        Configured TLS client
-    """
-    config = TLSConfig(
-        min_version=min_version,
-        timeout_seconds=timeout_seconds,
-        client_cert_path=client_cert_path,
-        client_key_path=client_key_path,
-        verify_mode=verify_mode,
-    )
-
-    return GeminiTLSClient(config)

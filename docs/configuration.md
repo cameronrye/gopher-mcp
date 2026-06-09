@@ -119,7 +119,6 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GOPHER_MCP_LOG_LEVEL` | String | `INFO` | Verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 | `GOPHER_MCP_STRUCTURED_LOGGING` | Boolean | `true` | Emit structured JSON logs instead of console-rendered output. |
 | `GOPHER_MCP_LOG_FILE_PATH` | File path | empty | Optionally tee logs to a file. Logs always go to **stderr** (never stdout, which carries the MCP protocol stream). |
-| `GOPHER_MCP_DEVELOPMENT_MODE` | Boolean | `false` | Enable development-mode behavior. |
 
 ## Configuration Presets
 
@@ -133,7 +132,6 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 
 ```bash
 # Verbose logging, caching off for fresh results
-GOPHER_MCP_DEVELOPMENT_MODE=true
 GOPHER_MCP_LOG_LEVEL=DEBUG
 GOPHER_CACHE_ENABLED=false
 GEMINI_CACHE_ENABLED=false
