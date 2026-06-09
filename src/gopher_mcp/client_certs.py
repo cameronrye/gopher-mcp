@@ -53,8 +53,15 @@ class ClientCertificateManager:
         self._load_registry()
 
     def _get_cert_key(self, host: str, port: int, path: str) -> str:
-        """Get storage key for certificate scope."""
-        return f"{host}:{port}{path}"
+        """Get storage key for certificate scope.
+
+        Normalize the host (lowercase, strip IPv6 brackets and a trailing dot)
+        so a case/trailing-dot variant resolves to the same stored identity,
+        matching the TOFU and SSRF/allowlist host handling.
+        """
+        from .ssrf import normalize_host
+
+        return f"{normalize_host(host)}:{port}{path}"
 
     def _load_registry(self) -> None:
         """Load certificate registry from storage.
@@ -292,12 +299,15 @@ class ClientCertificateManager:
                 return str(cert_path), str(key_path)
 
         # Try to find a certificate for a parent path
+        from .ssrf import normalize_host
+
+        norm_host = normalize_host(host)
         best_match = None
         best_path_len = 0
 
         for stored_cert in self._certificates.values():
             if (
-                stored_cert.host == host
+                normalize_host(stored_cert.host) == norm_host
                 and stored_cert.port == port
                 and path.startswith(stored_cert.path)
                 and len(stored_cert.path) > best_path_len
