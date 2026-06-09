@@ -199,6 +199,14 @@ class TestGopherURL:
         assert url.gopher_type == "7"
         assert url.search == "test query"
 
+    def test_empty_host_rejected(self):
+        """An empty/whitespace host must be rejected at the model boundary, the
+        same as GeminiURL (otherwise an empty host is only caught later)."""
+        with pytest.raises(ValidationError, match="Host cannot be empty"):
+            GopherURL(host="", port=70)
+        with pytest.raises(ValidationError, match="Host cannot be empty"):
+            GopherURL(host="   ", port=70)
+
     def test_gopher_type_validation(self):
         """Test Gopher type validation."""
         with pytest.raises(ValidationError) as exc_info:

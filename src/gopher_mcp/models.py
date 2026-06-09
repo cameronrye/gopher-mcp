@@ -166,6 +166,14 @@ class GopherURL(BaseModel):
             raise ValueError("Gopher type must be a single character")
         return v
 
+    @field_validator("host")
+    @classmethod
+    def validate_host(cls, v: str) -> str:
+        """Validate hostname is not empty (mirrors GeminiURL)."""
+        if not v.strip():
+            raise ValueError("Host cannot be empty")
+        return v.strip()
+
 
 class CacheEntry(_BaseCacheEntry[GopherFetchResponse]):
     """Model for Gopher cache entries."""
