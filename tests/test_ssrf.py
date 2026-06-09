@@ -135,3 +135,25 @@ class TestValidateTargetPortPolicy:
     async def test_protocol_default_ports_allowed(self):
         await validate_target("example.com", 70)  # Gopher
         await validate_target("example.com", 1965)  # Gemini
+
+
+class TestPortAllowlist:
+    """An optional positive port allowlist closes the port-scanning gap: the
+    DANGEROUS_PORTS denylist leaves every non-listed port on a public host
+    reachable, so operators can opt into allowing only specific ports.
+    """
+
+    @pytest.mark.asyncio
+    async def test_non_allowed_port_rejected(self):
+        with pytest.raises(SSRFError, match="Port not allowed"):
+            await validate_target("8.8.8.8", 8080, allowed_ports=[70, 1965])
+
+    @pytest.mark.asyncio
+    async def test_allowed_port_passes(self):
+        result = await validate_target("8.8.8.8", 1965, allowed_ports=[70, 1965])
+        assert result == ["8.8.8.8"]
+
+    @pytest.mark.asyncio
+    async def test_none_allows_any_non_dangerous_port(self):
+        # Default (no allowlist): an arbitrary non-dangerous port is allowed.
+        await validate_target("8.8.8.8", 8080)

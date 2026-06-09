@@ -13,8 +13,8 @@ try:
 except PackageNotFoundError:  # pragma: no cover - source tree without install
     __version__ = "0.0.0+unknown"
 
-__author__ = "Gopher MCP Team"
-__email__ = "team@gopher-mcp.dev"
+__author__ = "Cameron Rye"
+__email__ = "c@meron.io"
 __license__ = "MIT"
 
 from .server import (

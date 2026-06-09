@@ -19,7 +19,7 @@ from gopher_mcp import models
 EXPECTED_KEYS: dict[str, set[str]] = {
     # Gopher result models
     "GopherMenuItem": {"type", "title", "selector", "host", "port", "next_url"},
-    "MenuResult": {"kind", "items", "request_info"},
+    "MenuResult": {"kind", "items", "truncated", "request_info"},
     "TextResult": {"kind", "charset", "bytes", "text", "truncated", "request_info"},
     "BinaryResult": {"kind", "bytes", "mime_type", "note", "request_info"},
     "ErrorResult": {"kind", "error", "request_info"},
@@ -49,6 +49,7 @@ EXPECTED_KEYS: dict[str, set[str]] = {
         "charset",
         "lang",
         "size",
+        "truncated",
         "request_info",
     },
     # Gemtext content models

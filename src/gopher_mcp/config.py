@@ -51,6 +51,12 @@ class GopherConfig(BaseSettings):
         description="Allow connections to loopback/private/internal addresses "
         "(disabled by default to prevent SSRF)",
     )
+    allowed_ports: list[int] | None = Field(
+        default=None,
+        description="Optional positive port allowlist (comma-separated, e.g. "
+        "70). When set, only these ports may be connected to, closing the "
+        "arbitrary-port port-scanning gap. None = any non-dangerous port.",
+    )
     max_selector_length: int = Field(
         default=1024,
         description="Maximum selector string length",
@@ -70,6 +76,14 @@ class GopherConfig(BaseSettings):
         "result.",
         ge=0,
         le=10485760,
+    )
+    max_menu_items: int = Field(
+        default=1000,
+        description="LLM-facing cap on the number of Gopher menu items returned "
+        "(a 1 MB directory can expand to tens of thousands of items); 0 = "
+        "unlimited. Truncation is flagged on the result.",
+        ge=0,
+        le=1000000,
     )
     requests_per_minute: float = Field(
         default=0.0,
@@ -104,6 +118,16 @@ class GopherConfig(BaseSettings):
         if isinstance(v, list):  # type: ignore[unreachable]
             return v  # type: ignore[unreachable]
         return [host.strip() for host in v.split(",") if host.strip()]
+
+    @field_validator("allowed_ports", mode="before")
+    @classmethod
+    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
+        """Parse a comma-separated port allowlist from an environment variable."""
+        if v is None or v == "":
+            return None
+        if isinstance(v, list):
+            return [int(p) for p in v]
+        return [int(p.strip()) for p in str(v).split(",") if p.strip()]
 
 
 class GeminiConfig(BaseSettings):
@@ -145,6 +169,12 @@ class GeminiConfig(BaseSettings):
         default=False,
         description="Allow connections to loopback/private/internal addresses "
         "(disabled by default to prevent SSRF)",
+    )
+    allowed_ports: list[int] | None = Field(
+        default=None,
+        description="Optional positive port allowlist (comma-separated, e.g. "
+        "1965). When set, only these ports may be connected to, closing the "
+        "arbitrary-port port-scanning gap. None = any non-dangerous port.",
     )
     tofu_enabled: bool = Field(
         default=True,
@@ -217,6 +247,16 @@ class GeminiConfig(BaseSettings):
             return v
         return [host.strip() for host in v.split(",") if host.strip()]
 
+    @field_validator("allowed_ports", mode="before")
+    @classmethod
+    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
+        """Parse a comma-separated port allowlist from an environment variable."""
+        if v is None or v == "":
+            return None
+        if isinstance(v, list):
+            return [int(p) for p in v]
+        return [int(p.strip()) for p in str(v).split(",") if p.strip()]
+
     @field_validator("denied_mime_types", mode="before")
     @classmethod
     def parse_denied_mime_types(cls, v: None | str | list[str]) -> list[str]:
@@ -243,11 +283,6 @@ class ServerConfig(BaseSettings):
         default=None,
         description="Log file path (optional, logs to stdout if not set)",
     )
-    development_mode: bool = Field(
-        default=False,
-        description="Enable development mode",
-    )
-
     model_config = SettingsConfigDict(
         # Namespace server settings so common ambient vars (LOG_LEVEL,
         # DEVELOPMENT_MODE, ...) set by other tooling don't silently bleed in.

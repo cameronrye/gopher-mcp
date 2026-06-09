@@ -56,6 +56,11 @@ class MenuResult(BaseModel):
 
     kind: Literal["menu"] = "menu"
     items: list[GopherMenuItem] = Field(..., description="List of menu items")
+    truncated: bool = Field(
+        default=False,
+        description="True if the menu had more items than the render limit and "
+        "`items` was truncated",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -664,6 +669,11 @@ class GeminiGemtextResult(BaseModel):
     charset: str = Field(default="utf-8", description="Character encoding")
     lang: str | None = Field(None, description="Language tag")
     size: int = Field(..., description="Content size in bytes")
+    truncated: bool = Field(
+        default=False,
+        description="True if the gemtext was truncated to the render limit "
+        "(`size` still reports the full original byte size)",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",

@@ -1,7 +1,9 @@
 """Tests for Gemini TLS client implementation."""
 
+import asyncio
 import socket
 import ssl
+import threading
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -10,8 +12,41 @@ from gopher_mcp.gemini_tls import (
     GeminiTLSClient,
     TLSConfig,
     TLSConnectionError,
-    create_tls_client,
 )
+
+
+class TestTLSExecutorIsolation:
+    """Blocking Gemini TLS I/O must run on a dedicated thread pool.
+
+    loop.getaddrinfo() (the SSRF DNS check for BOTH Gopher and Gemini) runs on
+    the default executor. If Gemini's blocking socket ops shared that pool, a
+    handful of stalled/hostile Gemini reads would saturate it and stall DNS for
+    every request, turning one slow server into a whole-server DoS.
+    """
+
+    @pytest.mark.asyncio
+    async def test_gemini_tls_io_does_not_starve_default_executor(self):
+        from gopher_mcp import gemini_tls
+
+        loop = asyncio.get_running_loop()
+        release = threading.Event()
+        executor = gemini_tls._TLS_IO_EXECUTOR
+
+        # Saturate the dedicated TLS pool with blocked workers.
+        stuck = [
+            loop.run_in_executor(executor, release.wait)
+            for _ in range(executor._max_workers + 4)
+        ]
+        try:
+            # The default executor (where getaddrinfo runs) must stay responsive
+            # even though the dedicated TLS pool is fully blocked.
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: "ok"), timeout=5.0
+            )
+            assert result == "ok"
+        finally:
+            release.set()
+            await asyncio.gather(*stuck, return_exceptions=True)
 
 
 class TestTLSConfig:
@@ -120,6 +155,15 @@ class TestGeminiTLSClient:
         context = client.ssl_context
 
         assert context.minimum_version == ssl.TLSVersion.TLSv1_3
+
+    def test_ssl_context_does_not_narrow_cipher_suites(self):
+        """The TLS 1.2 cipher list must not be narrowed to a few AEAD-only ECDHE
+        suites: that drops ECDHE-CBC and DHE suites and risks handshake failures
+        with conforming Gemini servers. Peer auth is via TOFU pinning, so the
+        channel cipher choice is not the security control -- keep Python's
+        secure defaults. A narrowed list yields ~9 ciphers; the default ~17."""
+        client = GeminiTLSClient()
+        assert len(client.ssl_context.get_ciphers()) > 12
 
     def test_ssl_context_caching(self):
         """Test that SSL context is cached."""
@@ -407,34 +451,6 @@ class TestGeminiTLSClient:
         assert "error" in info
 
 
-class TestCreateTLSClient:
-    """Test TLS client factory function."""
-
-    def test_create_default_client(self):
-        """Test creating client with defaults."""
-        client = create_tls_client()
-
-        assert isinstance(client, GeminiTLSClient)
-        assert client.config.min_version == "TLSv1.2"
-        assert client.config.timeout_seconds == 30.0
-
-    def test_create_custom_client(self):
-        """Test creating client with custom settings."""
-        client = create_tls_client(
-            min_version="TLSv1.3",
-            timeout_seconds=60.0,
-            client_cert_path="/cert.pem",
-            client_key_path="/key.pem",
-            verify_mode=ssl.CERT_REQUIRED,
-        )
-
-        assert client.config.min_version == "TLSv1.3"
-        assert client.config.timeout_seconds == 60.0
-        assert client.config.client_cert_path == "/cert.pem"
-        assert client.config.client_key_path == "/key.pem"
-        assert client.config.verify_mode == ssl.CERT_REQUIRED
-
-
 class TestGeminiTLSAdditionalCoverage:
     """Test additional TLS functionality for better coverage."""
 
@@ -484,6 +500,132 @@ class TestGeminiTLSAdditionalCoverage:
         # Test with very high timeout
         config = TLSConfig(timeout_seconds=3600.0)
         assert config.timeout_seconds == 3600.0
+
+
+def _make_self_signed_cert(tmp_path):
+    """Write a self-signed cert+key to ``tmp_path`` and return (cert_pem_path,
+    key_pem_path, der_sha256_hex)."""
+    import datetime
+    import hashlib
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=365))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName("localhost")]), critical=False
+        )
+        .sign(key, hashes.SHA256())
+    )
+    cert_der = cert.public_bytes(serialization.Encoding.DER)
+    der_sha256 = hashlib.sha256(cert_der).hexdigest()
+
+    cert_path = tmp_path / "server.crt"
+    key_path = tmp_path / "server.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(
+        key.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.TraditionalOpenSSL,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+    )
+    return str(cert_path), str(key_path), der_sha256
+
+
+class TestRealTLSHandshake:
+    """Drive connect()/send/receive against a REAL loopback TLS server.
+
+    Every other TLS test mocks socket/wrap_socket/do_handshake, so the success
+    path (SNI delivery, handshake, fingerprint extraction from the real peer
+    DER -- the foundation TOFU depends on) is never behaviorally exercised.
+    These tests close that gap and also cover the dedicated-executor I/O path.
+    """
+
+    @pytest.mark.asyncio
+    async def test_real_handshake_extracts_matching_fingerprint(self, tmp_path):
+        cert_path, key_path, expected_sha256 = _make_self_signed_cert(tmp_path)
+
+        seen_sni: list[str | None] = []
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(cert_path, key_path)
+
+        def _capture_sni(sslobj, server_name, sslctx):
+            seen_sni.append(server_name)
+
+        server_ctx.sni_callback = _capture_sni
+
+        async def handle(reader, writer):
+            await reader.readline()  # consume the request line
+            writer.write(b"20 text/gemini\r\nhello\r\n")
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_ctx)
+        port = server.sockets[0].getsockname()[1]
+
+        client = GeminiTLSClient(TLSConfig())
+        try:
+            ssl_sock, info = await client.connect(
+                "localhost", port, connect_ip="127.0.0.1", timeout=5.0
+            )
+            try:
+                # The fingerprint TOFU pins must be sha256 of the real peer DER.
+                assert info["cert_fingerprint"] == f"sha256:{expected_sha256}"
+                assert info["tls_version"] in ("TLSv1.2", "TLSv1.3")
+                # SNI must carry the hostname (not the pinned IP) for vhosting.
+                assert seen_sni and seen_sni[0] == "localhost"
+
+                await client.send_data(ssl_sock, b"gemini://localhost/\r\n")
+                body = await client.receive_data(ssl_sock, max_size=1024)
+                assert body == b"20 text/gemini\r\nhello\r\n"
+            finally:
+                await client.close(ssl_sock)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    @pytest.mark.asyncio
+    async def test_real_stream_rejects_oversize_body(self, tmp_path):
+        cert_path, key_path, _ = _make_self_signed_cert(tmp_path)
+        server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        server_ctx.load_cert_chain(cert_path, key_path)
+
+        async def handle(reader, writer):
+            await reader.readline()
+            writer.write(b"x" * 4096)  # exceeds the 1024 cap below
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0, ssl=server_ctx)
+        port = server.sockets[0].getsockname()[1]
+
+        client = GeminiTLSClient(TLSConfig())
+        try:
+            ssl_sock, _ = await client.connect(
+                "localhost", port, connect_ip="127.0.0.1", timeout=5.0
+            )
+            try:
+                await client.send_data(ssl_sock, b"gemini://localhost/\r\n")
+                with pytest.raises(TLSConnectionError, match="exceeds maximum size"):
+                    await client.receive_data(ssl_sock, max_size=1024)
+            finally:
+                await client.close(ssl_sock)
+        finally:
+            server.close()
+            await server.wait_closed()
 
 
 class TestConnectPinnedIp:

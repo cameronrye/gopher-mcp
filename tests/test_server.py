@@ -719,3 +719,32 @@ class TestGeminiFetch:
         assert result["error"]["code"] == "FETCH_ERROR"
         assert "secret" not in result["error"]["message"]
         assert "boom" not in result["error"]["message"]
+
+
+class TestLLMFacingFieldNames:
+    """The MCP tools serialize results with model_dump() (no aliases), so the
+    runtime key for a menu item's URL is `next_url`, never the `nextUrl` alias.
+    The server instructions and parameter descriptions handed to the model must
+    name the key that actually appears in the output, or navigation breaks.
+    """
+
+    def test_instructions_and_param_desc_use_serialized_menu_key(self):
+        from gopher_mcp.models import GopherMenuItem
+        from gopher_mcp.server import SERVER_INSTRUCTIONS, _GopherUrl
+
+        keys = set(
+            GopherMenuItem(
+                type="1",
+                title="t",
+                selector="/",
+                host="h",
+                port=70,
+                nextUrl="gopher://h/1/",
+            ).model_dump()
+        )
+        assert "next_url" in keys and "nextUrl" not in keys
+
+        gopher_url_desc = _GopherUrl.__metadata__[0].description
+        for text in (SERVER_INSTRUCTIONS, gopher_url_desc):
+            assert "nextUrl" not in text
+        assert "next_url" in SERVER_INSTRUCTIONS

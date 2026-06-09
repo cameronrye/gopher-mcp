@@ -805,3 +805,77 @@ class TestGeminiClientAdvancedFeatures:
                     assert isinstance(result, GeminiErrorResult)
                     assert result.error["code"] == "CERTIFICATE_CHANGED"
                     assert "TOFU" in result.error["message"]
+
+
+class TestSensitiveInputRedaction:
+    """A status-10/11 input answer is percent-encoded into the query string and
+    may be a secret (status 11 = SENSITIVE_INPUT). The client must not reflect
+    that query back to the caller (requestInfo) or write it to logs, matching
+    the deliberate sanitization already applied to INFO/DEBUG log sites.
+    """
+
+    SECRET = "hunter2-secret-answer"
+
+    def _client(self, **kw):
+        defaults = {"tofu_enabled": False, "client_certs_enabled": False}
+        defaults.update(kw)
+        return GeminiClient(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_fetch_request_info_omits_query(self):
+        from gopher_mcp.models import GeminiMimeType, GeminiSuccessResult, GeminiURL
+
+        client = self._client(cache_enabled=False)
+        parsed = GeminiURL(
+            host="example.org", port=1965, path="/login", query=self.SECRET
+        )
+        success = GeminiSuccessResult(
+            content="ok",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=2,
+            requestInfo={},
+        )
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url", return_value=parsed),
+            patch.object(client, "_fetch_content", AsyncMock(return_value=success)),
+        ):
+            result = await client.fetch(f"gemini://example.org/login?{self.SECRET}")
+
+        ri = result.request_info
+        assert self.SECRET not in str(ri)
+        assert ri.get("query") is None
+        assert "?" not in ri["url"]
+        assert ri.get("has_query") is True
+
+    @pytest.mark.asyncio
+    async def test_error_result_redacts_query_in_result_and_log(self):
+        from structlog.testing import capture_logs
+
+        client = self._client(cache_enabled=False)
+        url = f"gemini://example.org/login?{self.SECRET}"
+        with capture_logs() as logs:
+            result = client._error_result(url, "TLS_ERROR", "failed", Exception("boom"))
+
+        assert self.SECRET not in str(result.request_info)
+        assert all(self.SECRET not in str(entry) for entry in logs)
+
+    @pytest.mark.asyncio
+    async def test_query_bearing_response_is_not_cached(self):
+        from gopher_mcp.models import GeminiMimeType, GeminiSuccessResult, GeminiURL
+
+        client = self._client(cache_enabled=True)
+        parsed = GeminiURL(host="example.org", port=1965, path="/s", query=self.SECRET)
+        success = GeminiSuccessResult(
+            content="ok",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=2,
+            requestInfo={},
+        )
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url", return_value=parsed),
+            patch.object(client, "_fetch_content", AsyncMock(return_value=success)),
+        ):
+            await client.fetch(f"gemini://example.org/s?{self.SECRET}")
+
+        # The answer-bearing query must not be retained in any cache key.
+        assert all(self.SECRET not in key for key in client._cache)

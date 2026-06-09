@@ -551,9 +551,12 @@ All error responses include:
 
 Both protocols implement rate limiting to prevent abuse:
 
-- **Request timeout**: Configurable per protocol
-- **Response size limit**: Configurable maximum response size
-- **Connection limits**: Automatic connection pooling and reuse
+- **Request timeout**: Configurable per protocol (covers DNS, connect and read)
+- **Response size limit**: Configurable maximum response size, enforced
+  incrementally during the read
+- **Concurrency cap**: Optional limit on simultaneous in-flight fetches
+  (`*_MAX_CONCURRENT_REQUESTS`, off by default). Each fetch opens a fresh
+  connection; there is no connection pooling/reuse.
 - **Cache TTL**: Configurable cache time-to-live
 
 ## Security Considerations

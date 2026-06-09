@@ -46,7 +46,6 @@ repos:
           - types-setuptools
           - pydantic>=2.5.0
           - mcp>=1.0.0
-          - pituophis>=1.0.0
           - structlog>=23.2.0
           - anyio>=4.0.0
         args: [--ignore-missing-imports, --explicit-package-bases]

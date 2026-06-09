@@ -1440,6 +1440,13 @@ def _process_success_response(
     if mime_type.is_gemtext:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        # Cap the gemtext handed to the LLM BEFORE parsing, so both rawContent
+        # and the parsed document are bounded. text/gemini is the dominant
+        # Gemini type, so without this the max_rendered_chars cap that protects
+        # text/* would not protect the common case: a 1 MB gemtext page (well
+        # under the byte limit) is ~250k tokens. `size` still reports the full
+        # original byte length.
+        content, truncated = truncate_text(content, max_rendered_chars)
         # Parse gemtext into structured format
         document = parse_gemtext(content)
 
@@ -1449,6 +1456,7 @@ def _process_success_response(
             charset=used_charset,
             lang=mime_type.lang,
             size=size,
+            truncated=truncated,
             requestInfo=request_info,
         )
 
@@ -1507,7 +1515,7 @@ def _decode_with_fallback(body: bytes, charset: str) -> tuple[str, str]:
 
 def _process_redirect_response(
     status_code: int, meta: str, request_info: dict[str, Any]
-) -> "GeminiRedirectResult":
+) -> "GeminiRedirectResult | GeminiErrorResult":
     """Process redirect response (status 30-31).
 
     Args:
@@ -1516,13 +1524,39 @@ def _process_redirect_response(
         request_info: Request information
 
     Returns:
-        GeminiRedirectResult object
+        GeminiRedirectResult, or GeminiErrorResult for a malformed redirect.
     """
 
     permanent = status_code == GeminiStatusCode.PERMANENT_REDIRECT.value
 
+    # The meta of a 3x response is the redirect target URL and must be present.
+    # An empty/blank meta is malformed: urljoin would resolve it to the request
+    # URL, so a client following newUrl would re-fetch the same URL forever.
+    target = meta.strip()
+    if not target:
+        return GeminiErrorResult(
+            error={
+                "code": "INVALID_REDIRECT",
+                "message": "Server sent a redirect (3x) with an empty target URL",
+                "status": status_code,
+            },
+            requestInfo=request_info,
+        )
+
     base_url = str(request_info.get("url", ""))
-    resolved = _resolve_gemini_reference(base_url, meta) if base_url else meta
+    resolved = _resolve_gemini_reference(base_url, target) if base_url else target
+
+    # Guard against a redirect to the same URL (a one-hop loop) so a single
+    # malformed response cannot drive an unbounded client re-fetch loop.
+    if base_url and resolved == base_url:
+        return GeminiErrorResult(
+            error={
+                "code": "INVALID_REDIRECT",
+                "message": "Server redirected to the same URL (redirect loop)",
+                "status": status_code,
+            },
+            requestInfo=request_info,
+        )
 
     return GeminiRedirectResult(
         newUrl=resolved,

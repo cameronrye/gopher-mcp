@@ -38,6 +38,7 @@ DEFAULT_MAX_CACHE_ENTRIES = 1000
 DEFAULT_MAX_SELECTOR_LENGTH = 1024
 DEFAULT_MAX_SEARCH_LENGTH = 256
 DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
+DEFAULT_MAX_MENU_ITEMS = 1000  # LLM-facing menu item cap; 0 = unlimited
 
 
 def _strip_gopher_text_terminator(text: str) -> str:
@@ -79,9 +80,11 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: list[str] | None = None,
         allow_local_hosts: bool = False,
+        allowed_ports: list[int] | None = None,
         max_selector_length: int = DEFAULT_MAX_SELECTOR_LENGTH,
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
+        max_menu_items: int = DEFAULT_MAX_MENU_ITEMS,
         requests_per_minute: float = 0.0,
         max_concurrent_requests: int = 0,
     ) -> None:
@@ -108,6 +111,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
         self.max_rendered_chars = max_rendered_chars
+        self.max_menu_items = max_menu_items
         self._rate_limiter = RateLimiter(requests_per_minute)
         self.max_concurrent_requests = max_concurrent_requests
         # Opt-in coarse cap on simultaneous fetches (None = unlimited).
@@ -118,6 +122,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         )
 
         self.allow_local_hosts = allow_local_hosts
+        self.allowed_ports = allowed_ports
 
         # Convert allowed hosts to a set for faster lookup
         self.allowed_hosts: set[str] | None = (
@@ -325,6 +330,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
                     parsed_url.host,
                     parsed_url.port,
                     allow_local=self.allow_local_hosts,
+                    allowed_ports=self.allowed_ports,
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -376,7 +382,14 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         """
         content, _ = decode_gopher_text(raw)
         items = parse_gopher_menu(content)
-        return MenuResult(items=items)
+        # Cap the number of items handed to the LLM (distinct from the network
+        # byte cap): a 1 MB directory can expand to tens of thousands of items,
+        # each serialized to JSON, flooding the model context. 0 = unlimited.
+        truncated = False
+        if self.max_menu_items and len(items) > self.max_menu_items:
+            items = items[: self.max_menu_items]
+            truncated = True
+        return MenuResult(items=items, truncated=truncated)
 
     def _process_text_response(self, raw: bytes) -> TextResult:
         """Process a Gopher text response.

@@ -240,24 +240,26 @@ class TestTOFUManager:
             assert warning is not None
             assert "expired" in warning.lower()
 
-    def test_first_use_not_yet_valid_warns(self):
-        """A cert whose notBefore is in the future is pinned but flagged."""
+    def test_first_use_not_yet_valid_rejected_by_default(self):
+        """A not-yet-valid cert (notBefore in the future) is refused on first
+        use EVEN with reject_expired off (the default): a server presenting a
+        cert before its validity window has no legitimate reason to and it is a
+        strong active-MITM signal, so fail closed rather than pin it."""
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = str(Path(temp_dir) / "tofu.json")
-            manager = TOFUManager(storage_path)
+            manager = TOFUManager(storage_path)  # reject_expired defaults False
 
             cert_info = {"not_before_timestamp": 2000.0}
             with patch("time.time", return_value=1000.0):
-                is_valid, warning = manager.validate_certificate(
-                    "example.com", 1965, "abc123", cert_info
-                )
+                with pytest.raises(TOFUExpiredError, match="not yet valid"):
+                    manager.validate_certificate(
+                        "example.com", 1965, "abc123", cert_info
+                    )
 
-            assert is_valid is True
-            assert warning is not None
-            assert "not yet valid" in warning.lower()
+            assert "example.com:1965" not in manager._entries
 
-    def test_first_use_out_of_window_rejected_when_reject_expired(self):
-        """With reject_expired, a not-yet-valid cert is refused and not pinned."""
+    def test_first_use_not_yet_valid_rejected_with_reject_expired(self):
+        """reject_expired also refuses a not-yet-valid cert (and does not pin)."""
         with tempfile.TemporaryDirectory() as temp_dir:
             storage_path = str(Path(temp_dir) / "tofu.json")
             manager = TOFUManager(storage_path, reject_expired=True)

@@ -78,9 +78,11 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GOPHER_MAX_CACHE_ENTRIES` | Integer | `1000` | Maximum cached entries (LRU eviction). |
 | `GOPHER_ALLOWED_HOSTS` | Comma-separated | empty (all) | Restrict connections to these hosts. |
 | `GOPHER_ALLOW_LOCAL_HOSTS` | Boolean | `false` | Allow loopback/private hosts (disables SSRF protection). |
+| `GOPHER_ALLOWED_PORTS` | Comma-separated | empty (any) | Optional positive port allowlist. When set, only these ports may be connected to (closes the arbitrary-port port-scanning gap). |
 | `GOPHER_MAX_SELECTOR_LENGTH` | Integer | `1024` | Maximum Gopher selector length. |
 | `GOPHER_MAX_SEARCH_LENGTH` | Integer | `256` | Maximum search query length. |
 | `GOPHER_MAX_RENDERED_CHARS` | Integer | `50000` | Maximum characters of rendered text returned to the model (longer output is truncated and flagged). |
+| `GOPHER_MAX_MENU_ITEMS` | Integer | `1000` | Maximum Gopher menu items returned to the model (`0` = unlimited; larger menus are truncated and flagged). |
 | `GOPHER_REQUESTS_PER_MINUTE` | Float | `0` (off) | Per-host outbound rate limit. |
 | `GOPHER_MAX_CONCURRENT_REQUESTS` | Integer | `0` (unlimited) | Maximum concurrent requests. |
 
@@ -95,6 +97,7 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GEMINI_MAX_CACHE_ENTRIES` | Integer | `1000` | Maximum cached entries (LRU eviction). |
 | `GEMINI_ALLOWED_HOSTS` | Comma-separated | empty (all) | Restrict connections to these hosts. |
 | `GEMINI_ALLOW_LOCAL_HOSTS` | Boolean | `false` | Allow loopback/private hosts (disables SSRF protection). |
+| `GEMINI_ALLOWED_PORTS` | Comma-separated | empty (any) | Optional positive port allowlist. When set, only these ports may be connected to (closes the arbitrary-port port-scanning gap). |
 | `GEMINI_TOFU_ENABLED` | Boolean | `true` | Enable Trust-on-First-Use certificate validation. |
 | `GEMINI_TOFU_STORAGE_PATH` | File path | `~/.gemini/tofu.json` | TOFU trust-store location. |
 | `GEMINI_TOFU_REJECT_EXPIRED` | Boolean | `false` | Fail closed on a certificate outside its validity window. |
@@ -119,7 +122,6 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GOPHER_MCP_LOG_LEVEL` | String | `INFO` | Verbosity: `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`. |
 | `GOPHER_MCP_STRUCTURED_LOGGING` | Boolean | `true` | Emit structured JSON logs instead of console-rendered output. |
 | `GOPHER_MCP_LOG_FILE_PATH` | File path | empty | Optionally tee logs to a file. Logs always go to **stderr** (never stdout, which carries the MCP protocol stream). |
-| `GOPHER_MCP_DEVELOPMENT_MODE` | Boolean | `false` | Enable development-mode behavior. |
 
 ## Configuration Presets
 
@@ -133,7 +135,6 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 
 ```bash
 # Verbose logging, caching off for fresh results
-GOPHER_MCP_DEVELOPMENT_MODE=true
 GOPHER_MCP_LOG_LEVEL=DEBUG
 GOPHER_CACHE_ENABLED=false
 GEMINI_CACHE_ENABLED=false

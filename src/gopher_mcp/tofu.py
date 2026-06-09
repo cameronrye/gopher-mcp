@@ -331,23 +331,38 @@ class TOFUManager:
             # signal something is off. The fingerprint pin is fixed for the
             # life of the cert (same fingerprint == same cert), so checking the
             # window once, here, covers every subsequent connection.
+            #
+            # A NOT-YET-VALID cert is refused unconditionally: a server has no
+            # legitimate reason to present a cert before its notBefore, so this
+            # is a strong active-MITM signal (clock skew aside). An ALREADY-
+            # EXPIRED cert is only refused when reject_expired is set, since
+            # briefly-lapsed certs are a known part of the Gemini ecosystem;
+            # otherwise it is pinned with a warning.
+            if not_before is not None and not_before > current_time:
+                logger.warning(
+                    "Refusing to pin a not-yet-valid certificate",
+                    host=host,
+                    port=port,
+                )
+                raise TOFUExpiredError(
+                    f"Certificate for {host}:{port} is not yet valid (notBefore "
+                    "is in the future); refusing to trust on first use"
+                )
+
             window_problem: str | None = None
             if expires is not None and expires < current_time:
                 window_problem = "already expired"
-            elif not_before is not None and not_before > current_time:
-                window_problem = "not yet valid"
-
-            if window_problem and self.reject_expired:
-                logger.warning(
-                    "Refusing to pin certificate outside its validity window",
-                    host=host,
-                    port=port,
-                    problem=window_problem,
-                )
-                raise TOFUExpiredError(
-                    f"Certificate for {host}:{port} is {window_problem}; refusing "
-                    "to trust on first use (reject_expired is enabled)"
-                )
+                if self.reject_expired:
+                    logger.warning(
+                        "Refusing to pin an expired certificate",
+                        host=host,
+                        port=port,
+                    )
+                    raise TOFUExpiredError(
+                        f"Certificate for {host}:{port} is already expired; "
+                        "refusing to trust on first use (reject_expired is "
+                        "enabled)"
+                    )
 
             new_entry = TOFUEntry(
                 host=host,

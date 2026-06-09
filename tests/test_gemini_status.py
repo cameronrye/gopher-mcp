@@ -396,8 +396,33 @@ class TestProcessGeminiResponse:
 
         assert isinstance(result, GeminiGemtextResult)
         assert result.raw_content == gemtext_content
+        assert result.truncated is False
         assert len(result.document.lines) == 2
         assert result.document.lines[0].type == GemtextLineType.HEADING_1
+
+    def test_success_gemtext_truncated_to_render_limit(self):
+        """A gemtext body over the render limit must be truncated -- both
+        raw_content AND the parsed document -- and flagged, so an attacker-
+        controlled page cannot flood the model context. text/gemini is the
+        dominant Gemini type, so the cap that protects text/* must apply here."""
+        body = "# Heading\n" + "filler line\n" * 5000
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini",
+            body=body.encode("utf-8"),
+        )
+
+        result = process_gemini_response(
+            response, "gemini://example.org/", max_rendered_chars=100
+        )
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert len(result.raw_content) <= 100
+        assert result.truncated is True
+        # The parsed document must be bounded too, not all 5001 lines.
+        assert len(result.document.lines) < 200
+        # `size` still reports the full original byte length.
+        assert result.size == len(body.encode("utf-8"))
 
     def test_success_binary_response(self):
         """Test success binary response processing."""
@@ -435,6 +460,36 @@ class TestProcessGeminiResponse:
         result = process_gemini_response(response, "gemini://example.org/dir/old")
         assert isinstance(result, GeminiRedirectResult)
         assert result.new_url == "gemini://example.org/dir/sibling"
+
+    def test_empty_redirect_target_is_rejected(self):
+        """A 3x redirect with an empty meta is malformed: urljoin('', base)
+        resolves to the request URL, so an LLM following newUrl would re-fetch
+        the same URL forever. It must be reported as an error instead."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.TEMPORARY_REDIRECT, meta="", body=None
+        )
+        result = process_gemini_response(response, "gemini://example.org/page")
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REDIRECT"
+
+    def test_whitespace_redirect_target_is_rejected(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.PERMANENT_REDIRECT, meta="   ", body=None
+        )
+        result = process_gemini_response(response, "gemini://example.org/page")
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REDIRECT"
+
+    def test_self_redirect_is_rejected(self):
+        """A redirect whose resolved target equals the request URL is a loop."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.TEMPORARY_REDIRECT,
+            meta="gemini://example.org/page",
+            body=None,
+        )
+        result = process_gemini_response(response, "gemini://example.org/page")
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REDIRECT"
 
     def test_redirect_preserves_absolute_cross_scheme_target(self):
         """An absolute target (its own scheme) is passed through unchanged."""

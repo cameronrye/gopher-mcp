@@ -8,8 +8,8 @@ version = "0.4.1"
 description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher and Gemini resources"
 readme = "README.md"
 license = "MIT"
-authors = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]
-maintainers = [{ name = "Gopher MCP Team", email = "team@gopher-mcp.dev" }]
+authors = [{ name = "Cameron Rye", email = "c@meron.io" }]
+maintainers = [{ name = "Cameron Rye", email = "c@meron.io" }]
 keywords = ["mcp", "gopher", "protocol", "llm", "model-context-protocol"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -40,7 +40,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-http = ["aiohttp>=3.9.0"]
 dev = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",

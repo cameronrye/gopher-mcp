@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Isolate Gemini's blocking TLS I/O on a dedicated thread pool so a stalled or
+  hostile Gemini peer can no longer saturate the default executor that DNS
+  resolution (the SSRF guard for both protocols) runs on, which could escalate
+  one slow server into a whole-server denial of service.
+- Stop leaking a Gemini status-11 (`SENSITIVE_INPUT`) answer: the percent-encoded
+  query is no longer written to logs, reflected back to the model via
+  `requestInfo`, or retained in a cache key.
+- Reject not-yet-valid certificates on TOFU first use by default (previously
+  pinned with only a warning unless `reject_expired` was set).
+- Reject empty and self-referential Gemini redirects (`INVALID_REDIRECT`) so a
+  malformed `3x` response cannot drive an unbounded client re-fetch loop.
+
+### Added
+
+- `GOPHER_MAX_MENU_ITEMS` (default 1000): caps the number of Gopher menu items
+  returned to the model, mirroring the existing text/gemtext character cap.
+- Optional positive port allowlist (`GOPHER_ALLOWED_PORTS` /
+  `GEMINI_ALLOWED_PORTS`) to close the arbitrary-port port-scanning gap left by
+  the dangerous-ports denylist.
+
+### Changed
+
+- Apply the `max_rendered_chars` cap to `text/gemini` responses (previously only
+  `text/*`), so a large gemtext page no longer floods the model context; both
+  gemtext and menu results now carry a `truncated` flag.
+- Drop the over-strict hardcoded TLS 1.2 cipher allow-list in favour of Python's
+  secure defaults, improving interop with conforming Gemini servers.
+
+### Removed
+
+- The unused `http`/`aiohttp` optional dependency, the never-read
+  `development_mode` setting, and the test-only `create_tls_client` factory.
+
+### Fixed
+
+- Correct the LLM-facing server instructions, `gopher_fetch` parameter
+  description, and AI Assistant Guide to reference the real serialized
+  `next_url` menu field (not the `nextUrl`/`url` names that never appear in the
+  output).
+- Sync `server.json` to the released version and replace placeholder
+  author/maintainer/copyright metadata with the real maintainer.
+
 ## [0.4.1] - 2026-06-08
 
 ### Added

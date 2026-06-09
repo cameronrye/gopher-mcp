@@ -41,6 +41,20 @@ DEFAULT_MAX_CACHE_ENTRIES = 1000
 DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 
 
+def _safe_display_url(parsed_url: GeminiURL) -> str:
+    """Render a ``gemini://`` URL WITHOUT its query string.
+
+    A status-10/11 input answer is percent-encoded into the query and may be a
+    secret (status 11 = SENSITIVE_INPUT), so the query must never be logged or
+    reflected back to the caller. This mirrors the host/port/path-only logging
+    used throughout this module.
+    """
+    url = f"gemini://{parsed_url.host}"
+    if parsed_url.port != 1965:
+        url = f"{url}:{parsed_url.port}"
+    return f"{url}{parsed_url.path}"
+
+
 class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
     """Async Gemini protocol client with TLS, caching and safety features."""
 
@@ -54,6 +68,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         max_cache_entries: int = DEFAULT_MAX_CACHE_ENTRIES,
         allowed_hosts: list[str] | None = None,
         allow_local_hosts: bool = False,
+        allowed_ports: list[int] | None = None,
         tls_config: TLSConfig | None = None,
         tofu_enabled: bool = True,
         tofu_storage_path: str | None = None,
@@ -99,6 +114,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         self.denied_mime_types = frozenset(denied_mime_types or ())
         self.allowed_hosts = set(allowed_hosts) if allowed_hosts else None
         self.allow_local_hosts = allow_local_hosts
+        self.allowed_ports = allowed_ports
         self.tofu_enabled = tofu_enabled
         self.client_certs_enabled = client_certs_enabled
 
@@ -186,13 +202,17 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                     )
                     return cached_response
 
-            # Create request info for provenance
+            # Create request info for provenance. The query is deliberately
+            # omitted (and `url` rendered without it): a status-10/11 input
+            # answer is carried in the query and may be a secret (status 11).
+            # This result is returned to the LLM/transcript via model_dump(),
+            # so record only that a query was present, matching the log policy.
             request_info = {
-                "url": url,
+                "url": _safe_display_url(parsed_url),
                 "host": parsed_url.host,
                 "port": parsed_url.port,
                 "path": parsed_url.path,
-                "query": parsed_url.query,
+                "has_query": bool(parsed_url.query),
                 "timestamp": time.time(),
             }
 
@@ -211,12 +231,20 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             # Cache the response. Skip transient/non-content results: error
             # and redirect targets can change moment to moment, and
             # input/certificate prompts are per-interaction, so caching them
-            # would serve a stale failure or redirect for the full TTL.
-            if self.cache_enabled and getattr(response, "kind", None) not in (
-                "error",
-                "redirect",
-                "input",
-                "certificate",
+            # would serve a stale failure or redirect for the full TTL. Also
+            # skip any request that carried a query: the answer (possibly a
+            # secret status-11 input) would otherwise be retained in the cache
+            # key for the full TTL.
+            if (
+                self.cache_enabled
+                and not parsed_url.query
+                and getattr(response, "kind", None)
+                not in (
+                    "error",
+                    "redirect",
+                    "input",
+                    "certificate",
+                )
             ):
                 self._cache_response(url, response)
 
@@ -275,16 +303,19 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         self, url: str, code: str, message: str, exc: Exception
     ) -> GeminiErrorResult:
         """Build a sanitized error result, logging full detail server-side."""
+        # Drop any query string: for a status-10/11 follow-up the answer (a
+        # possible secret) is encoded there and must not be logged or returned.
+        safe_url = url.split("?", 1)[0]
         logger.error(
             "Gemini fetch failed",
-            url=url,
+            url=safe_url,
             code=code,
             error=str(exc),
             error_type=type(exc).__name__,
         )
         return GeminiErrorResult(
             error={"code": code, "message": message},
-            requestInfo={"url": url, "timestamp": time.time()},
+            requestInfo={"url": safe_url, "timestamp": time.time()},
         )
 
     def _maybe_honor_slow_down(self, host: str, response: GeminiFetchResponse) -> None:
@@ -335,6 +366,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                     parsed_url.host,
                     parsed_url.port,
                     allow_local=self.allow_local_hosts,
+                    allowed_ports=self.allowed_ports,
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -484,7 +516,12 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         except Exception as e:
             # Preserve the exception type (TLSConnectionError, TOFUValidationError,
             # SSRFError, ...) so fetch() can map it to a distinct error code.
-            logger.error("Gemini fetch failed", url=str(parsed_url), error=str(e))
+            # Log without the query string (a possible status-11 secret).
+            logger.error(
+                "Gemini fetch failed",
+                url=_safe_display_url(parsed_url),
+                error=str(e),
+            )
             raise
         finally:
             # Always close the connection

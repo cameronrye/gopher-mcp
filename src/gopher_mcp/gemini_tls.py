@@ -5,12 +5,27 @@ import contextlib
 import socket
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Dedicated thread pool for the blocking TLS socket operations (connect, TLS
+# handshake, recv, sendall, unwrap). Gemini has no native-asyncio TLS transport
+# yet, so these run via run_in_executor. Keeping them OFF the default loop
+# executor matters for safety: loop.getaddrinfo() -- the SSRF DNS resolution
+# performed before EVERY Gopher and Gemini connection -- also runs on the
+# default executor. If Gemini's blocking reads shared that pool, a handful of
+# stalled or hostile Gemini peers could saturate it and stall DNS (and thus the
+# SSRF guard) for every request, turning one slow server into a whole-server
+# DoS. Isolating Gemini I/O here contains that blast radius to Gemini alone.
+_TLS_IO_THREADS = 16
+_TLS_IO_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_TLS_IO_THREADS, thread_name_prefix="gemini-tls-io"
+)
 
 
 @dataclass
@@ -100,19 +115,12 @@ class GeminiTLSClient:
         context.check_hostname = False
         context.verify_mode = self.config.verify_mode
 
-        # Set preferred cipher suites for security
-        # TLS 1.3 ciphers are handled automatically
-        if hasattr(context, "set_ciphers"):
-            # Prefer ECDHE for forward secrecy, AES-GCM for AEAD
-            preferred_ciphers = [
-                "ECDHE-ECDSA-AES256-GCM-SHA384",
-                "ECDHE-RSA-AES256-GCM-SHA384",
-                "ECDHE-ECDSA-CHACHA20-POLY1305",
-                "ECDHE-RSA-CHACHA20-POLY1305",
-                "ECDHE-ECDSA-AES128-GCM-SHA256",
-                "ECDHE-RSA-AES128-GCM-SHA256",
-            ]
-            context.set_ciphers(":".join(preferred_ciphers))
+        # Keep Python's secure default cipher suites. We deliberately do NOT
+        # narrow them: peer authentication is via TOFU fingerprint pinning (not
+        # the negotiated cipher), so restricting to a handful of AEAD-only ECDHE
+        # suites buys no security but drops ECDHE-CBC and DHE suites that some
+        # conforming Gemini servers only offer, causing spurious 1.2 handshake
+        # failures. create_default_context() already excludes weak ciphers.
 
         return context
 
@@ -175,7 +183,7 @@ class GeminiTLSClient:
 
             # Connect to the pinned IP (no DNS re-resolution).
             await asyncio.get_running_loop().run_in_executor(
-                None, sock.connect, (target_ip, port)
+                _TLS_IO_EXECUTOR, sock.connect, (target_ip, port)
             )
 
             # Wrap socket with TLS, sending the hostname as SNI (mandatory for
@@ -188,7 +196,7 @@ class GeminiTLSClient:
 
             # Perform TLS handshake
             await asyncio.get_running_loop().run_in_executor(
-                None, ssl_sock.do_handshake
+                _TLS_IO_EXECUTOR, ssl_sock.do_handshake
             )
 
             # Get connection information
@@ -303,7 +311,9 @@ class GeminiTLSClient:
         """
         try:
             # Send TLS close_notify alert
-            await asyncio.get_running_loop().run_in_executor(None, ssl_sock.unwrap)
+            await asyncio.get_running_loop().run_in_executor(
+                _TLS_IO_EXECUTOR, ssl_sock.unwrap
+            )
         except Exception as e:
             logger.warning("Error during TLS close_notify", error=str(e))
         finally:
@@ -325,7 +335,7 @@ class GeminiTLSClient:
         """
         try:
             await asyncio.get_running_loop().run_in_executor(
-                None, ssl_sock.sendall, data
+                _TLS_IO_EXECUTOR, ssl_sock.sendall, data
             )
         except Exception as e:
             raise TLSConnectionError(f"Failed to send data: {e}", e) from e
@@ -353,7 +363,7 @@ class GeminiTLSClient:
             total = 0
             while total < max_size:
                 chunk = await loop.run_in_executor(
-                    None, ssl_sock.recv, min(4096, max_size - total)
+                    _TLS_IO_EXECUTOR, ssl_sock.recv, min(4096, max_size - total)
                 )
                 if not chunk:
                     return b"".join(chunks)
@@ -373,7 +383,7 @@ class GeminiTLSClient:
             prev_timeout = ssl_sock.gettimeout()
             ssl_sock.settimeout(1.0)
             try:
-                extra = await loop.run_in_executor(None, ssl_sock.recv, 1)
+                extra = await loop.run_in_executor(_TLS_IO_EXECUTOR, ssl_sock.recv, 1)
             except (TimeoutError, ssl.SSLError, OSError):
                 extra = b""
             finally:
@@ -388,33 +398,3 @@ class GeminiTLSClient:
             raise
         except Exception as e:
             raise TLSConnectionError(f"Failed to receive data: {e}", e) from e
-
-
-def create_tls_client(
-    min_version: str = "TLSv1.2",
-    timeout_seconds: float = 30.0,
-    client_cert_path: str | None = None,
-    client_key_path: str | None = None,
-    verify_mode: ssl.VerifyMode = ssl.CERT_NONE,
-) -> GeminiTLSClient:
-    """Create a configured TLS client for Gemini connections.
-
-    Args:
-        min_version: Minimum TLS version ("TLSv1.2" or "TLSv1.3")
-        timeout_seconds: Connection timeout
-        client_cert_path: Path to client certificate file
-        client_key_path: Path to client private key file
-        verify_mode: Certificate verification mode
-
-    Returns:
-        Configured TLS client
-    """
-    config = TLSConfig(
-        min_version=min_version,
-        timeout_seconds=timeout_seconds,
-        client_cert_path=client_cert_path,
-        client_key_path=client_key_path,
-        verify_mode=verify_mode,
-    )
-
-    return GeminiTLSClient(config)

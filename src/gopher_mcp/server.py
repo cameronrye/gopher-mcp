@@ -20,7 +20,7 @@ logger = structlog.get_logger(__name__)
 SERVER_INSTRUCTIONS = (
     "Browse Gopher and Gemini resources. Use gopher_fetch for gopher:// URLs and "
     "gemini_fetch for gemini:// URLs; the *_batch_fetch variants take several "
-    "URLs at once. Navigate by following the `nextUrl` field of Gopher menu "
+    "URLs at once. Navigate by following the `next_url` field of Gopher menu "
     "items and the `links` of Gemini gemtext documents. Binary and oversize "
     "bodies are returned as metadata only (no raw bytes). On a Gemini status-10 "
     "or status-11 (input) response, call gemini_fetch again with the `input` "
@@ -41,7 +41,7 @@ _GopherUrl = Annotated[
     Field(
         description=(
             "A full gopher:// URL. The first path character is the item type "
-            "(1=menu, 0=text file, 7=search). Follow `nextUrl` from menu items "
+            "(1=menu, 0=text file, 7=search). Follow `next_url` from menu items "
             "to navigate. Example: gopher://gopher.floodgap.com/1/"
         ),
         examples=[
@@ -133,9 +133,11 @@ class ClientManager:
                     max_cache_entries=gopher_config.max_cache_entries,
                     allowed_hosts=gopher_config.allowed_hosts,
                     allow_local_hosts=gopher_config.allow_local_hosts,
+                    allowed_ports=gopher_config.allowed_ports,
                     max_selector_length=gopher_config.max_selector_length,
                     max_search_length=gopher_config.max_search_length,
                     max_rendered_chars=gopher_config.max_rendered_chars,
+                    max_menu_items=gopher_config.max_menu_items,
                     requests_per_minute=gopher_config.requests_per_minute,
                     max_concurrent_requests=gopher_config.max_concurrent_requests,
                 )
@@ -174,6 +176,7 @@ class ClientManager:
                     max_cache_entries=gemini_config.max_cache_entries,
                     allowed_hosts=gemini_config.allowed_hosts,
                     allow_local_hosts=gemini_config.allow_local_hosts,
+                    allowed_ports=gemini_config.allowed_ports,
                     tofu_enabled=gemini_config.tofu_enabled,
                     tofu_storage_path=tofu_path,
                     tofu_reject_expired=gemini_config.tofu_reject_expired,

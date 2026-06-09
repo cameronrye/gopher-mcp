@@ -27,7 +27,8 @@ how to report vulnerabilities, and the measures we take to protect users.
 ### Resource Protection
 
 - **Memory Limits**: Response size limits prevent memory exhaustion
-- **Connection Limits**: Concurrent connection limits prevent resource exhaustion
+- **Connection Limits**: An optional concurrency cap (off by default; set via
+  `*_MAX_CONCURRENT_REQUESTS`) bounds simultaneous in-flight fetches
 - **Cache Security**: Cached responses are isolated and have TTL limits
 - **Error Handling**: Error messages don't leak sensitive system information
 
