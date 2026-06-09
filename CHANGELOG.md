@@ -9,10 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
-- Isolate Gemini's blocking TLS I/O on a dedicated thread pool so a stalled or
-  hostile Gemini peer can no longer saturate the default executor that DNS
-  resolution (the SSRF guard for both protocols) runs on, which could escalate
-  one slow server into a whole-server denial of service.
+- Move the Gemini TLS transport to native asyncio (`asyncio.open_connection`
+  with `ssl=`), so connect, handshake and every read are genuinely cancellable:
+  a slow-loris or stalled peer is now cut off at the request deadline instead of
+  parking a worker thread on a blocking `recv`. The previous design ran blocking
+  socket I/O on a thread pool shared with DNS resolution (the SSRF guard for both
+  protocols), so a handful of slow Gemini reads could stall DNS for every request
+  and escalate one slow server into a whole-server denial of service.
 - Stop leaking a Gemini status-11 (`SENSITIVE_INPUT`) answer: the percent-encoded
   query is no longer written to logs, reflected back to the model via
   `requestInfo`, or retained in a cache key.
@@ -36,6 +39,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gemtext and menu results now carry a `truncated` flag.
 - Drop the over-strict hardcoded TLS 1.2 cipher allow-list in favour of Python's
   secure defaults, improving interop with conforming Gemini servers.
+- De-duplicate the two batch-fetch tools (`gopher_batch_fetch` /
+  `gemini_batch_fetch`) onto a single shared implementation so the batch
+  error/contract behaviour has one source of truth (no behaviour change).
 
 ### Removed
 
