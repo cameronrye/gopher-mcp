@@ -461,6 +461,36 @@ class TestProcessGeminiResponse:
         assert isinstance(result, GeminiRedirectResult)
         assert result.new_url == "gemini://example.org/dir/sibling"
 
+    def test_empty_redirect_target_is_rejected(self):
+        """A 3x redirect with an empty meta is malformed: urljoin('', base)
+        resolves to the request URL, so an LLM following newUrl would re-fetch
+        the same URL forever. It must be reported as an error instead."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.TEMPORARY_REDIRECT, meta="", body=None
+        )
+        result = process_gemini_response(response, "gemini://example.org/page")
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REDIRECT"
+
+    def test_whitespace_redirect_target_is_rejected(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.PERMANENT_REDIRECT, meta="   ", body=None
+        )
+        result = process_gemini_response(response, "gemini://example.org/page")
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REDIRECT"
+
+    def test_self_redirect_is_rejected(self):
+        """A redirect whose resolved target equals the request URL is a loop."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.TEMPORARY_REDIRECT,
+            meta="gemini://example.org/page",
+            body=None,
+        )
+        result = process_gemini_response(response, "gemini://example.org/page")
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REDIRECT"
+
     def test_redirect_preserves_absolute_cross_scheme_target(self):
         """An absolute target (its own scheme) is passed through unchanged."""
         response = GeminiResponse(
