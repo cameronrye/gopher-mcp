@@ -5,12 +5,27 @@ import contextlib
 import socket
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Dedicated thread pool for the blocking TLS socket operations (connect, TLS
+# handshake, recv, sendall, unwrap). Gemini has no native-asyncio TLS transport
+# yet, so these run via run_in_executor. Keeping them OFF the default loop
+# executor matters for safety: loop.getaddrinfo() -- the SSRF DNS resolution
+# performed before EVERY Gopher and Gemini connection -- also runs on the
+# default executor. If Gemini's blocking reads shared that pool, a handful of
+# stalled or hostile Gemini peers could saturate it and stall DNS (and thus the
+# SSRF guard) for every request, turning one slow server into a whole-server
+# DoS. Isolating Gemini I/O here contains that blast radius to Gemini alone.
+_TLS_IO_THREADS = 16
+_TLS_IO_EXECUTOR = ThreadPoolExecutor(
+    max_workers=_TLS_IO_THREADS, thread_name_prefix="gemini-tls-io"
+)
 
 
 @dataclass
@@ -175,7 +190,7 @@ class GeminiTLSClient:
 
             # Connect to the pinned IP (no DNS re-resolution).
             await asyncio.get_running_loop().run_in_executor(
-                None, sock.connect, (target_ip, port)
+                _TLS_IO_EXECUTOR, sock.connect, (target_ip, port)
             )
 
             # Wrap socket with TLS, sending the hostname as SNI (mandatory for
@@ -188,7 +203,7 @@ class GeminiTLSClient:
 
             # Perform TLS handshake
             await asyncio.get_running_loop().run_in_executor(
-                None, ssl_sock.do_handshake
+                _TLS_IO_EXECUTOR, ssl_sock.do_handshake
             )
 
             # Get connection information
@@ -303,7 +318,9 @@ class GeminiTLSClient:
         """
         try:
             # Send TLS close_notify alert
-            await asyncio.get_running_loop().run_in_executor(None, ssl_sock.unwrap)
+            await asyncio.get_running_loop().run_in_executor(
+                _TLS_IO_EXECUTOR, ssl_sock.unwrap
+            )
         except Exception as e:
             logger.warning("Error during TLS close_notify", error=str(e))
         finally:
@@ -325,7 +342,7 @@ class GeminiTLSClient:
         """
         try:
             await asyncio.get_running_loop().run_in_executor(
-                None, ssl_sock.sendall, data
+                _TLS_IO_EXECUTOR, ssl_sock.sendall, data
             )
         except Exception as e:
             raise TLSConnectionError(f"Failed to send data: {e}", e) from e
@@ -353,7 +370,7 @@ class GeminiTLSClient:
             total = 0
             while total < max_size:
                 chunk = await loop.run_in_executor(
-                    None, ssl_sock.recv, min(4096, max_size - total)
+                    _TLS_IO_EXECUTOR, ssl_sock.recv, min(4096, max_size - total)
                 )
                 if not chunk:
                     return b"".join(chunks)
@@ -373,7 +390,7 @@ class GeminiTLSClient:
             prev_timeout = ssl_sock.gettimeout()
             ssl_sock.settimeout(1.0)
             try:
-                extra = await loop.run_in_executor(None, ssl_sock.recv, 1)
+                extra = await loop.run_in_executor(_TLS_IO_EXECUTOR, ssl_sock.recv, 1)
             except (TimeoutError, ssl.SSLError, OSError):
                 extra = b""
             finally:
