@@ -36,7 +36,10 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "structlog>=23.2.0",
     "anyio>=4.0.0",
-    "cryptography>=41.0.0",
+    # Floor kept reasonably recent: a fresh `pip install` resolves the newest
+    # cryptography anyway, but this refuses to run against a years-old version
+    # (with known CVEs) that an end user might already have pinned.
+    "cryptography>=43.0.0",
 ]
 
 [project.optional-dependencies]

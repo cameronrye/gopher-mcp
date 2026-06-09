@@ -424,6 +424,31 @@ class TestProcessGeminiResponse:
         # `size` still reports the full original byte length.
         assert result.size == len(body.encode("utf-8"))
 
+    def test_success_malformed_mime_with_text_body_defaults_to_gemtext(self):
+        """A status-20 with an unparseable MIME and a textual body must default
+        to text/gemini (the Gemini spec default), not be content-sniffed into
+        application/octet-stream and returned as binary."""
+        body = "# Heading\n=> /x A link\nsome text"
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="garbage-no-slash",
+            body=body.encode("utf-8"),
+        )
+        result = process_gemini_response(response, "gemini://example.org/")
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.raw_content == body
+
+    def test_success_malformed_mime_with_binary_body_still_detected(self):
+        """Real binary content served with a bad MIME is still detected by its
+        signature (octet-stream fallback only applies when nothing matched)."""
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS, meta="garbage-no-slash", body=png
+        )
+        result = process_gemini_response(response, "gemini://example.org/")
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.mime_type.full_type == "image/png"
+
     def test_success_binary_response(self):
         """Test success binary response processing."""
         binary_data = b"\x89PNG\r\n\x1a\n"  # PNG header
@@ -651,15 +676,15 @@ class TestProcessGeminiResponse:
         assert result.size == 0
 
     def test_success_response_invalid_mime_type(self):
-        """Test success response with invalid MIME type."""
+        """An invalid MIME with a textual body defaults to text/gemini (the
+        Gemini spec default), not content-sniffed binary."""
         response = GeminiResponse(
             status=GeminiStatusCode.SUCCESS, meta="invalid-mime-type", body=b"content"
         )
 
-        # Should fallback to binary detection instead of raising error
         result = process_gemini_response(response, "gemini://example.org/")
-        assert isinstance(result, GeminiSuccessResult)
-        assert result.mime_type.full_type == "application/octet-stream"
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.raw_content == "content"
 
     def test_success_response_decode_error(self):
         """Test success response with decode error."""
@@ -734,7 +759,7 @@ class TestProcessGeminiResponse:
         assert result.content == png_data
 
     def test_success_response_invalid_mime_fallback(self):
-        """Test success response with invalid MIME type fallback."""
+        """An invalid MIME with non-binary content defaults to text/gemini."""
         response = GeminiResponse(
             status=GeminiStatusCode.SUCCESS,
             meta="invalid/mime/type",
@@ -743,10 +768,8 @@ class TestProcessGeminiResponse:
 
         result = process_gemini_response(response, "gemini://example.org/")
 
-        assert isinstance(result, GeminiSuccessResult)
-        # Should fallback to binary detection since text content doesn't match known binary formats
-        assert result.mime_type.full_type == "application/octet-stream"
-        assert result.content == b"Hello, world!"  # Binary content stays as bytes
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.raw_content == "Hello, world!"
 
     def test_success_response_invalid_mime_empty_body_fallback(self):
         """Test success response with invalid MIME type and empty body fallback."""

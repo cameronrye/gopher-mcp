@@ -539,3 +539,17 @@ class TestCertificateFilePermissions:
 
             dir_mode = manager.storage_path.stat().st_mode & 0o777
             assert dir_mode == 0o700, f"storage dir mode is {oct(dir_mode)}, want 0o700"
+
+
+class TestClientCertScopeNormalization:
+    """Client-cert scope lookup must normalize the host (case/trailing-dot), so
+    a stored identity isn't silently missed -- matching TOFU and the SSRF/
+    allowlist paths, which all normalize the host."""
+
+    def test_get_cert_key_normalizes_host(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(ClientCertificateManager, "_load_registry"):
+                mgr = ClientCertificateManager(tmp)
+            assert mgr._get_cert_key("Example.COM.", 1965, "/") == mgr._get_cert_key(
+                "example.com", 1965, "/"
+            )

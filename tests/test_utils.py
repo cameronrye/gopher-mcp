@@ -260,6 +260,20 @@ invalid line
         assert result[0].title == "Valid"
         assert result[1].title == "Another Valid"
 
+    def test_stops_at_terminator(self):
+        """RFC 1436: the lone '.' line terminates the menu. Anything after it
+        (which a server could append past the terminator) must NOT be parsed
+        into menu items the model would be told it can navigate to."""
+        content = (
+            "1Before\t/before\texample.com\t70\r\n"
+            ".\r\n"
+            "1AfterTerminator\t/evil\tattacker.example\t70\r\n"
+        )
+        result = parse_gopher_menu(content)
+
+        assert len(result) == 1
+        assert result[0].title == "Before"
+
 
 class TestSanitizeSelector:
     """Test sanitize_selector function."""

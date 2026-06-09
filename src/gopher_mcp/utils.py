@@ -266,6 +266,10 @@ def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
     # breaks on VT/FF/NEL and could split a display string mid-field.
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     for line in normalized.split("\n"):
+        # RFC 1436: a lone '.' terminates the menu. Stop here so data a server
+        # places AFTER the terminator is never parsed into navigable items.
+        if line == ".":
+            break
         item = parse_menu_line(line)
         if item:
             items.append(item)
@@ -1410,16 +1414,20 @@ def _process_success_response(
                 raise ValueError(f"Invalid MIME type: {meta}")
 
     except ValueError:
-        # For binary content, try to detect MIME type from content
-        if body and len(body) > 0:
-            detected_type = detect_binary_mime_type(body)
+        # Per the Gemini spec, an absent/unparseable MIME defaults to text/gemini.
+        # Sniff the body so genuinely binary content served with a bad MIME is
+        # still detected by signature -- but a non-match yields the octet-stream
+        # fallback, which must NOT misclassify textual/gemtext content as binary;
+        # in that case fall back to the text/gemini default.
+        detected_type = (
+            detect_binary_mime_type(body) if body else "application/octet-stream"
+        )
+        if detected_type != "application/octet-stream":
             try:
                 mime_type = parse_gemini_mime_type(detected_type)
             except ValueError:
-                # Fallback to default
                 mime_type = get_default_gemini_mime_type()
         else:
-            # For empty body, fallback to default
             mime_type = get_default_gemini_mime_type()
 
     size = len(body)

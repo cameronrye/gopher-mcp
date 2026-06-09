@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- The Gopher menu parser now stops at the RFC 1436 `.` terminator, so data a
+  server appends after the terminator is no longer parsed into navigable items.
+
+### Fixed
+
+- A Gemini status-20 response with an absent/unparseable MIME now defaults to
+  `text/gemini` (per the spec) instead of being content-sniffed and
+  misclassified as binary; genuine binary content is still detected by
+  signature.
+- Client-certificate scope lookup now normalizes the host (case / trailing
+  dot), matching TOFU and the SSRF/allowlist paths, so a host variant no longer
+  silently misses a stored client identity.
+- `GopherURL` rejects an empty host at the model boundary (symmetry with
+  `GeminiURL`).
+
+### Changed
+
+- Supply-chain hygiene: added a `.dockerignore` (keeps `.git`/local `.env` out
+  of the Docker build context), SHA-pinned the third-party GitHub Actions, and
+  raised the `cryptography` floor to `>=43.0.0`.
+
 ## [0.4.2] - 2026-06-09
 
 ### Security
