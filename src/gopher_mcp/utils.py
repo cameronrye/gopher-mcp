@@ -266,6 +266,10 @@ def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
     # breaks on VT/FF/NEL and could split a display string mid-field.
     normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     for line in normalized.split("\n"):
+        # RFC 1436: a lone '.' terminates the menu. Stop here so data a server
+        # places AFTER the terminator is never parsed into navigable items.
+        if line == ".":
+            break
         item = parse_menu_line(line)
         if item:
             items.append(item)
