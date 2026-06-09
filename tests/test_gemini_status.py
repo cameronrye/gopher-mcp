@@ -396,8 +396,33 @@ class TestProcessGeminiResponse:
 
         assert isinstance(result, GeminiGemtextResult)
         assert result.raw_content == gemtext_content
+        assert result.truncated is False
         assert len(result.document.lines) == 2
         assert result.document.lines[0].type == GemtextLineType.HEADING_1
+
+    def test_success_gemtext_truncated_to_render_limit(self):
+        """A gemtext body over the render limit must be truncated -- both
+        raw_content AND the parsed document -- and flagged, so an attacker-
+        controlled page cannot flood the model context. text/gemini is the
+        dominant Gemini type, so the cap that protects text/* must apply here."""
+        body = "# Heading\n" + "filler line\n" * 5000
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini",
+            body=body.encode("utf-8"),
+        )
+
+        result = process_gemini_response(
+            response, "gemini://example.org/", max_rendered_chars=100
+        )
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert len(result.raw_content) <= 100
+        assert result.truncated is True
+        # The parsed document must be bounded too, not all 5001 lines.
+        assert len(result.document.lines) < 200
+        # `size` still reports the full original byte length.
+        assert result.size == len(body.encode("utf-8"))
 
     def test_success_binary_response(self):
         """Test success binary response processing."""

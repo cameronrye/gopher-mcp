@@ -71,6 +71,14 @@ class GopherConfig(BaseSettings):
         ge=0,
         le=10485760,
     )
+    max_menu_items: int = Field(
+        default=1000,
+        description="LLM-facing cap on the number of Gopher menu items returned "
+        "(a 1 MB directory can expand to tens of thousands of items); 0 = "
+        "unlimited. Truncation is flagged on the result.",
+        ge=0,
+        le=1000000,
+    )
     requests_per_minute: float = Field(
         default=0.0,
         description="Per-host outbound request rate cap (politeness for small "

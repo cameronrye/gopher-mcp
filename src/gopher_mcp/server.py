@@ -136,6 +136,7 @@ class ClientManager:
                     max_selector_length=gopher_config.max_selector_length,
                     max_search_length=gopher_config.max_search_length,
                     max_rendered_chars=gopher_config.max_rendered_chars,
+                    max_menu_items=gopher_config.max_menu_items,
                     requests_per_minute=gopher_config.requests_per_minute,
                     max_concurrent_requests=gopher_config.max_concurrent_requests,
                 )

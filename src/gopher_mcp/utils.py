@@ -1440,6 +1440,13 @@ def _process_success_response(
     if mime_type.is_gemtext:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        # Cap the gemtext handed to the LLM BEFORE parsing, so both rawContent
+        # and the parsed document are bounded. text/gemini is the dominant
+        # Gemini type, so without this the max_rendered_chars cap that protects
+        # text/* would not protect the common case: a 1 MB gemtext page (well
+        # under the byte limit) is ~250k tokens. `size` still reports the full
+        # original byte length.
+        content, truncated = truncate_text(content, max_rendered_chars)
         # Parse gemtext into structured format
         document = parse_gemtext(content)
 
@@ -1449,6 +1456,7 @@ def _process_success_response(
             charset=used_charset,
             lang=mime_type.lang,
             size=size,
+            truncated=truncated,
             requestInfo=request_info,
         )
 

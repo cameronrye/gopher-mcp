@@ -894,3 +894,28 @@ class TestFetchContentMethod:
         assert isinstance(result, ErrorResult)
         assert result.error["code"] == "FETCH_ERROR"
         await client.close()
+
+
+class TestMenuItemCap:
+    """A Gopher menu must be capped to a bounded number of items.
+
+    max_rendered_chars caps text but never applied to menus, so a 1 MB
+    directory could expand to ~87k GopherMenuItem objects all serialized to
+    the LLM. Cap the item count and flag truncation, mirroring TextResult.
+    """
+
+    def _menu(self, n: int) -> bytes:
+        lines = "".join(f"1Item{i}\t/sel{i}\texample.org\t70\r\n" for i in range(n))
+        return (lines + ".\r\n").encode("utf-8")
+
+    def test_menu_items_capped_to_limit(self):
+        client = GopherClient(max_menu_items=10, cache_enabled=False)
+        result = client._process_menu_response(self._menu(50))
+        assert len(result.items) == 10
+        assert result.truncated is True
+
+    def test_menu_under_limit_not_truncated(self):
+        client = GopherClient(max_menu_items=100, cache_enabled=False)
+        result = client._process_menu_response(self._menu(5))
+        assert len(result.items) == 5
+        assert result.truncated is False
