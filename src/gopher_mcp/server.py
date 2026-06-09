@@ -1,6 +1,7 @@
 """Main MCP server implementation for Gopher and Gemini protocols."""
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Optional
 from urllib.parse import quote
 
@@ -12,7 +13,12 @@ from pydantic import Field
 from .config import get_config
 from .gemini_client import GeminiClient
 from .gopher_client import GopherClient
-from .models import GeminiFetchRequest, GopherFetchRequest
+from .models import (
+    ErrorResult,
+    GeminiErrorResult,
+    GeminiFetchRequest,
+    GopherFetchRequest,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -228,8 +234,6 @@ async def gopher_fetch(url: _GopherUrl) -> dict[str, Any]:
         url: Full Gopher URL to fetch (e.g., gopher://gopher.floodgap.com/1/)
 
     """
-    from .models import ErrorResult
-
     # Validate the request separately so a bad URL becomes a sanitized,
     # structured error instead of a raised ValidationError that FastMCP would
     # surface to the model as a raw ToolError (matching the batch tools and the
@@ -270,8 +274,6 @@ async def gemini_fetch(url: _GeminiUrl, input: _GeminiInput = None) -> dict[str,
             percent-encoded and sent as the query string.
 
     """
-    from .models import GeminiErrorResult
-
     # When answering a status-10/11 prompt, percent-encode the raw input and set
     # it as the query string so the model never hand-builds query strings (and
     # spaces/&/=/unicode survive). Replaces any query/fragment already present.
@@ -305,6 +307,65 @@ async def gemini_fetch(url: _GeminiUrl, input: _GeminiInput = None) -> dict[str,
         ).model_dump()
 
 
+async def _batch_fetch(
+    urls: list[str],
+    *,
+    request_cls: type[GopherFetchRequest] | type[GeminiFetchRequest],
+    error_cls: type[ErrorResult] | type[GeminiErrorResult],
+    get_client: Callable[["ClientManager"], Awaitable[GopherClient | GeminiClient]],
+    label: str,
+) -> list[dict[str, Any]]:
+    """Shared implementation for the two parallel batch-fetch tools.
+
+    Returns exactly one result per input URL, in order, so callers can zip
+    responses to requests by index. Every failure mode -- over-limit,
+    client-setup failure, per-item invalid URL or fetch error -- is a sanitized
+    structured error, never a raised exception that FastMCP would surface to the
+    model as a raw ToolError. The protocols differ only in their request/error
+    models, the client getter, and the log label.
+    """
+
+    def _error(url: str, code: str, message: str) -> dict[str, Any]:
+        return error_cls(
+            error={"code": code, "message": message},
+            requestInfo={"url": url},
+        ).model_dump()
+
+    # ONE error per input URL keeps the response index-aligned with the request
+    # (a single element would silently break a caller zipping responses to URLs).
+    if len(urls) > MAX_BATCH_URLS:
+        message = f"Too many URLs in batch request: {len(urls)} (max {MAX_BATCH_URLS})"
+        return [_error(url, "INVALID_REQUEST", message) for url in urls]
+
+    # Client setup can raise (e.g. a fail-closed corrupt TOFU/cert store);
+    # return a sanitized error rather than letting it escape as a ToolError.
+    try:
+        manager = await get_client_manager()
+        client = await get_client(manager)
+    except Exception as e:
+        logger.error(f"{label} batch fetch setup failed", error=str(e))
+        return [_error(url, "FETCH_ERROR", _GENERIC_SETUP_ERROR) for url in urls]
+
+    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
+
+    async def fetch_one(url: str) -> dict[str, Any]:
+        # Bounded concurrency: at most BATCH_CONCURRENCY in-flight at once.
+        async with semaphore:
+            try:
+                request = request_cls(url=url)
+            except Exception as e:
+                return _error(url, "INVALID_REQUEST", str(e))
+            try:
+                response = await client.fetch(request.url)
+                return response.model_dump()
+            except Exception as e:  # defensive: client.fetch normally never raises
+                logger.error(f"{label} batch item failed", url=url, error=str(e))
+                return _error(url, "FETCH_ERROR", _GENERIC_FETCH_ERROR)
+
+    results = await asyncio.gather(*[fetch_one(url) for url in urls])
+    return list(results)
+
+
 @mcp.tool(annotations=_FETCH_ANNOTATIONS, title="Fetch multiple Gopher resources")
 async def gopher_batch_fetch(urls: list[str]) -> list[dict[str, Any]]:
     """Fetch multiple Gopher URLs in parallel for improved performance.
@@ -321,60 +382,13 @@ async def gopher_batch_fetch(urls: list[str]) -> list[dict[str, Any]]:
         URLs, so callers can zip responses to requests by index.
 
     """
-    from .models import ErrorResult
-
-    # Over-limit is a sanitized, structured error -- not a raised exception that
-    # FastMCP would surface to the model as a raw ToolError. Return ONE error per
-    # input URL so the response stays index-aligned with the request (a single
-    # element would silently break a caller zipping responses to URLs).
-    if len(urls) > MAX_BATCH_URLS:
-        message = f"Too many URLs in batch request: {len(urls)} (max {MAX_BATCH_URLS})"
-        return [
-            ErrorResult(
-                error={"code": "INVALID_REQUEST", "message": message},
-                requestInfo={"url": url},
-            ).model_dump()
-            for url in urls
-        ]
-
-    # Client setup can raise (e.g. a fail-closed corrupt TOFU/cert store);
-    # return a sanitized error rather than letting it escape as a ToolError.
-    try:
-        manager = await get_client_manager()
-        client = await manager.get_gopher_client()
-    except Exception as e:
-        logger.error("Gopher batch fetch setup failed", error=str(e))
-        return [
-            ErrorResult(
-                error={"code": "FETCH_ERROR", "message": _GENERIC_SETUP_ERROR},
-                requestInfo={"url": url},
-            ).model_dump()
-            for url in urls
-        ]
-    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
-
-    async def fetch_one(url: str) -> dict[str, Any]:
-        async with semaphore:
-            try:
-                request = GopherFetchRequest(url=url)
-            except Exception as e:
-                return ErrorResult(
-                    error={"code": "INVALID_REQUEST", "message": str(e)},
-                    requestInfo={"url": url},
-                ).model_dump()
-            try:
-                response = await client.fetch(request.url)
-                return response.model_dump()
-            except Exception as e:  # defensive: client.fetch normally never raises
-                logger.error("Gopher batch item failed", url=url, error=str(e))
-                return ErrorResult(
-                    error={"code": "FETCH_ERROR", "message": _GENERIC_FETCH_ERROR},
-                    requestInfo={"url": url},
-                ).model_dump()
-
-    # Bounded concurrency: at most BATCH_CONCURRENCY in-flight at once.
-    results = await asyncio.gather(*[fetch_one(url) for url in urls])
-    return list(results)
+    return await _batch_fetch(
+        urls,
+        request_cls=GopherFetchRequest,
+        error_cls=ErrorResult,
+        get_client=lambda m: m.get_gopher_client(),
+        label="Gopher",
+    )
 
 
 @mcp.tool(annotations=_FETCH_ANNOTATIONS, title="Fetch multiple Gemini resources")
@@ -393,59 +407,13 @@ async def gemini_batch_fetch(urls: list[str]) -> list[dict[str, Any]]:
         URLs, so callers can zip responses to requests by index.
 
     """
-    from .models import GeminiErrorResult
-
-    # Over-limit is a sanitized, structured error -- not a raised exception that
-    # FastMCP would surface to the model as a raw ToolError. Return ONE error per
-    # input URL so the response stays index-aligned with the request.
-    if len(urls) > MAX_BATCH_URLS:
-        message = f"Too many URLs in batch request: {len(urls)} (max {MAX_BATCH_URLS})"
-        return [
-            GeminiErrorResult(
-                error={"code": "INVALID_REQUEST", "message": message},
-                requestInfo={"url": url},
-            ).model_dump()
-            for url in urls
-        ]
-
-    # Client setup can raise (e.g. a fail-closed corrupt TOFU/cert store);
-    # return a sanitized error rather than letting it escape as a ToolError.
-    try:
-        manager = await get_client_manager()
-        client = await manager.get_gemini_client()
-    except Exception as e:
-        logger.error("Gemini batch fetch setup failed", error=str(e))
-        return [
-            GeminiErrorResult(
-                error={"code": "FETCH_ERROR", "message": _GENERIC_SETUP_ERROR},
-                requestInfo={"url": url},
-            ).model_dump()
-            for url in urls
-        ]
-    semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
-
-    async def fetch_one(url: str) -> dict[str, Any]:
-        async with semaphore:
-            try:
-                request = GeminiFetchRequest(url=url)
-            except Exception as e:
-                return GeminiErrorResult(
-                    error={"code": "INVALID_REQUEST", "message": str(e)},
-                    requestInfo={"url": url},
-                ).model_dump()
-            try:
-                response = await client.fetch(request.url)
-                return response.model_dump()
-            except Exception as e:  # defensive: client.fetch normally never raises
-                logger.error("Gemini batch item failed", url=url, error=str(e))
-                return GeminiErrorResult(
-                    error={"code": "FETCH_ERROR", "message": _GENERIC_FETCH_ERROR},
-                    requestInfo={"url": url},
-                ).model_dump()
-
-    # Bounded concurrency: at most BATCH_CONCURRENCY in-flight at once.
-    results = await asyncio.gather(*[fetch_one(url) for url in urls])
-    return list(results)
+    return await _batch_fetch(
+        urls,
+        request_cls=GeminiFetchRequest,
+        error_cls=GeminiErrorResult,
+        get_client=lambda m: m.get_gemini_client(),
+        label="Gemini",
+    )
 
 
 async def cleanup() -> None:
