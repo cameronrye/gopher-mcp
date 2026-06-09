@@ -157,6 +157,15 @@ class TestGeminiTLSClient:
 
         assert context.minimum_version == ssl.TLSVersion.TLSv1_3
 
+    def test_ssl_context_does_not_narrow_cipher_suites(self):
+        """The TLS 1.2 cipher list must not be narrowed to a few AEAD-only ECDHE
+        suites: that drops ECDHE-CBC and DHE suites and risks handshake failures
+        with conforming Gemini servers. Peer auth is via TOFU pinning, so the
+        channel cipher choice is not the security control -- keep Python's
+        secure defaults. A narrowed list yields ~9 ciphers; the default ~17."""
+        client = GeminiTLSClient()
+        assert len(client.ssl_context.get_ciphers()) > 12
+
     def test_ssl_context_caching(self):
         """Test that SSL context is cached."""
         client = GeminiTLSClient()

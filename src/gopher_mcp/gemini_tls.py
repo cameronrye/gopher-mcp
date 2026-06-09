@@ -115,19 +115,12 @@ class GeminiTLSClient:
         context.check_hostname = False
         context.verify_mode = self.config.verify_mode
 
-        # Set preferred cipher suites for security
-        # TLS 1.3 ciphers are handled automatically
-        if hasattr(context, "set_ciphers"):
-            # Prefer ECDHE for forward secrecy, AES-GCM for AEAD
-            preferred_ciphers = [
-                "ECDHE-ECDSA-AES256-GCM-SHA384",
-                "ECDHE-RSA-AES256-GCM-SHA384",
-                "ECDHE-ECDSA-CHACHA20-POLY1305",
-                "ECDHE-RSA-CHACHA20-POLY1305",
-                "ECDHE-ECDSA-AES128-GCM-SHA256",
-                "ECDHE-RSA-AES128-GCM-SHA256",
-            ]
-            context.set_ciphers(":".join(preferred_ciphers))
+        # Keep Python's secure default cipher suites. We deliberately do NOT
+        # narrow them: peer authentication is via TOFU fingerprint pinning (not
+        # the negotiated cipher), so restricting to a handful of AEAD-only ECDHE
+        # suites buys no security but drops ECDHE-CBC and DHE suites that some
+        # conforming Gemini servers only offer, causing spurious 1.2 handshake
+        # failures. create_default_context() already excludes weak ciphers.
 
         return context
 
