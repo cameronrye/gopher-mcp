@@ -1,8 +1,31 @@
 """Pytest configuration and shared fixtures for gopher-mcp tests."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Redirect the home directory to a per-test tmp dir.
+
+    A default ``GeminiClient()`` builds a ``TOFUManager`` and a
+    ``ClientCertificateManager`` whose storage defaults to ``~/.gemini`` (via
+    ``get_home_directory()`` -> ``Path.home()``). Without this, every test that
+    constructs a default client would *read and write the developer's real home
+    directory* -- creating ``~/.gemini/certs`` and ``~/.gemini/tofu.json``.
+
+    ``Path.home()`` honours ``$HOME`` on POSIX and ``$USERPROFILE`` on Windows,
+    so monkeypatching both is the cleanest mechanism the code already supports;
+    it needs no knowledge of every ``get_home_directory`` import site. Returned
+    so tests that assert on the isolated location can request it by name.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    return home
 
 
 @pytest.fixture(autouse=True)
