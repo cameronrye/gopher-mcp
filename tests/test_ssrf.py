@@ -84,6 +84,18 @@ class TestValidateTarget:
         with pytest.raises(SSRFError, match="Blocked"):
             await validate_target(host, 1965)
 
+    async def test_resolved_internal_ip_not_leaked_in_error(self):
+        """The error returned to the caller must name the host and category but
+        NOT the resolved internal IP -- otherwise a caller can map internal
+        network topology by probing which hostnames resolve to private space.
+        The stub resolves ``*.internal`` to 10.0.0.5."""
+        with pytest.raises(SSRFError) as exc_info:
+            await validate_target("db.internal", 1965)
+        message = str(exc_info.value)
+        assert "10.0.0.5" not in message
+        assert "db.internal" in message
+        assert "private" in message
+
     async def test_allow_local_bypasses_check(self):
         # No exception even though localhost resolves to loopback.
         await validate_target("localhost", 70, allow_local=True)
