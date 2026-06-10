@@ -27,6 +27,7 @@ from .tofu import (
 )
 from .utils import (
     bracket_host,
+    normalize_cache_key,
     parse_gemini_response,
     parse_gemini_url,
     process_gemini_response,
@@ -188,9 +189,13 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             # Validate security constraints
             self._validate_security(parsed_url)
 
+            # Canonical cache key (case-insensitive host) so requests differing
+            # only in host case share one entry instead of duplicating.
+            cache_key = normalize_cache_key(url)
+
             # Check cache first
             if self.cache_enabled:
-                cached_response = self._get_cached_response(url)
+                cached_response = self._get_cached_response(cache_key)
                 if cached_response:
                     # Log without the query string: a status-10/11 answer (which
                     # the caller percent-encodes into the query) may be a secret.
@@ -247,7 +252,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                     "certificate",
                 )
             ):
-                self._cache_response(url, response)
+                self._cache_response(cache_key, response)
 
             # Host/port/path are request metadata; keep them at DEBUG so default
             # INFO logs don't record every browsed resource. The query is NOT

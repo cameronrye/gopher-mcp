@@ -434,6 +434,25 @@ class TestFetchMethod:
             assert cached_entry.value == expected_result
 
     @pytest.mark.asyncio
+    async def test_cache_is_case_insensitive_for_hostname(self):
+        """Hostnames are case-insensitive (RFC 3986), so a request that differs
+        only in host case must hit the same cache entry rather than creating a
+        duplicate and re-fetching."""
+        client = GopherClient()
+        expected_result = MenuResult(items=[])
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = expected_result
+
+            first = await client.fetch("gopher://Example.COM/1/")
+            second = await client.fetch("gopher://example.com/1/")
+
+            assert first == expected_result
+            assert second == expected_result
+            # The second request is served from cache -- no second fetch.
+            assert mock_fetch.call_count == 1
+
+    @pytest.mark.asyncio
     async def test_fetch_does_not_cache_error_result(self):
         """An ErrorResult must not be cached: a transient failure would
         otherwise be served stale for the whole TTL. Matches the Gemini client,

@@ -23,6 +23,7 @@ from .ssrf import SSRFError, normalize_host, validate_target
 from .utils import (
     detect_binary_mime_type,
     gopher_type_category,
+    normalize_cache_key,
     parse_gopher_menu,
     parse_gopher_url,
     truncate_text,
@@ -196,9 +197,13 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             # Validate security constraints
             self._validate_security(parsed_url)
 
+            # Canonical cache key (case-insensitive host) so requests differing
+            # only in host case share one entry instead of duplicating.
+            cache_key = normalize_cache_key(url)
+
             # Check cache first
             if self.cache_enabled:
-                cached_response = self._get_cached_response(url)
+                cached_response = self._get_cached_response(cache_key)
                 if cached_response:
                     logger.debug(
                         "Cache hit",
@@ -230,7 +235,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             # otherwise be served stale for the whole TTL. Mirrors the Gemini
             # client, which excludes error/redirect/input/certificate results.
             if self.cache_enabled and getattr(response, "kind", None) != "error":
-                self._cache_response(url, response)
+                self._cache_response(cache_key, response)
 
             # Full URL/selector/search are request metadata; keep them at DEBUG
             # so default INFO logs don't record every browsed resource/query.

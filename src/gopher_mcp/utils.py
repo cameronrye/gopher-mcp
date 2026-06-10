@@ -7,7 +7,7 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Optional, Union
-from urllib.parse import quote, unquote, urljoin, urlparse
+from urllib.parse import quote, unquote, urljoin, urlparse, urlsplit, urlunsplit
 
 from .models import (
     GeminiCertificateResult,
@@ -111,6 +111,21 @@ def bracket_host(host: str) -> str:
     if ":" in host and not host.startswith("["):
         return f"[{host}]"
     return host
+
+
+def normalize_cache_key(url: str) -> str:
+    """Canonicalize a URL for use as a cache key.
+
+    Hostnames are case-insensitive (RFC 3986), so requests differing only in
+    host case must map to the same entry instead of duplicating it. Lowercase
+    only the authority (host/port -- ports are digits, unaffected) and leave the
+    path/query byte-for-byte intact, since selectors and queries ARE
+    case-sensitive. An already-lowercase URL is returned unchanged.
+    """
+    parts = urlsplit(url)
+    return urlunsplit(
+        (parts.scheme, parts.netloc.lower(), parts.path, parts.query, parts.fragment)
+    )
 
 
 def get_home_directory() -> Path | None:
