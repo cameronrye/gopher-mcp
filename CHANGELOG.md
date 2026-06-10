@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Gopher menu parser now stops at the RFC 1436 `.` terminator, so data a
   server appends after the terminator is no longer parsed into navigable items.
+  The terminator check now also tolerates trailing whitespace (a `". "` line),
+  so a non-conformant server can't slip later items past what reads as the end.
+- Client certificates are now scoped on path-segment boundaries: a certificate
+  for `/api` is no longer sent to a sibling path such as `/api_admin`, closing
+  an identity-scope leak.
+- A blocked SSRF target no longer echoes the resolved internal IP back to the
+  caller (it is logged server-side only), so the error can't be used to map
+  internal network topology.
+- The Gemini request send is now bounded by the request deadline (the receive
+  side already was), so a peer that completes the handshake then stops reading
+  can't pin the request until the OS TCP timeout.
 
 ### Fixed
 
@@ -21,10 +32,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Client-certificate scope lookup now normalizes the host (case / trailing
   dot), matching TOFU and the SSRF/allowlist paths, so a host variant no longer
   silently misses a stored client identity.
+- The client-certificate common name is now parsed via the cryptography
+  library, so a CN containing an escaped comma is no longer truncated (which
+  made the certificate unfindable on disk and silently unusable).
+- IPv6 literal hosts are now bracketed in every constructed `gopher://` and
+  `gemini://` URL (menu `nextUrl`, the URL formatters, the Gemini request line
+  and the display/log helper), so the address colons no longer collide with the
+  port separator and break re-parsing.
+- A Gopher menu item with a numeric but out-of-range port (>65535) now degrades
+  to the default port 70 instead of failing validation and dropping the whole
+  item.
+- The Gopher client no longer caches error responses, so a transient failure is
+  no longer served stale for the cache TTL (matching the Gemini client).
+- Response cache keys are now case-insensitive in the hostname, so the same
+  resource requested with a different host case shares one cache entry.
 - `GopherURL` rejects an empty host at the model boundary (symmetry with
   `GeminiURL`).
 
 ### Changed
+
+- Documentation: corrected the API reference (fresh connection per request, no
+  pooling), removed the non-existent `GOPHER_HTTP_HOST`/`GOPHER_HTTP_PORT` env
+  vars (host/port are `--host`/`--port` CLI flags), and documented that the
+  HTTP transports are unauthenticated and the Docker image binds `0.0.0.0:8000`
+  by default.
 
 - Supply-chain hygiene: added a `.dockerignore` (keeps `.git`/local `.env` out
   of the Docker build context), SHA-pinned the third-party GitHub Actions, and
