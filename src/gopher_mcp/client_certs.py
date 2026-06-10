@@ -20,6 +20,23 @@ from .utils import atomic_write_json, get_home_directory
 logger = structlog.get_logger(__name__)
 
 
+def _path_in_scope(path: str, scope: str) -> bool:
+    """Return True if ``path`` falls within a certificate's ``scope`` path.
+
+    Uses path-segment boundaries rather than a raw textual prefix: a cert
+    scoped to ``/api`` covers ``/api`` and ``/api/v1`` but NOT siblings like
+    ``/api_admin`` or ``/apixyz`` (which a naive ``startswith`` would wrongly
+    match, leaking the client identity outside its declared scope). A scope
+    already ending in ``/`` (notably the root ``/``) matches any path beneath
+    it.
+    """
+    if path == scope:
+        return True
+    if scope.endswith("/"):
+        return path.startswith(scope)
+    return path.startswith(scope + "/")
+
+
 class ClientCertificateError(Exception):
     """Exception raised for client certificate errors."""
 
@@ -309,7 +326,7 @@ class ClientCertificateManager:
             if (
                 normalize_host(stored_cert.host) == norm_host
                 and stored_cert.port == port
-                and path.startswith(stored_cert.path)
+                and _path_in_scope(path, stored_cert.path)
                 and len(stored_cert.path) > best_path_len
             ):
                 best_match = stored_cert
@@ -331,13 +348,30 @@ class ClientCertificateManager:
         return None
 
     def _extract_common_name(self, subject: str) -> str:
-        """Extract common name from certificate subject."""
-        # Parse RFC4514 string to extract CN
-        for raw_part in subject.split(","):
-            part = raw_part.strip()
-            if part.startswith("CN="):
-                return part[3:]
-        return "unknown"
+        """Extract the common name from an RFC 4514 certificate subject.
+
+        Parse via the cryptography library so escaped separators inside an
+        attribute value (RFC 4514 renders an embedded comma as ``\\,``) are
+        unescaped correctly. A naive split on commas would truncate such a CN,
+        and the filename derived from it would then no longer match the file on
+        disk -- silently disabling the certificate.
+        """
+        try:
+            name = x509.Name.from_rfc4514_string(subject)
+            attrs = name.get_attributes_for_oid(NameOID.COMMON_NAME)
+            if attrs:
+                return str(attrs[0].value)
+            return "unknown"
+        except ValueError:
+            # Not strict RFC 4514 (e.g. a legacy/hand-entered subject with a
+            # space after the comma). Fall back to a lenient split -- safe here
+            # because any value with an escaped comma IS valid RFC 4514 and was
+            # handled above, so this path never sees an escape to mangle.
+            for raw_part in subject.split(","):
+                part = raw_part.strip()
+                if part.startswith("CN="):
+                    return part[3:]
+            return "unknown"
 
     def list_certificates(self) -> list[GeminiCertificateInfo]:
         """List all stored certificates.
