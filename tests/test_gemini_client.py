@@ -1,5 +1,6 @@
 """Tests for Gemini client implementation."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -557,6 +558,36 @@ class TestGeminiClientFetchContent:
         parsed.port = 1965
         parsed.path = "/x"
         assert _safe_display_url(parsed) == "gemini://[2001:db8::1]/x"
+
+    @pytest.mark.asyncio
+    async def test_send_is_bounded_by_request_deadline(self):
+        """A peer that completes the handshake then stops reading must not pin
+        the request forever: the send must run under the request deadline, the
+        same as the receive does (and as the Gopher transport already does)."""
+        client = GeminiClient()
+        client.timeout_seconds = 0.05
+        client.tofu_manager = None  # isolate from the on-disk trust store
+
+        parsed = Mock()
+        parsed.host = "example.com"
+        parsed.port = 1965
+        parsed.path = "/"
+        parsed.query = ""
+
+        async def hanging_send(*args, **kwargs):
+            await asyncio.sleep(0.5)  # far longer than the 0.05s deadline
+
+        with (
+            patch.object(client.tls_client, "connect") as mock_connect,
+            patch.object(client.tls_client, "send_data", side_effect=hanging_send),
+            patch.object(client.tls_client, "receive_data"),
+            patch.object(client.tls_client, "close"),
+            patch("gopher_mcp.gemini_client.parse_gemini_response"),
+            patch("gopher_mcp.gemini_client.process_gemini_response"),
+        ):
+            mock_connect.return_value = (Mock(), {"cert_fingerprint": "abc"})
+            with pytest.raises(TimeoutError):
+                await client._fetch_content(parsed)
 
     @pytest.mark.asyncio
     async def test_fetch_content_tls_error(self):

@@ -484,8 +484,15 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
 
             request_data = f"{request_url}\r\n".encode()
 
-            # Send request
-            await self.tls_client.send_data(connection, request_data)
+            # Send request under the request deadline. The payload is small, so
+            # this normally returns at once, but a peer that completes the
+            # handshake then never reads could otherwise block drain() until the
+            # OS TCP timeout -- bound it like the receive below (and like the
+            # Gopher transport, which wraps every I/O step).
+            await asyncio.wait_for(
+                self.tls_client.send_data(connection, request_data),
+                timeout=self.timeout_seconds,
+            )
 
             # Receive the response under an overall read deadline. With native
             # asyncio TLS the read is genuinely cancellable, so a slow-loris peer
