@@ -433,6 +433,49 @@ class TestFetchMethod:
             cached_entry = client._cache[url]
             assert cached_entry.value == expected_result
 
+    @pytest.mark.asyncio
+    async def test_cache_is_case_insensitive_for_hostname(self):
+        """Hostnames are case-insensitive (RFC 3986), so a request that differs
+        only in host case must hit the same cache entry rather than creating a
+        duplicate and re-fetching."""
+        client = GopherClient()
+        expected_result = MenuResult(items=[])
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = expected_result
+
+            first = await client.fetch("gopher://Example.COM/1/")
+            second = await client.fetch("gopher://example.com/1/")
+
+            assert first == expected_result
+            assert second == expected_result
+            # The second request is served from cache -- no second fetch.
+            assert mock_fetch.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_does_not_cache_error_result(self):
+        """An ErrorResult must not be cached: a transient failure would
+        otherwise be served stale for the whole TTL. Matches the Gemini client,
+        which already excludes error/redirect/input/certificate results."""
+        client = GopherClient()
+        url = "gopher://example.com/1/"
+
+        with (
+            patch("gopher_mcp.utils.parse_gopher_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = GopherURL(
+                host="example.com", port=70, gopherType="1", selector="/", search=None
+            )
+            mock_fetch.return_value = ErrorResult(
+                error={"code": "UNSUPPORTED_TYPE", "message": "nope"},
+                requestInfo={},
+            )
+
+            result = await client.fetch(url)
+            assert isinstance(result, ErrorResult)
+            assert url not in client._cache
+
 
 class TestResponseProcessing:
     """Test response processing methods against real raw bytes."""

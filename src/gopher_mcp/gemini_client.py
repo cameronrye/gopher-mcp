@@ -26,6 +26,8 @@ from .tofu import (
     TOFUValidationError,
 )
 from .utils import (
+    bracket_host,
+    normalize_cache_key,
     parse_gemini_response,
     parse_gemini_url,
     process_gemini_response,
@@ -49,7 +51,7 @@ def _safe_display_url(parsed_url: GeminiURL) -> str:
     reflected back to the caller. This mirrors the host/port/path-only logging
     used throughout this module.
     """
-    url = f"gemini://{parsed_url.host}"
+    url = f"gemini://{bracket_host(parsed_url.host)}"
     if parsed_url.port != 1965:
         url = f"{url}:{parsed_url.port}"
     return f"{url}{parsed_url.path}"
@@ -187,9 +189,13 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             # Validate security constraints
             self._validate_security(parsed_url)
 
+            # Canonical cache key (case-insensitive host) so requests differing
+            # only in host case share one entry instead of duplicating.
+            cache_key = normalize_cache_key(url)
+
             # Check cache first
             if self.cache_enabled:
-                cached_response = self._get_cached_response(url)
+                cached_response = self._get_cached_response(cache_key)
                 if cached_response:
                     # Log without the query string: a status-10/11 answer (which
                     # the caller percent-encodes into the query) may be a secret.
@@ -246,7 +252,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                     "certificate",
                 )
             ):
-                self._cache_response(url, response)
+                self._cache_response(cache_key, response)
 
             # Host/port/path are request metadata; keep them at DEBUG so default
             # INFO logs don't record every browsed resource. The query is NOT
@@ -467,8 +473,9 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                         warning=warning,
                     )
 
-            # Format Gemini request: URL + CRLF
-            request_url = f"gemini://{parsed_url.host}"
+            # Format Gemini request: URL + CRLF (bracket an IPv6 literal host
+            # per RFC 3986 so its colons aren't read as a port separator).
+            request_url = f"gemini://{bracket_host(parsed_url.host)}"
             if parsed_url.port != 1965:
                 request_url += f":{parsed_url.port}"
             request_url += parsed_url.path
@@ -477,8 +484,15 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
 
             request_data = f"{request_url}\r\n".encode()
 
-            # Send request
-            await self.tls_client.send_data(connection, request_data)
+            # Send request under the request deadline. The payload is small, so
+            # this normally returns at once, but a peer that completes the
+            # handshake then never reads could otherwise block drain() until the
+            # OS TCP timeout -- bound it like the receive below (and like the
+            # Gopher transport, which wraps every I/O step).
+            await asyncio.wait_for(
+                self.tls_client.send_data(connection, request_data),
+                timeout=self.timeout_seconds,
+            )
 
             # Receive the response under an overall read deadline. With native
             # asyncio TLS the read is genuinely cancellable, so a slow-loris peer

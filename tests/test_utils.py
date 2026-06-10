@@ -8,6 +8,7 @@ import pytest
 
 from gopher_mcp.utils import (
     atomic_write_json,
+    format_gemini_url,
     format_gopher_url,
     guess_mime_type,
     parse_gopher_menu,
@@ -274,6 +275,20 @@ invalid line
         assert len(result) == 1
         assert result[0].title == "Before"
 
+    def test_stops_at_terminator_with_trailing_whitespace(self):
+        """A terminator line carrying trailing whitespace (`. `) must still
+        terminate the menu, so a non-conformant server cannot slip navigable
+        items past what reads as the end of the listing."""
+        content = (
+            "1Before\t/before\texample.com\t70\r\n"
+            ". \r\n"
+            "1AfterTerminator\t/evil\tattacker.example\t70\r\n"
+        )
+        result = parse_gopher_menu(content)
+
+        assert len(result) == 1
+        assert result[0].title == "Before"
+
 
 class TestSanitizeSelector:
     """Test sanitize_selector function."""
@@ -343,6 +358,50 @@ class TestFormatGopherUrl:
         """Test that search is ignored for non-search types."""
         result = format_gopher_url("example.com", gopher_type="1", search="test")
         assert result == "gopher://example.com/1"
+
+    def test_ipv6_host_is_bracketed(self):
+        """An IPv6 literal host must be wrapped in brackets per RFC 3986.
+
+        Without brackets the colons in the address collide with the port
+        separator, producing a URL that re-parses incorrectly.
+        """
+        result = format_gopher_url("::1", port=70)
+        assert result == "gopher://[::1]/1"
+
+    def test_ipv6_host_with_port_is_bracketed(self):
+        """Brackets must separate an IPv6 host from an explicit port."""
+        result = format_gopher_url("2001:db8::1", port=7070)
+        assert result == "gopher://[2001:db8::1]:7070/1"
+
+
+class TestFormatGeminiUrl:
+    """IPv6 bracketing for Gemini URL construction."""
+
+    def test_ipv6_host_is_bracketed(self):
+        assert format_gemini_url("::1") == "gemini://[::1]/"
+
+    def test_ipv6_host_with_port_is_bracketed(self):
+        assert (
+            format_gemini_url("2001:db8::1", port=1966)
+            == "gemini://[2001:db8::1]:1966/"
+        )
+
+    def test_regular_host_unchanged(self):
+        assert format_gemini_url("example.com", path="/x") == "gemini://example.com/x"
+
+
+class TestParseMenuLineIPv6:
+    """A menu item whose host is an IPv6 literal must yield a re-parseable URL."""
+
+    def test_ipv6_host_next_url_round_trips(self):
+        line = "0Title\t/sel\t::1\t70"
+        item = parse_menu_line(line)
+        assert item is not None
+        assert item.next_url == "gopher://[::1]:70/0/sel"
+        # The constructed nextUrl must parse back without a port-split error.
+        parsed = parse_gopher_url(item.next_url)
+        assert parsed.host == "::1"
+        assert parsed.port == 70
 
 
 class TestGuessMimeType:
@@ -419,6 +478,13 @@ class TestGopherUrlPortAndSelectorHandling:
     def test_menu_line_non_ascii_digit_port_defaults_to_70(self):
         """A non-ASCII 'digit' port must default to 70, not drop the item."""
         item = parse_menu_line("0Title\t/sel\texample.com\t²")
+        assert item is not None
+        assert item.port == 70
+
+    def test_menu_line_out_of_range_port_defaults_to_70(self):
+        """A numeric but out-of-range port (>65535) must degrade to 70 rather
+        than failing model validation and dropping the whole menu item."""
+        item = parse_menu_line("0Title\t/sel\texample.com\t99999")
         assert item is not None
         assert item.port == 70
 

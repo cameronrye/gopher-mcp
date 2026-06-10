@@ -391,6 +391,52 @@ class TestClientCertificateManager:
             result = manager.get_certificate_for_scope("example.com", 1965, "/")
             assert result is None
 
+    def test_get_certificate_for_scope_does_not_leak_across_sibling_paths(self):
+        """A cert scoped to /api must not be sent to a sibling like /api_admin.
+
+        Naive ``path.startswith(scope)`` matching would send the /api identity
+        to /api_admin, /api-private, etc., leaking client identity outside its
+        declared scope. Only the exact path or a true child (scope + '/') may
+        match.
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+
+            manager.generate_certificate("example.com", 1965, "/api")
+
+            # Sibling paths sharing the textual prefix must NOT match.
+            assert (
+                manager.get_certificate_for_scope("example.com", 1965, "/api_admin")
+                is None
+            )
+            assert (
+                manager.get_certificate_for_scope("example.com", 1965, "/apixyz")
+                is None
+            )
+
+            # The exact path and genuine children still match.
+            assert (
+                manager.get_certificate_for_scope("example.com", 1965, "/api")
+                is not None
+            )
+            assert (
+                manager.get_certificate_for_scope("example.com", 1965, "/api/v1")
+                is not None
+            )
+
+    def test_extract_common_name_with_escaped_comma(self):
+        """RFC 4514 escapes commas inside a CN value as ``\\,``.
+
+        Splitting the subject on raw commas truncates such a CN; the registry
+        filename derived from it would then not match the file on disk, making
+        the certificate unusable. The parser must unescape correctly.
+        """
+        with patch.object(ClientCertificateManager, "_load_registry"):
+            manager = ClientCertificateManager("/tmp/test")
+
+            subject = "CN=test\\, name,O=Gemini Client"
+            assert manager._extract_common_name(subject) == "test, name"
+
     def test_remove_certificate_success(self):
         """Test successful certificate removal."""
         with tempfile.TemporaryDirectory() as temp_dir:

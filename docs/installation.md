@@ -100,6 +100,18 @@ gopher-mcp --transport sse
 
 Then configure your MCP client to connect to the HTTP endpoint (default port varies by transport).
 
+!!! warning "Securing the HTTP transport"
+    The HTTP-based transports (`streamable-http`, `sse`) expose an
+    **unauthenticated** endpoint with no built-in TLS. By default they bind to
+    loopback (`127.0.0.1:8000`), which is safe for local use. Pass `--host` /
+    `--port` to change the bind address; binding to `0.0.0.0` exposes the server
+    on **all interfaces** and should only be done behind a trusted reverse proxy
+    that terminates TLS and handles authentication. Note that the provided
+    **Dockerfile** defaults its `CMD` to
+    `--transport streamable-http --host 0.0.0.0 --port 8000` so the container is
+    reachable out of the box — override it for production (bind `127.0.0.1`, or
+    use the `stdio` transport) unless it sits behind such a proxy.
+
 ## Troubleshooting
 
 ### Common Issues

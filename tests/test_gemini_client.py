@@ -1,11 +1,12 @@
 """Tests for Gemini client implementation."""
 
+import asyncio
 import time
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.gemini_client import GeminiClient, _safe_display_url
 from gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
 from gopher_mcp.models import (
     GeminiErrorResult,
@@ -510,6 +511,83 @@ class TestGeminiClientFetchContent:
             sent_data = mock_send.call_args[0][1]
             expected_request = b"gemini://example.com/test?search\r\n"
             assert sent_data == expected_request
+
+    @pytest.mark.asyncio
+    async def test_fetch_content_brackets_ipv6_host_on_the_wire(self):
+        """An IPv6 literal host must be bracketed in the request line sent.
+
+        Per RFC 3986 the address must be ``[..]`` so a server (and any URL
+        re-parse) can tell the address colons from a port separator.
+        """
+        client = GeminiClient()
+
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "2606:4700:4700::1111"  # globally routable IPv6
+        mock_parsed_url.port = 1966
+        mock_parsed_url.path = "/p"
+        mock_parsed_url.query = ""
+
+        mock_connection_info = {"cert_fingerprint": "abc123"}
+        mock_result = GeminiSuccessResult(
+            content="ok",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=2,
+            requestInfo={},
+        )
+        with (
+            patch.object(client.tls_client, "connect") as mock_connect,
+            patch.object(client.tls_client, "send_data") as mock_send,
+            patch.object(client.tls_client, "receive_data") as mock_receive,
+            patch.object(client.tls_client, "close"),
+            patch("gopher_mcp.gemini_client.parse_gemini_response"),
+            patch("gopher_mcp.gemini_client.process_gemini_response") as mock_process,
+        ):
+            mock_connect.return_value = (Mock(), mock_connection_info)
+            mock_receive.return_value = b"20 text/plain\r\nok"
+            mock_process.return_value = mock_result
+
+            await client._fetch_content(mock_parsed_url)
+
+            sent_data = mock_send.call_args[0][1]
+            assert sent_data == b"gemini://[2606:4700:4700::1111]:1966/p\r\n"
+
+    def test_safe_display_url_brackets_ipv6_host(self):
+        """The display/log helper must also bracket IPv6 hosts."""
+        parsed = Mock()
+        parsed.host = "2001:db8::1"
+        parsed.port = 1965
+        parsed.path = "/x"
+        assert _safe_display_url(parsed) == "gemini://[2001:db8::1]/x"
+
+    @pytest.mark.asyncio
+    async def test_send_is_bounded_by_request_deadline(self):
+        """A peer that completes the handshake then stops reading must not pin
+        the request forever: the send must run under the request deadline, the
+        same as the receive does (and as the Gopher transport already does)."""
+        client = GeminiClient()
+        client.timeout_seconds = 0.05
+        client.tofu_manager = None  # isolate from the on-disk trust store
+
+        parsed = Mock()
+        parsed.host = "example.com"
+        parsed.port = 1965
+        parsed.path = "/"
+        parsed.query = ""
+
+        async def hanging_send(*args, **kwargs):
+            await asyncio.sleep(0.5)  # far longer than the 0.05s deadline
+
+        with (
+            patch.object(client.tls_client, "connect") as mock_connect,
+            patch.object(client.tls_client, "send_data", side_effect=hanging_send),
+            patch.object(client.tls_client, "receive_data"),
+            patch.object(client.tls_client, "close"),
+            patch("gopher_mcp.gemini_client.parse_gemini_response"),
+            patch("gopher_mcp.gemini_client.process_gemini_response"),
+        ):
+            mock_connect.return_value = (Mock(), {"cert_fingerprint": "abc"})
+            with pytest.raises(TimeoutError):
+                await client._fetch_content(parsed)
 
     @pytest.mark.asyncio
     async def test_fetch_content_tls_error(self):

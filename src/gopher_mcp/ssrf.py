@@ -207,6 +207,16 @@ async def validate_target(
         for addr in addresses:
             reason = classify_blocked_ip(addr)
             if reason is not None:
-                raise SSRFError(f"Blocked {reason} address for {host}: {addr}")
+                # Keep the resolved IP out of the caller-facing error: returning
+                # it would let a caller map internal topology by probing which
+                # hostnames land in private/reserved space. Log it server-side
+                # for operators, surface only the host and category.
+                logger.warning(
+                    "Blocked target resolving to internal address",
+                    host=host,
+                    reason=reason,
+                    resolved_ip=addr,
+                )
+                raise SSRFError(f"Blocked {reason} address for {host}")
 
     return addresses
