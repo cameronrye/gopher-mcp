@@ -100,6 +100,19 @@ def atomic_write_json(file_path: str, data: Any) -> None:
         raise
 
 
+def bracket_host(host: str) -> str:
+    """Wrap an IPv6 literal host in brackets for use in a URL authority.
+
+    RFC 3986 requires an IPv6 address in a URL to be enclosed in ``[...]`` so
+    its colons are not confused with the host:port separator. A bare IPv4
+    address or registered name (already bracketed or containing no colon) is
+    returned unchanged.
+    """
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
 def get_home_directory() -> Path | None:
     """Get the user's home directory with fallback handling.
 
@@ -234,7 +247,12 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         # Construct the next URL. Percent-encode the selector (keeping '/')
         # so a selector containing spaces, '?', '#' or '%' round-trips back
         # through parse_gopher_url instead of mis-splitting into a bogus query.
-        next_url = f"gopher://{host}:{port}/{item_type}{quote(selector, safe='/')}"
+        # Bracket an IPv6 literal host so its colons don't collide with the
+        # port separator and break the re-parse.
+        next_url = (
+            f"gopher://{bracket_host(host)}:{port}/"
+            f"{item_type}{quote(selector, safe='/')}"
+        )
 
         return GopherMenuItem(
             type=item_type,
@@ -327,8 +345,8 @@ def format_gopher_url(
     # Sanitize inputs
     selector = sanitize_selector(selector)
 
-    # Build the URL
-    url = f"gopher://{host}"
+    # Build the URL (bracket an IPv6 literal host per RFC 3986)
+    url = f"gopher://{bracket_host(host)}"
 
     if port != 70:
         url += f":{port}"
@@ -536,8 +554,8 @@ def format_gemini_url(
         Formatted Gemini URL
 
     """
-    # Build the URL
-    url = f"gemini://{host}"
+    # Build the URL (bracket an IPv6 literal host per RFC 3986)
+    url = f"gemini://{bracket_host(host)}"
 
     # Only include port if it's not the default
     if port != 1965:

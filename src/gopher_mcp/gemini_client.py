@@ -26,6 +26,7 @@ from .tofu import (
     TOFUValidationError,
 )
 from .utils import (
+    bracket_host,
     parse_gemini_response,
     parse_gemini_url,
     process_gemini_response,
@@ -49,7 +50,7 @@ def _safe_display_url(parsed_url: GeminiURL) -> str:
     reflected back to the caller. This mirrors the host/port/path-only logging
     used throughout this module.
     """
-    url = f"gemini://{parsed_url.host}"
+    url = f"gemini://{bracket_host(parsed_url.host)}"
     if parsed_url.port != 1965:
         url = f"{url}:{parsed_url.port}"
     return f"{url}{parsed_url.path}"
@@ -467,8 +468,9 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                         warning=warning,
                     )
 
-            # Format Gemini request: URL + CRLF
-            request_url = f"gemini://{parsed_url.host}"
+            # Format Gemini request: URL + CRLF (bracket an IPv6 literal host
+            # per RFC 3986 so its colons aren't read as a port separator).
+            request_url = f"gemini://{bracket_host(parsed_url.host)}"
             if parsed_url.port != 1965:
                 request_url += f":{parsed_url.port}"
             request_url += parsed_url.path
