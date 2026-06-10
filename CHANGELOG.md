@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-06-10
+
 ### Security
 
 - The Gopher menu parser now stops at the RFC 1436 `.` terminator, so data a
