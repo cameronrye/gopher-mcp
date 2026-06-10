@@ -186,8 +186,12 @@ gopher://veronica.example.com/7/search%09python
 | `GOPHER_ALLOWED_HOSTS` | - | Comma-separated list of allowed hosts |
 | `GOPHER_MAX_SELECTOR_LENGTH` | 1024 | Maximum selector length |
 | `GOPHER_MAX_SEARCH_LENGTH` | 256 | Maximum search query length |
-| `GOPHER_HTTP_HOST` | localhost | HTTP server host |
-| `GOPHER_HTTP_PORT` | 8000 | HTTP server port |
+
+> **HTTP transport bind address.** The host/port for the `sse` and
+> `streamable-http` transports are **not** environment variables — they are set
+> with the `--host` / `--port` CLI flags (defaulting to FastMCP's
+> `127.0.0.1:8000`). See [Installation](installation.md) for the security
+> caveats when binding to a non-loopback address.
 
 ### Programmatic Configuration
 

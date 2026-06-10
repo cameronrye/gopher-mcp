@@ -589,7 +589,7 @@ Both protocols support intelligent caching:
 
 ### Connection Management
 
-- **Connection pooling**: Automatic connection reuse
+- **Fresh connection per request**: each fetch opens a new connection; there is no connection pooling or reuse
 - **Async/await**: Non-blocking I/O operations
 - **Streaming**: Memory-efficient content handling
 - **Resource cleanup**: Automatic connection cleanup
