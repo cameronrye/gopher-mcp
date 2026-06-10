@@ -275,6 +275,20 @@ invalid line
         assert len(result) == 1
         assert result[0].title == "Before"
 
+    def test_stops_at_terminator_with_trailing_whitespace(self):
+        """A terminator line carrying trailing whitespace (`. `) must still
+        terminate the menu, so a non-conformant server cannot slip navigable
+        items past what reads as the end of the listing."""
+        content = (
+            "1Before\t/before\texample.com\t70\r\n"
+            ". \r\n"
+            "1AfterTerminator\t/evil\tattacker.example\t70\r\n"
+        )
+        result = parse_gopher_menu(content)
+
+        assert len(result) == 1
+        assert result[0].title == "Before"
+
 
 class TestSanitizeSelector:
     """Test sanitize_selector function."""
@@ -464,6 +478,13 @@ class TestGopherUrlPortAndSelectorHandling:
     def test_menu_line_non_ascii_digit_port_defaults_to_70(self):
         """A non-ASCII 'digit' port must default to 70, not drop the item."""
         item = parse_menu_line("0Title\t/sel\texample.com\t²")
+        assert item is not None
+        assert item.port == 70
+
+    def test_menu_line_out_of_range_port_defaults_to_70(self):
+        """A numeric but out-of-range port (>65535) must degrade to 70 rather
+        than failing model validation and dropping the whole menu item."""
+        item = parse_menu_line("0Title\t/sel\texample.com\t99999")
         assert item is not None
         assert item.port == 70
 

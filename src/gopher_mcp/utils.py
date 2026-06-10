@@ -241,8 +241,14 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         host = parts[2]
         # ``str.isdigit()`` accepts unicode digits (e.g. "²") that ``int()``
         # rejects; require ASCII so a bad port degrades to the default rather
-        # than dropping the whole menu item.
-        port = int(parts[3]) if parts[3].isascii() and parts[3].isdigit() else 70
+        # than dropping the whole menu item. Also bound the value: a numeric
+        # but out-of-range port (>65535) would otherwise fail model validation
+        # and drop the item -- degrade it to 70 instead.
+        port = 70
+        if parts[3].isascii() and parts[3].isdigit():
+            candidate = int(parts[3])
+            if 0 <= candidate <= 65535:
+                port = candidate
 
         # Construct the next URL. Percent-encode the selector (keeping '/')
         # so a selector containing spaces, '?', '#' or '%' round-trips back
@@ -286,7 +292,9 @@ def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
     for line in normalized.split("\n"):
         # RFC 1436: a lone '.' terminates the menu. Stop here so data a server
         # places AFTER the terminator is never parsed into navigable items.
-        if line == ".":
+        # Strip trailing whitespace first so a non-conformant `. ` line still
+        # reads as the terminator instead of leaking later items to the model.
+        if line.strip() == ".":
             break
         item = parse_menu_line(line)
         if item:
