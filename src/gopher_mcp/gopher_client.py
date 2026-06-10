@@ -226,8 +226,10 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             if hasattr(response, "request_info"):
                 response.request_info.update(request_info)
 
-            # Cache the response
-            if self.cache_enabled:
+            # Cache the response, but skip errors: a transient failure would
+            # otherwise be served stale for the whole TTL. Mirrors the Gemini
+            # client, which excludes error/redirect/input/certificate results.
+            if self.cache_enabled and getattr(response, "kind", None) != "error":
                 self._cache_response(url, response)
 
             # Full URL/selector/search are request metadata; keep them at DEBUG
