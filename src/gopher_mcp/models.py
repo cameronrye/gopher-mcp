@@ -1,6 +1,5 @@
 """Pydantic models for Gopher MCP data validation."""
 
-import base64
 from enum import Enum, IntEnum
 from typing import Any, Generic, Literal, TypeVar
 from urllib.parse import urlparse
@@ -8,7 +7,6 @@ from urllib.parse import urlparse
 from pydantic import (
     BaseModel,
     Field,
-    field_serializer,
     field_validator,
     model_serializer,
 )
@@ -366,32 +364,50 @@ class GeminiResponse(BaseModel):
 
 # Response result models following Gopher patterns
 class GeminiSuccessResult(BaseModel):
-    """Result model for successful Gemini responses."""
+    """Result model for a successful Gemini response carrying TEXT content.
+
+    Binary success responses use :class:`GeminiBinaryResult` (metadata only), so
+    ``content`` is always decoded text here.
+    """
 
     kind: Literal["success"] = "success"
     mime_type: GeminiMimeType = Field(
         ..., alias="mimeType", description="Content MIME type"
     )
-    content: str | bytes = Field(..., description="Response content")
+    content: str = Field(..., description="Decoded text response content")
     size: int = Field(..., ge=0, description="Content size in bytes")
     truncated: bool = Field(
         default=False,
-        description="True if text `content` was truncated to the render limit "
-        "(`size` still reports the full original size). Never set for binary.",
+        description="True if `content` was truncated to the render limit "
+        "(`size` still reports the full original size).",
     )
 
-    @field_serializer("content")
-    def _serialize_content(self, v: str | bytes) -> str:
-        """Base64-encode binary content so model_dump() stays JSON-serializable.
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
 
-        A status-20 binary response would otherwise carry raw bytes that fail
-        to serialize at the MCP boundary. ``content_encoding`` in request_info
-        signals when the content has been base64-encoded.
-        """
-        if isinstance(v, bytes):
-            return base64.b64encode(v).decode("ascii")
-        return v
 
+class GeminiBinaryResult(BaseModel):
+    """Result model for a successful BINARY Gemini response (metadata only).
+
+    Mirrors the Gopher :class:`BinaryResult`: the raw bytes are NOT returned to
+    the model. A 1 MB body is ~1.4M base64 characters (~350k tokens), so
+    inlining it would flood the context for content the model can't render
+    anyway. The consumer gets the size and detected MIME type and can fetch the
+    resource directly if it genuinely needs the bytes.
+    """
+
+    kind: Literal["binary"] = "binary"
+    mime_type: GeminiMimeType = Field(
+        ..., alias="mimeType", description="Detected content MIME type"
+    )
+    size: int = Field(..., ge=0, description="Content size in bytes")
+    note: str = Field(
+        default="Binary content not returned to preserve context",
+        description="Note about binary handling",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -692,6 +708,7 @@ class GeminiGemtextResult(BaseModel):
 # Union type for all possible Gemini fetch responses
 GeminiFetchResponse = (
     GeminiSuccessResult
+    | GeminiBinaryResult
     | GeminiGemtextResult
     | GeminiInputResult
     | GeminiRedirectResult

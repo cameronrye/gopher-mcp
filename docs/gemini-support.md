@@ -86,7 +86,7 @@ For `text/gemini` content, returns a structured document:
 
 #### GeminiSuccessResult
 
-For other content types (text, binary, etc.):
+For non-gemtext **text** content (e.g. `text/plain`):
 
 ```json
 {
@@ -101,6 +101,27 @@ For other content types (text, binary, etc.):
   },
   "content": "Plain text content here",
   "size": 23
+}
+```
+
+#### GeminiBinaryResult
+
+For binary content, only metadata is returned — the raw bytes are **not**
+inlined (a 1 MB body would be ~1.4M base64 characters of context). Re-fetch the
+resource directly if you need the bytes.
+
+```json
+{
+  "kind": "binary",
+  "mime_type": {
+    "full_type": "image/png",
+    "main_type": "image",
+    "sub_type": "png",
+    "is_text": false,
+    "is_gemtext": false
+  },
+  "size": 1048576,
+  "note": "Binary content not returned to preserve context"
 }
 ```
 
