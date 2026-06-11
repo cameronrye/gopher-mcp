@@ -219,7 +219,8 @@ field. See [Data Models](reference/models.md) for the complete field definitions
 | `kind` | Type | Returned for |
 |--------|------|--------------|
 | `gemtext` | [`GeminiGemtextResult`][gopher_mcp.models.GeminiGemtextResult] | `text/gemini` content, parsed into a [`GemtextDocument`][gopher_mcp.models.GemtextDocument] of [`GemtextLine`][gopher_mcp.models.GemtextLine] items |
-| `success` | [`GeminiSuccessResult`][gopher_mcp.models.GeminiSuccessResult] | Other success responses (status 20-29); the MIME type is a [`GeminiMimeType`][gopher_mcp.models.GeminiMimeType] |
+| `success` | [`GeminiSuccessResult`][gopher_mcp.models.GeminiSuccessResult] | Textual success responses (status 20-29); the MIME type is a [`GeminiMimeType`][gopher_mcp.models.GeminiMimeType] |
+| `binary` | [`GeminiBinaryResult`][gopher_mcp.models.GeminiBinaryResult] | Binary success responses — metadata only (size + MIME type), no raw bytes |
 | `input` | [`GeminiInputResult`][gopher_mcp.models.GeminiInputResult] | Input prompts (status 10-11) — answer with the `gemini_fetch` `input` parameter |
 | `redirect` | [`GeminiRedirectResult`][gopher_mcp.models.GeminiRedirectResult] | Redirects (status 30-31) |
 | `error` | [`GeminiErrorResult`][gopher_mcp.models.GeminiErrorResult] | Errors (status 40-59) |

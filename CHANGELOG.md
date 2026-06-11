@@ -33,6 +33,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Gemini binary success responses now return metadata only (size + detected
+  MIME type) as a new `binary` result kind, instead of base64-inlining the full
+  body into the model's context. This matches the Gopher binary path and the
+  server's documented "binary bodies are returned as metadata only" contract; a
+  1 MB body previously shipped ~1.4M base64 characters. Re-fetch the resource
+  directly if the raw bytes are needed.
 - Release/CI hygiene: `prepare-release.py` now bumps the version with an anchored
   match (no longer corrupting `target-version` / `python_version` / `minversion`
   in `pyproject.toml`) and also updates `server.json`; GitHub release notes no

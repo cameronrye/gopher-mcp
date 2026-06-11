@@ -20,6 +20,7 @@ from .mime import (
     validate_gemini_mime_type,
 )
 from .models import (
+    GeminiBinaryResult,
     GeminiCertificateResult,
     GeminiErrorResult,
     GeminiFetchResponse,
@@ -378,7 +379,12 @@ def _process_success_response(
     *,
     max_rendered_chars: int = 0,
     denied_mime_types: "frozenset[str] | None" = None,
-) -> Union["GeminiSuccessResult", "GeminiGemtextResult", "GeminiErrorResult"]:
+) -> Union[
+    "GeminiSuccessResult",
+    "GeminiBinaryResult",
+    "GeminiGemtextResult",
+    "GeminiErrorResult",
+]:
     """Process success response (status 20-29).
 
     Args:
@@ -493,14 +499,14 @@ def _process_success_response(
                 with contextlib.suppress(ValueError):
                     mime_type = parse_gemini_mime_type(detected_type)
 
-        # Binary content is base64-encoded on serialization; flag it so the
-        # consumer knows how to interpret the content field.
-        binary_request_info = {**request_info, "content_encoding": "base64"}
-        return GeminiSuccessResult(
+        # Metadata only: do NOT return the raw bytes to the model. A 1 MB body is
+        # ~1.4M base64 chars (~350k tokens) of context for content the model
+        # can't render -- mirror the Gopher binary path and return size + type.
+        # `size` still reports the full original byte length.
+        return GeminiBinaryResult(
             mimeType=mime_type,
-            content=body,  # serialized as base64 (JSON-safe) by the model
             size=size,
-            requestInfo=binary_request_info,
+            requestInfo=request_info,
         )
 
 

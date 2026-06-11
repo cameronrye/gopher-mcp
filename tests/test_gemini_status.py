@@ -3,6 +3,7 @@
 import pytest
 
 from gopher_mcp.models import (
+    GeminiBinaryResult,
     GeminiCertificateResult,
     GeminiErrorResult,
     GeminiGemtextResult,
@@ -461,11 +462,12 @@ class TestProcessGeminiResponse:
             status=GeminiStatusCode.SUCCESS, meta="garbage-no-slash", body=png
         )
         result = process_gemini_response(response, "gemini://example.org/")
-        assert isinstance(result, GeminiSuccessResult)
+        assert isinstance(result, GeminiBinaryResult)
         assert result.mime_type.full_type == "image/png"
 
     def test_success_binary_response(self):
-        """Test success binary response processing."""
+        """A binary success returns metadata only (no inline bytes), mirroring
+        the Gopher binary path."""
         binary_data = b"\x89PNG\r\n\x1a\n"  # PNG header
         response = GeminiResponse(
             status=GeminiStatusCode.SUCCESS, meta="image/png", body=binary_data
@@ -473,9 +475,27 @@ class TestProcessGeminiResponse:
 
         result = process_gemini_response(response, "gemini://example.org/image.png")
 
-        assert isinstance(result, GeminiSuccessResult)
-        assert result.content == binary_data
+        assert isinstance(result, GeminiBinaryResult)
+        assert result.kind == "binary"
+        assert result.size == len(binary_data)
+        assert result.mime_type.full_type == "image/png"
         assert result.mime_type.is_text is False
+        # The raw bytes must NOT be present on the result.
+        assert "content" not in result.model_dump()
+
+    def test_success_binary_response_does_not_inline_large_bodies(self):
+        """A large binary body must not be base64-inlined into the result (the
+        bug this fixes shipped ~1.4M chars of context for a 1 MB image)."""
+        big = b"\x89PNG\r\n\x1a\n" + b"\x00" * 500_000
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS, meta="image/png", body=big
+        )
+        result = process_gemini_response(response, "gemini://example.org/big.png")
+        assert isinstance(result, GeminiBinaryResult)
+        assert result.size == len(big)
+        dumped = result.model_dump()
+        # No field carries the encoded body; the whole result stays tiny.
+        assert len(str(dumped)) < 1000
 
     def test_temporary_redirect_response(self):
         """Test temporary redirect response processing."""
@@ -758,7 +778,8 @@ class TestProcessGeminiResponse:
         assert result.mime_type.charset == "latin-1"  # Should fallback to latin1
 
     def test_success_response_binary_detection(self):
-        """Test success response with binary content detection."""
+        """An octet-stream body is sniffed to a specific type and returned as
+        metadata only (no inline bytes)."""
         png_data = b"\x89PNG\r\n\x1a\n" + b"fake_png_data"
 
         response = GeminiResponse(
@@ -769,9 +790,9 @@ class TestProcessGeminiResponse:
 
         result = process_gemini_response(response, "gemini://example.org/image")
 
-        assert isinstance(result, GeminiSuccessResult)
+        assert isinstance(result, GeminiBinaryResult)
         assert result.mime_type.full_type == "image/png"
-        assert result.content == png_data
+        assert result.size == len(png_data)
 
     def test_success_response_invalid_mime_fallback(self):
         """An invalid MIME with non-binary content defaults to text/gemini."""
