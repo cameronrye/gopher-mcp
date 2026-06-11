@@ -169,7 +169,7 @@ jobs:
         run: uv run pip-audit --format json --output pip-audit-report.json
 
       - name: Upload security reports
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         if: always()
         with:
           name: security-reports
@@ -202,7 +202,7 @@ jobs:
         run: uv run mkdocs build
 
       - name: Upload docs artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: documentation
           path: site/
