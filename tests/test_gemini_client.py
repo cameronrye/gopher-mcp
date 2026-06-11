@@ -45,6 +45,17 @@ class TestGeminiClientInit:
         logged = str(mock_logger.warning.call_args).lower()
         assert "tofu" in logged or "unauthenticated" in logged
 
+    def test_tls_client_for_cert_is_cached_per_pair(self):
+        """The client-cert TLS client (and its SSL context) is built once per
+        (cert, key) pair, not rebuilt on every request."""
+        client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)
+        a = client._tls_client_for_cert("/a.crt", "/a.key")
+        b = client._tls_client_for_cert("/a.crt", "/a.key")
+        assert a is b
+        assert a.config.client_cert_path == "/a.crt"
+        other = client._tls_client_for_cert("/b.crt", "/b.key")
+        assert other is not a
+
     def test_status_44_slow_down_penalizes_host(self):
         """A status-44 SLOW_DOWN backs the host off for the advertised seconds."""
         client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)

@@ -149,10 +149,40 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 client_certs_storage_path
             )
 
+        # Cache of TLS clients bound to a client certificate, keyed by
+        # (cert_path, key_path). Each holds a lazily-built SSL context, so the
+        # system CA bundle load + cert/key PEM reads happen once per cert pair
+        # instead of on every client-cert request (blocking work on the loop).
+        self._client_cert_tls_clients: dict[tuple[str, str], GeminiTLSClient] = {}
+
         # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
         # is inherited from the mixin annotation; only the entry class differs.
         self._cache = OrderedDict()
         self._cache_entry_cls = GeminiCacheEntry
+
+    def _tls_client_for_cert(self, cert_path: str, key_path: str) -> GeminiTLSClient:
+        """Return a TLS client bound to a client certificate, cached per pair.
+
+        Building the client (and its SSL context) reloads the system CA bundle
+        and reads the cert/key PEMs from disk; doing that on every client-cert
+        request was blocking work on the event loop. Cache by (cert, key) path so
+        it is paid once. Concurrent first-use may briefly build two clients (last
+        write wins) -- both are valid, so no lock is needed.
+        """
+        cache_key = (cert_path, key_path)
+        client = self._client_cert_tls_clients.get(cache_key)
+        if client is None:
+            base = self.tls_client.config
+            cfg = TLSConfig(
+                min_version=base.min_version,
+                verify_mode=base.verify_mode,
+                client_cert_path=cert_path,
+                client_key_path=key_path,
+                timeout_seconds=base.timeout_seconds,
+            )
+            client = GeminiTLSClient(cfg)
+            self._client_cert_tls_clients[cache_key] = client
+        return client
 
     def _validate_security(self, parsed_url: GeminiURL) -> None:
         """Validate security constraints for a Gemini request.
@@ -416,35 +446,22 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                         cert_path=client_cert_path,
                     )
 
-            # Update TLS config with client certificate if available
-            tls_config = self.tls_client.config
+            # Pick the TLS client: a client-cert-bound one (whose SSL context is
+            # built and cached once per cert pair) when a cert applies to this
+            # scope, otherwise the shared default client. A single connect call
+            # then serves both paths.
             if client_cert_path and client_key_path:
-                # Create a new TLS config with client certificate
-                from .gemini_tls import TLSConfig
-
-                tls_config = TLSConfig(
-                    min_version=tls_config.min_version,
-                    verify_mode=tls_config.verify_mode,
-                    client_cert_path=client_cert_path,
-                    client_key_path=client_key_path,
-                    timeout_seconds=tls_config.timeout_seconds,
-                )
-                # Create temporary TLS client with client certificate
-                temp_tls_client = GeminiTLSClient(tls_config)
-                connection, connection_info = await temp_tls_client.connect(
-                    parsed_url.host,
-                    parsed_url.port,
-                    timeout=self.timeout_seconds,
-                    connect_ip=connect_ip,
+                tls_client = self._tls_client_for_cert(
+                    client_cert_path, client_key_path
                 )
             else:
-                # Use default TLS client
-                connection, connection_info = await self.tls_client.connect(
-                    parsed_url.host,
-                    parsed_url.port,
-                    timeout=self.timeout_seconds,
-                    connect_ip=connect_ip,
-                )
+                tls_client = self.tls_client
+            connection, connection_info = await tls_client.connect(
+                parsed_url.host,
+                parsed_url.port,
+                timeout=self.timeout_seconds,
+                connect_ip=connect_ip,
+            )
 
             # Validate certificate using TOFU if enabled (fail CLOSED).
             tofu_warning = None
