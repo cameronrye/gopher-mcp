@@ -22,6 +22,11 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 READ_CHUNK = 65536
+# Grace period for a TLS close handshake. ``wait_closed`` waits for the peer's
+# close_notify; a peer that withholds it would otherwise block until the OS TCP
+# timeout (~30s+), adding that to every request *beyond* the configured deadline
+# (close runs in a finally, after the read deadline has already been met).
+CLOSE_TIMEOUT_SECONDS = 5.0
 # Short probe deadline used once the size cap is reached: a server that sent
 # exactly ``max_size`` bytes and then holds the connection open (delayed/absent
 # close_notify) would otherwise block until the request deadline. A probe
@@ -300,10 +305,14 @@ class GeminiTLSClient:
             conn: The connection to close
         """
         conn.writer.close()
-        # Best-effort: ignore errors (incl. SSL close_notify hiccups) so they
-        # don't mask the result the caller already obtained.
+        # Best-effort, and time-bounded: ignore errors (incl. SSL close_notify
+        # hiccups) so they don't mask the result the caller already obtained, and
+        # cap the wait so a peer withholding close_notify can't tack the OS TCP
+        # timeout onto every request past the deadline.
         with contextlib.suppress(Exception):
-            await conn.writer.wait_closed()
+            await asyncio.wait_for(
+                conn.writer.wait_closed(), timeout=CLOSE_TIMEOUT_SECONDS
+            )
 
     async def send_data(self, conn: TLSConnection, data: bytes) -> None:
         """Send data over the TLS connection.

@@ -8,6 +8,7 @@ import structlog
 
 from .cache import TTLCacheMixin
 from .client_certs import ClientCertificateManager
+from .gemini_parse import GeminiProtocolError
 from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnectionError
 from .models import (
     GeminiCacheEntry,
@@ -297,6 +298,18 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         except TimeoutError as e:
             # DNS resolution, connect, or read exceeded the request deadline.
             return self._error_result(url, "FETCH_ERROR", "The request timed out", e)
+        except GeminiProtocolError as e:
+            # The SERVER sent a malformed response (missing CRLF, bad status,
+            # over-long meta, ...). Report it as a server-side fault rather than
+            # INVALID_REQUEST, which would wrongly tell the model to fix its URL.
+            # Must precede the ValueError handler (it is a subclass). The message
+            # describes the response shape only -- no body bytes or secrets.
+            return self._error_result(
+                url,
+                "PROTOCOL_ERROR",
+                f"The server sent a malformed Gemini response: {e}",
+                e,
+            )
         except ValueError as e:
             # URL/host validation errors are safe to surface verbatim.
             return self._error_result(url, "INVALID_REQUEST", str(e), e)

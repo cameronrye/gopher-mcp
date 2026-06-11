@@ -34,7 +34,9 @@ class ReleasePreparation:
             raise FileNotFoundError("pyproject.toml not found!")
 
         content = pyproject_path.read_text()
-        match = re.search(r'version = "([^"]+)"', content)
+        # Anchor to the start of a line so we read [project].version and not a
+        # substring of target-version / python_version / minversion.
+        match = re.search(r'^version = "([^"]+)"', content, flags=re.MULTILINE)
         if not match:
             raise ValueError("Version not found in pyproject.toml!")
 
@@ -46,15 +48,44 @@ class ReleasePreparation:
         return bool(re.match(pattern, version))
 
     def _update_version(self, new_version: str) -> None:
-        """Update version in pyproject.toml."""
+        """Update the version in pyproject.toml and server.json.
+
+        The release workflow validates that pyproject.toml AND server.json (its
+        two version fields) all match the tag, so both must be bumped here -- a
+        pyproject-only bump produces a tag push that fails at validate-release.
+        """
+        # pyproject.toml: anchor to the start of a line and replace only the
+        # first match, so we don't rewrite target-version / python_version /
+        # minversion (which an unanchored substring match would clobber, breaking
+        # ruff/mypy/pytest config).
         pyproject_path = self.project_root / "pyproject.toml"
         content = pyproject_path.read_text()
-
-        # Update version
-        content = re.sub(r'version = "[^"]+"', f'version = "{new_version}"', content)
-
+        content, n = re.subn(
+            r'^version = "[^"]+"',
+            f'version = "{new_version}"',
+            content,
+            count=1,
+            flags=re.MULTILINE,
+        )
+        if n != 1:
+            raise ValueError("Could not locate [project].version in pyproject.toml")
         pyproject_path.write_text(content)
         print(f"✅ Updated version to {new_version} in pyproject.toml")
+
+        # server.json: the MCP registry manifest carries the version twice (the
+        # top-level field and each package entry). Use json load/dump so we touch
+        # only the version fields and preserve formatting elsewhere.
+        server_json_path = self.project_root / "server.json"
+        if server_json_path.exists():
+            import json
+
+            data = json.loads(server_json_path.read_text())
+            data["version"] = new_version
+            for package in data.get("packages", []):
+                if "version" in package:
+                    package["version"] = new_version
+            server_json_path.write_text(json.dumps(data, indent=2) + "\n")
+            print(f"✅ Updated version to {new_version} in server.json")
 
     def _update_changelog(self, version: str) -> None:
         """Update CHANGELOG.md with new version."""

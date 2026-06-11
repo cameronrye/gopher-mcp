@@ -33,6 +33,17 @@ from .models import (
 )
 
 
+class GeminiProtocolError(ValueError):
+    """A server sent a malformed Gemini response (a server-side fault).
+
+    Distinct from a client-side URL/host validation error: the client mapped
+    those to ``INVALID_REQUEST`` and these to ``PROTOCOL_ERROR`` so the model is
+    told the server misbehaved rather than that its own request was wrong.
+    Subclasses :class:`ValueError` so existing ``except ValueError`` handlers and
+    ``pytest.raises(ValueError)`` callers keep working.
+    """
+
+
 def parse_gemini_url(url: str) -> GeminiURL:
     """Parse a Gemini URL into its components.
 
@@ -192,13 +203,13 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         ValueError: If response format is invalid
     """
     if not raw_response:
-        raise ValueError("Empty response")
+        raise GeminiProtocolError("Empty response")
 
     try:
         # Find the end of the status line (CRLF)
         crlf_pos = raw_response.find(b"\r\n")
         if crlf_pos == -1:
-            raise ValueError("Invalid response format: missing CRLF")
+            raise GeminiProtocolError("Invalid response format: missing CRLF")
 
         # Extract status line and body
         status_line = raw_response[:crlf_pos].decode("utf-8")
@@ -206,10 +217,12 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
 
         # Parse status line: "<STATUS><SPACE><META>"
         if len(status_line) < 3:  # Minimum: "XX "
-            raise ValueError("Status line too short")
+            raise GeminiProtocolError("Status line too short")
 
         if status_line[2] != " ":
-            raise ValueError("Invalid status line format: missing space after status")
+            raise GeminiProtocolError(
+                "Invalid status line format: missing space after status"
+            )
 
         # Extract status code and meta
         status_str = status_line[:2]
@@ -220,17 +233,17 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         # target URL, so truncation would hand back a corrupted URL pointing
         # somewhere other than intended instead of a clear protocol error.
         if len(meta.encode("utf-8")) > 1024:
-            raise ValueError("Meta field exceeds 1024 bytes")
+            raise GeminiProtocolError("Meta field exceeds 1024 bytes")
 
         # Validate status code
         if not status_str.isdigit():
-            raise ValueError(f"Invalid status code: {status_str}")
+            raise GeminiProtocolError(f"Invalid status code: {status_str}")
 
         status_code = int(status_str)
 
         # Validate status code range
         if not (10 <= status_code <= 69):
-            raise ValueError(f"Status code out of range: {status_code}")
+            raise GeminiProtocolError(f"Status code out of range: {status_code}")
 
         # Convert to enum
         try:
@@ -242,12 +255,13 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         return GeminiResponse(status=status_enum, meta=meta, body=body)
 
     except UnicodeDecodeError as e:
-        raise ValueError(f"Invalid UTF-8 in status line: {e}") from e
+        raise GeminiProtocolError(f"Invalid UTF-8 in status line: {e}") from e
     except ValueError:
-        # Re-raise our own validation errors unchanged (don't double-wrap).
+        # Re-raise our own protocol/validation errors unchanged (GeminiProtocolError
+        # is a ValueError subclass; don't double-wrap).
         raise
     except Exception as e:
-        raise ValueError(f"Failed to parse response: {e}") from e
+        raise GeminiProtocolError(f"Failed to parse response: {e}") from e
 
 
 def process_gemini_response(

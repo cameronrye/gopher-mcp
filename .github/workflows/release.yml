@@ -139,7 +139,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --locked --all-extras
 
       - name: Run full test suite
         run: uv run pytest --cov-report=xml --cov-report=term
@@ -215,8 +215,12 @@ jobs:
 
           # Extract changelog section for this version
           if grep -q "## \[${VERSION}\]" CHANGELOG.md; then
-            # Extract content between this version and the next version header
-            NOTES=$(awk "/## \[${VERSION}\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md | sed '/^$/d' | head -n -1)
+            # Extract content between this version and the next version header.
+            # awk already stops before the next "## [" header, and sed strips
+            # blank lines -- do NOT pipe through `head -n -1`: the trailing blank
+            # it was meant to trim is already gone, so it would drop the last
+            # real line of the section (truncating every release's notes).
+            NOTES=$(awk "/## \[${VERSION}\]/{flag=1; next} /## \[/{flag=0} flag" CHANGELOG.md | sed '/^$/d')
 
             if [[ -z "$NOTES" ]]; then
               NOTES="Release version ${VERSION}"

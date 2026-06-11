@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gopher_mcp.ratelimit import RateLimiter
+from gopher_mcp.ratelimit import MAX_PENALTY_SECONDS, RateLimiter
 
 
 class _FakeClock:
@@ -65,6 +65,37 @@ class TestRateLimiterAcquire:
         await rl.acquire("slow.example")
         sleep.assert_awaited_once()
         assert sleep.await_args.args[0] == pytest.approx(5.0)
+
+    async def test_penalize_clamps_an_unbounded_backoff(self):
+        """A malicious status-44 meta of `inf` (or a huge number) must NOT be
+        honoured verbatim: an unclamped penalty makes acquire() sleep forever
+        while holding the concurrency semaphore, hanging every later fetch."""
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep)
+        rl.penalize("evil.example", float("inf"))
+        await rl.acquire("evil.example")
+        sleep.assert_awaited_once()
+        waited = sleep.await_args.args[0]
+        assert waited == pytest.approx(MAX_PENALTY_SECONDS)
+
+    async def test_penalize_clamps_a_huge_finite_backoff(self):
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep)
+        rl.penalize("evil.example", 10_000_000.0)
+        await rl.acquire("evil.example")
+        assert sleep.await_args.args[0] == pytest.approx(MAX_PENALTY_SECONDS)
+
+    async def test_penalize_ignores_non_finite_nan(self):
+        """A NaN penalty must not poison the host (nan comparisons are false,
+        which would otherwise wedge the reservation)."""
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep)
+        rl.penalize("evil.example", float("nan"))
+        await rl.acquire("evil.example")
+        sleep.assert_not_awaited()
 
     async def test_stale_host_entries_are_swept_when_throttling(self):
         """With throttling enabled, hosts visited once must not accumulate

@@ -211,12 +211,16 @@ def validate_gemini_mime_type(mime_type: "GeminiMimeType") -> bool:
     if mime_type.is_text and not mime_type.charset:
         return False
 
-    # Validate language tag format (basic check)
+    # Validate language tag format (basic check). The Gemini spec permits a
+    # comma-separated LIST of BCP47 tags (e.g. "en,fr"), so validate each tag
+    # rather than the whole string -- a bare letters/numbers/hyphens regex would
+    # reject a spec-valid list, and the caller then discards the entire MIME type
+    # (charset included) on that failure.
     if mime_type.lang:
-        # Basic BCP47 validation - should contain only letters, numbers, and hyphens
         import re
 
-        if not re.match(r"^[a-zA-Z0-9-]+$", mime_type.lang):
+        tags = mime_type.lang.split(",")
+        if not all(re.fullmatch(r"[a-zA-Z0-9-]+", tag) for tag in tags):
             return False
 
     return True

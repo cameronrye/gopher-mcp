@@ -222,6 +222,24 @@ class TestSendReceiveClose:
         await GeminiTLSClient().close(_conn(writer=writer))
 
     @pytest.mark.asyncio
+    async def test_close_is_time_bounded_when_peer_withholds_close_notify(self):
+        """A peer that never sends close_notify must not hang close() past the
+        grace period (which would add the OS TCP timeout to every request)."""
+
+        async def _never_returns() -> None:
+            await asyncio.Event().wait()  # blocks forever
+
+        writer = Mock()
+        writer.close = Mock()
+        writer.wait_closed = Mock(side_effect=_never_returns)
+        with patch("gopher_mcp.gemini_tls.CLOSE_TIMEOUT_SECONDS", 0.01):
+            # Must return promptly (well under any real TCP timeout) and not raise.
+            await asyncio.wait_for(
+                GeminiTLSClient().close(_conn(writer=writer)), timeout=1.0
+            )
+        writer.close.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_receive_reads_until_eof(self):
         reader = asyncio.StreamReader()
         reader.feed_data(b"20 text/gemini\r\nHello")

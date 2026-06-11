@@ -312,6 +312,14 @@ class AppConfig(BaseSettings):
     server: ServerConfig = Field(default_factory=ServerConfig)
 
     model_config = SettingsConfigDict(
+        # Namespace the (complex) nested fields so a bare ``GOPHER``/``GEMINI``/
+        # ``SERVER`` env var set by unrelated tooling is NOT mistaken for the
+        # whole sub-config object -- without this, pydantic-settings tries to
+        # JSON-parse that value and crashes startup with a SettingsError. The
+        # sub-configs are populated by their default_factory (each reading its
+        # own ``GOPHER_``/``GEMINI_``/``GOPHER_MCP_`` prefix), so this prefix only
+        # closes the bare-name collision; it is not expected to match anything.
+        env_prefix="GOPHER_MCP_APP_",
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",

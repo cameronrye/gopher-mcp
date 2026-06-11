@@ -2,7 +2,17 @@
 
 import structlog
 
-from gopher_mcp.config import ServerConfig, configure_logging
+from gopher_mcp.config import AppConfig, ServerConfig, configure_logging
+
+
+def test_stray_unprefixed_env_var_does_not_crash_startup(monkeypatch):
+    """A bare GOPHER/GEMINI/SERVER env var set by unrelated tooling must not be
+    misread as the nested config object and crash AppConfig() at startup."""
+    monkeypatch.setenv("GOPHER", "some-unrelated-value")
+    monkeypatch.setenv("SERVER", "another-value")
+    cfg = AppConfig()  # must not raise
+    assert cfg.gopher.max_response_size == 1048576
+    assert cfg.server.log_level == "INFO"
 
 
 def test_configure_logging_writes_application_logs_to_file(tmp_path):
