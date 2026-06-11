@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server's documented "binary bodies are returned as metadata only" contract; a
   1 MB body previously shipped ~1.4M base64 characters. Re-fetch the resource
   directly if the raw bytes are needed.
+- Gemtext preformat (code-block) content lines no longer repeat a per-line
+  metadata dict (plus duplicated `alt_text`/`language`); block-level metadata is
+  kept on the opening ` ``` ` toggle line only. This roughly thirded the
+  serialized size of code blocks sent to the model. Attribute access is
+  unchanged; only the serialized output is leaner.
+- The Gopher menu parser now stops once the item cap (`max_menu_items`) is
+  reached instead of building the entire directory before slicing, so a 1 MB
+  directory no longer materialises tens of thousands of model objects to keep a
+  small slice. Truncation is still flagged on the result.
 - Release/CI hygiene: `prepare-release.py` now bumps the version with an anchored
   match (no longer corrupting `target-version` / `python_version` / `minversion`
   in `pyproject.toml`) and also updates `server.json`; GitHub release notes no

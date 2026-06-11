@@ -161,17 +161,24 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         return None
 
 
-def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
+def parse_gopher_menu(
+    content: str, max_items: int | None = None
+) -> list[GopherMenuItem]:
     """Parse a complete Gopher menu response.
 
     Args:
         content: Raw menu content from Gopher server
+        max_items: Stop after constructing this many items (None = unlimited).
+            A 1 MB directory can hold tens of thousands of lines; without a cap
+            every one becomes a model object even though the caller only keeps a
+            slice. The caller passes its display cap + 1 so it can still detect
+            (and flag) truncation without materialising the whole directory.
 
     Returns:
-        List of parsed menu items
+        List of parsed menu items (at most ``max_items`` when set).
 
     """
-    items = []
+    items: list[GopherMenuItem] = []
 
     # Normalize all three RFC 1436 line endings (CRLF), bare LF and legacy
     # bare CR before splitting -- a CR-only server would otherwise collapse the
@@ -188,6 +195,8 @@ def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
         item = parse_menu_line(line)
         if item:
             items.append(item)
+            if max_items is not None and len(items) >= max_items:
+                break
 
     return items
 

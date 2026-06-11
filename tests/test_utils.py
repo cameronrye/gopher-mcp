@@ -275,6 +275,15 @@ iThis is information\t\terror.host\t1
         result = parse_gopher_menu(content)
         assert len(result) == 0
 
+    def test_max_items_stops_early(self):
+        """max_items bounds how many items are constructed, so a huge directory
+        doesn't materialise tens of thousands of model objects to keep a slice."""
+        content = "".join(f"0File {i}\t/f{i}\texample.com\t70\n" for i in range(100))
+        result = parse_gopher_menu(content, max_items=5)
+        assert len(result) == 5
+        assert result[0].title == "File 0"
+        assert result[-1].title == "File 4"
+
     def test_menu_with_invalid_lines(self):
         """Test parsing menu with some invalid lines."""
         content = """1Valid\t/valid\texample.com\t70

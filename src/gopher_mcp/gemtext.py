@@ -377,14 +377,18 @@ def parse_gemtext(content: str) -> "GemtextDocument":
                 )
                 continue
             else:
-                # Regular preformat content
-                metadata = _extract_preformat_metadata(current_alt_text, line_content)
+                # Regular preformat content. Block-level metadata (language and
+                # the code/data flags) belongs on the opening toggle line, not
+                # on every content line: repeating a 6-key metadata dict per line
+                # was pure serialized bloat (its ``line_count`` was always 1 and
+                # ``char_count`` just re-stated ``len(content)``). A content line
+                # carries only its verbatim text.
                 preformat_obj = GemtextPreformat(
                     content=line_content,
-                    alt_text=current_alt_text,
+                    alt_text=None,
                     is_toggle=False,
-                    language=metadata["language"],
-                    metadata=metadata,
+                    language=None,
+                    metadata={},
                 )
                 lines.append(
                     _create_gemtext_line(

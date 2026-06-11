@@ -395,14 +395,19 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             Parsed menu result
         """
         content, _ = decode_gopher_text(raw)
-        items = parse_gopher_menu(content)
         # Cap the number of items handed to the LLM (distinct from the network
         # byte cap): a 1 MB directory can expand to tens of thousands of items,
         # each serialized to JSON, flooding the model context. 0 = unlimited.
-        truncated = False
-        if self.max_menu_items and len(items) > self.max_menu_items:
-            items = items[: self.max_menu_items]
-            truncated = True
+        # Parse at most one past the cap so we never materialise the whole
+        # directory yet can still tell whether it was truncated.
+        if self.max_menu_items:
+            items = parse_gopher_menu(content, max_items=self.max_menu_items + 1)
+            truncated = len(items) > self.max_menu_items
+            if truncated:
+                items = items[: self.max_menu_items]
+        else:
+            items = parse_gopher_menu(content)
+            truncated = False
         return MenuResult(items=items, truncated=truncated)
 
     def _process_text_response(self, raw: bytes) -> TextResult:
