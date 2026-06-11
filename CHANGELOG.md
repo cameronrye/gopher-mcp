@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-11
+
 ### Security
 
 - A malicious Gemini server can no longer hang the client with an unbounded
@@ -442,7 +444,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.3...v0.5.0
 [0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.2...v0.3.0
