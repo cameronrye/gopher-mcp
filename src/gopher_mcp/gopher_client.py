@@ -49,6 +49,11 @@ def _strip_gopher_text_terminator(text: str) -> str:
     begin with ``..`` (the protocol doubles a leading ``.``). Only a terminator
     at the very end is removed -- servers that don't dot-stuff could otherwise
     have a legitimate mid-document ``.`` line truncated.
+
+    Un-dot-stuffing is applied ONLY when a terminator was actually present:
+    dot-stuffing is part of the period-termination framing, so an unframed
+    document (no terminator line) carries literal ``..`` content that must not
+    be collapsed to ``.``.
     """
     # Split on LF but keep any trailing '\r' on each line so CRLF is preserved
     # when we rejoin; remember a final newline so it survives the round-trip.
@@ -58,11 +63,13 @@ def _strip_gopher_text_terminator(text: str) -> str:
         lines = lines[:-1]
 
     # Drop a trailing terminator line ('.' possibly with a trailing '\r').
-    if lines and lines[-1].rstrip("\r") == ".":
+    had_terminator = bool(lines) and lines[-1].rstrip("\r") == "."
+    if had_terminator:
         lines = lines[:-1]
 
-    out = [line[1:] if line.startswith("..") else line for line in lines]
-    result = "\n".join(out)
+    if had_terminator:
+        lines = [line[1:] if line.startswith("..") else line for line in lines]
+    result = "\n".join(lines)
     if trailing_newline and result:
         result += "\n"
     return result
@@ -388,14 +395,19 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             Parsed menu result
         """
         content, _ = decode_gopher_text(raw)
-        items = parse_gopher_menu(content)
         # Cap the number of items handed to the LLM (distinct from the network
         # byte cap): a 1 MB directory can expand to tens of thousands of items,
         # each serialized to JSON, flooding the model context. 0 = unlimited.
-        truncated = False
-        if self.max_menu_items and len(items) > self.max_menu_items:
-            items = items[: self.max_menu_items]
-            truncated = True
+        # Parse at most one past the cap so we never materialise the whole
+        # directory yet can still tell whether it was truncated.
+        if self.max_menu_items:
+            items = parse_gopher_menu(content, max_items=self.max_menu_items + 1)
+            truncated = len(items) > self.max_menu_items
+            if truncated:
+                items = items[: self.max_menu_items]
+        else:
+            items = parse_gopher_menu(content)
+            truncated = False
         return MenuResult(items=items, truncated=truncated)
 
     def _process_text_response(self, raw: bytes) -> TextResult:

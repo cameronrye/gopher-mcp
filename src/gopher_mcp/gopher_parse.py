@@ -128,15 +128,26 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
             if 0 <= candidate <= 65535:
                 port = candidate
 
-        # Construct the next URL. Percent-encode the selector (keeping '/')
-        # so a selector containing spaces, '?', '#' or '%' round-trips back
-        # through parse_gopher_url instead of mis-splitting into a bogus query.
-        # Bracket an IPv6 literal host so its colons don't collide with the
-        # port separator and break the re-parse.
-        next_url = (
-            f"gopher://{bracket_host(host)}:{port}/"
-            f"{item_type}{quote(selector, safe='/')}"
-        )
+        # hURL web-link convention: a selector of the form "URL:<target>"
+        # (overwhelmingly on type-h items, but recognised by selector prefix
+        # like real clients do) is a direct link to <target> -- usually an
+        # http/https/gemini URL -- NOT a gopher selector. Surface the real
+        # destination so the model can follow it, instead of a gopher:// URL
+        # that would just re-fetch the gopher host. Match the exact "URL:"
+        # prefix so an ordinary selector that merely starts with "url" is left
+        # alone.
+        if selector.startswith("URL:") and len(selector) > 4:
+            next_url = selector[4:]
+        else:
+            # Construct the next URL. Percent-encode the selector (keeping '/')
+            # so a selector containing spaces, '?', '#' or '%' round-trips back
+            # through parse_gopher_url instead of mis-splitting into a bogus
+            # query. Bracket an IPv6 literal host so its colons don't collide
+            # with the port separator and break the re-parse.
+            next_url = (
+                f"gopher://{bracket_host(host)}:{port}/"
+                f"{item_type}{quote(selector, safe='/')}"
+            )
 
         return GopherMenuItem(
             type=item_type,
@@ -150,17 +161,24 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         return None
 
 
-def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
+def parse_gopher_menu(
+    content: str, max_items: int | None = None
+) -> list[GopherMenuItem]:
     """Parse a complete Gopher menu response.
 
     Args:
         content: Raw menu content from Gopher server
+        max_items: Stop after constructing this many items (None = unlimited).
+            A 1 MB directory can hold tens of thousands of lines; without a cap
+            every one becomes a model object even though the caller only keeps a
+            slice. The caller passes its display cap + 1 so it can still detect
+            (and flag) truncation without materialising the whole directory.
 
     Returns:
-        List of parsed menu items
+        List of parsed menu items (at most ``max_items`` when set).
 
     """
-    items = []
+    items: list[GopherMenuItem] = []
 
     # Normalize all three RFC 1436 line endings (CRLF), bare LF and legacy
     # bare CR before splitting -- a CR-only server would otherwise collapse the
@@ -177,6 +195,8 @@ def parse_gopher_menu(content: str) -> list[GopherMenuItem]:
         item = parse_menu_line(line)
         if item:
             items.append(item)
+            if max_items is not None and len(items) >= max_items:
+                break
 
     return items
 

@@ -28,6 +28,8 @@ recipes, see the [API Reference](../api-reference.md).
 
 ::: gopher_mcp.models.GeminiSuccessResult
 
+::: gopher_mcp.models.GeminiBinaryResult
+
 ::: gopher_mcp.models.GeminiGemtextResult
 
 ::: gopher_mcp.models.GeminiInputResult

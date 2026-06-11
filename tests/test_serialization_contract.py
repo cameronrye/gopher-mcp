@@ -32,6 +32,13 @@ EXPECTED_KEYS: dict[str, set[str]] = {
         "truncated",
         "request_info",
     },
+    "GeminiBinaryResult": {
+        "kind",
+        "mime_type",
+        "size",
+        "note",
+        "request_info",
+    },
     "GeminiInputResult": {"kind", "prompt", "sensitive", "request_info"},
     "GeminiRedirectResult": {"kind", "new_url", "permanent", "request_info"},
     "GeminiErrorResult": {"kind", "error", "request_info"},

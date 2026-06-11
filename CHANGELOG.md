@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-06-11
+
 ### Security
 
 - A malicious Gemini server can no longer hang the client with an unbounded
@@ -20,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Gopher menu items using the hURL web-link convention (a `URL:<target>`
+  selector, typically on a type-`h` item) now expose the real destination as
+  `next_url` instead of a `gopher://` URL pointing back at the gopher host, so
+  web/gemini links on real-world menus are followable.
+- Gopher text-mode un-dot-stuffing (`..` → `.`) is now applied only when the
+  RFC 1436 `.` terminator is actually present. An unframed document (no
+  terminator) is returned verbatim, so a literal leading `..` is no longer
+  corrupted to `.`.
 - A server-side Gemini protocol fault (missing CRLF, over-long meta, bad status
   line, empty response) now returns a distinct `PROTOCOL_ERROR` instead of
   `INVALID_REQUEST`, so the model is told the server misbehaved rather than that
@@ -33,6 +43,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Gemini binary success responses now return metadata only (size + detected
+  MIME type) as a new `binary` result kind, instead of base64-inlining the full
+  body into the model's context. This matches the Gopher binary path and the
+  server's documented "binary bodies are returned as metadata only" contract; a
+  1 MB body previously shipped ~1.4M base64 characters. Re-fetch the resource
+  directly if the raw bytes are needed.
+- Gemtext preformat (code-block) content lines no longer repeat a per-line
+  metadata dict (plus duplicated `alt_text`/`language`); block-level metadata is
+  kept on the opening ` ``` ` toggle line only. This roughly thirded the
+  serialized size of code blocks sent to the model. Attribute access is
+  unchanged; only the serialized output is leaner.
+- The Gopher menu parser now stops once the item cap (`max_menu_items`) is
+  reached instead of building the entire directory before slicing, so a 1 MB
+  directory no longer materialises tens of thousands of model objects to keep a
+  small slice. Truncation is still flagged on the result.
+- Client-certificate Gemini requests now reuse a per-certificate TLS client
+  (and its SSL context) instead of rebuilding it on every request, so the system
+  CA bundle load and cert/key PEM reads — blocking work that ran on the event
+  loop — happen once per certificate rather than per fetch.
 - Release/CI hygiene: `prepare-release.py` now bumps the version with an anchored
   match (no longer corrupting `target-version` / `python_version` / `minversion`
   in `pyproject.toml`) and also updates `server.json`; GitHub release notes no
@@ -415,7 +444,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.3...v0.5.0
 [0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.2...v0.3.0
