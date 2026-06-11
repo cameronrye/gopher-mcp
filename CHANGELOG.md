@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- A malicious Gemini server can no longer hang the client with an unbounded
+  status-44 (SLOW_DOWN) backoff. The server-supplied wait is now sanitized and
+  clamped (a non-finite value such as `inf` is rejected/capped), so a single
+  `44 inf` response can no longer make every later fetch to that host sleep
+  forever while holding a concurrency-semaphore slot.
+- The Gemini TLS close handshake is now time-bounded, so a peer that withholds
+  `close_notify` can no longer tack the OS TCP timeout onto each request after
+  the read deadline has already been met.
+
+### Fixed
+
+- A server-side Gemini protocol fault (missing CRLF, over-long meta, bad status
+  line, empty response) now returns a distinct `PROTOCOL_ERROR` instead of
+  `INVALID_REQUEST`, so the model is told the server misbehaved rather than that
+  its own URL was malformed.
+- A spec-valid comma-separated `lang` parameter (e.g. `lang=en,fr`) is no longer
+  rejected; rejecting it previously discarded the whole MIME type, including the
+  declared charset, producing mojibake or gemtext misclassification.
+- A stray unprefixed `GOPHER` / `GEMINI` / `SERVER` environment variable set by
+  unrelated tooling no longer crashes startup (it was misread as the nested
+  config object).
+
+### Changed
+
+- Release/CI hygiene: `prepare-release.py` now bumps the version with an anchored
+  match (no longer corrupting `target-version` / `python_version` / `minversion`
+  in `pyproject.toml`) and also updates `server.json`; GitHub release notes no
+  longer drop the last line of each changelog section; all CI/release/publish
+  jobs run `uv sync --locked` so a stale lockfile fails loudly; the
+  manual-publish workflow no longer offers a no-op `pypi` target; Dependabot now
+  covers the Docker base image; and the docs site redeploys on `src/**` changes
+  so the mkdocstrings API reference can't drift.
+
 ## [0.4.3] - 2026-06-10
 
 ### Security

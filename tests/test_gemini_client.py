@@ -340,6 +340,36 @@ class TestGeminiClientFetch:
             assert result.error["code"] == "INVALID_REQUEST"
             assert "Invalid URL" in result.error["message"]
 
+    async def test_malformed_server_response_is_protocol_error_not_invalid_request(
+        self,
+    ):
+        """A server-side protocol fault (e.g. missing CRLF, empty response) must
+        surface as PROTOCOL_ERROR, not INVALID_REQUEST -- the latter wrongly
+        tells the model its own URL was malformed."""
+        from gopher_mcp.gemini_parse import GeminiProtocolError
+
+        client = GeminiClient()
+        mock_parsed_url = Mock()
+        mock_parsed_url.host = "example.com"
+        mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
+        mock_parsed_url.query = None
+
+        with (
+            patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse,
+            patch.object(client, "_fetch_content") as mock_fetch,
+        ):
+            mock_parse.return_value = mock_parsed_url
+            mock_fetch.side_effect = GeminiProtocolError(
+                "Invalid response format: missing CRLF"
+            )
+
+            result = await client.fetch("gemini://example.com/")
+
+            assert isinstance(result, GeminiErrorResult)
+            assert result.error["code"] == "PROTOCOL_ERROR"
+            assert "missing CRLF" in result.error["message"]
+
     @pytest.mark.asyncio
     async def test_fetch_security_violation(self):
         """Test fetch with security violation."""

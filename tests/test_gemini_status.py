@@ -339,6 +339,21 @@ class TestValidateGeminiMimeType:
         mime = GeminiMimeType(type="text", subtype="gemini", lang="en@US")
         assert validate_gemini_mime_type(mime) is False
 
+    def test_comma_separated_language_list(self):
+        """The Gemini spec allows a comma-separated list of BCP47 tags in the
+        lang parameter (e.g. `lang=en,fr`); rejecting it discards the whole
+        MIME type (including the declared charset) downstream."""
+        mime = GeminiMimeType(type="text", subtype="gemini", lang="en,fr")
+        assert validate_gemini_mime_type(mime) is True
+        mime = GeminiMimeType(type="text", subtype="gemini", lang="en-US,fr-CA,de")
+        assert validate_gemini_mime_type(mime) is True
+
+    def test_malformed_language_list_is_rejected(self):
+        """A trailing/empty tag in the list is still malformed."""
+        for bad in ("en,", ",fr", "en,,fr"):
+            mime = GeminiMimeType(type="text", subtype="gemini", lang=bad)
+            assert validate_gemini_mime_type(mime) is False
+
 
 class TestProcessGeminiResponse:
     """Test Gemini response processing."""

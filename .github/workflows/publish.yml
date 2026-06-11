@@ -1,16 +1,19 @@
-name: Publish to PyPI
+name: Publish to TestPyPI
 
+# Manual TestPyPI publishing only. Real PyPI releases are driven by release.yml
+# on a pushed v* tag (with PyPI environment protection + trusted publishing) --
+# this workflow deliberately does NOT publish to PyPI, so it offers no 'pypi'
+# target (a 'pypi' choice here would build, report success, and publish nothing).
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Target repository'
+        description: 'Target repository (TestPyPI only)'
         required: true
         default: 'testpypi'
         type: choice
         options:
           - testpypi
-          - pypi
 
 # Least-privilege default; the publish jobs opt into id-token: write.
 permissions:
@@ -42,7 +45,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --all-extras
+        run: uv sync --locked --all-extras
 
       - name: Run tests
         run: uv run pytest --cov-report=xml

@@ -45,3 +45,24 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+
+  # Docker base image (Dockerfile uses python:3.x-slim in both stages). Without
+  # this the runtime image's base never gets automated CVE-bump PRs, unlike
+  # every other dependency in the repo.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "cameronrye"
+    assignees:
+      - "cameronrye"
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"

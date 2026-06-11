@@ -7,6 +7,11 @@ on:
       - 'docs/**'
       - 'mkdocs.yml'
       - '.github/workflows/docs.yml'
+      # The API reference renders docstrings/models from source via
+      # mkdocstrings, so a source change must redeploy the site too -- otherwise
+      # the published reference silently drifts from the code.
+      - 'src/**'
+      - 'uv.lock'
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
@@ -43,7 +48,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --extra docs
+        run: uv sync --locked --extra docs
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

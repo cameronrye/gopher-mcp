@@ -96,7 +96,9 @@ class TaskRunner:
                 "category": "Code Quality",
             },
             "typecheck": {
-                "cmd": "mypy src/ --ignore-missing-imports",
+                # Match CI's `mypy src` (no --ignore-missing-imports, which
+                # would hide missing-stub errors locally that CI still fails on).
+                "cmd": "mypy src",
                 "desc": "Run mypy type checking",
                 "category": "Code Quality",
             },

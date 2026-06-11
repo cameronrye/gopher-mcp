@@ -212,7 +212,11 @@ install-hooks = "pre-commit install"
 # hides violations in task.py/scripts/ that CI would still fail on)
 lint = "ruff check ."
 format = "ruff format ."
-typecheck = "mypy src/ --ignore-missing-imports"
+# Match CI's `mypy src` exactly: --ignore-missing-imports globally suppresses
+# missing-stub errors, so a new untyped import passes locally but fails CI.
+# The scoped [[tool.mypy.overrides]] for genuinely stub-less packages covers
+# the legitimate case.
+typecheck = "mypy src"
 quality = "uv run task lint && uv run task typecheck && uv run task test"
 
 # Testing

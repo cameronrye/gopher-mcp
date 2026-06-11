@@ -11,12 +11,22 @@ via ``GOPHER_REQUESTS_PER_MINUTE`` / ``GEMINI_REQUESTS_PER_MINUTE``.
 """
 
 import asyncio
+import math
 import time
 from collections.abc import Awaitable, Callable
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+# Upper bound on a single SLOW_DOWN (status-44) backoff. The Gemini spec lets a
+# server name any number of seconds to wait, but the meta is attacker-controlled:
+# an unclamped value (notably ``inf``) makes ``acquire`` sleep effectively
+# forever while holding the per-client/batch concurrency semaphore, hanging every
+# later fetch -- and the penalty persists in ``_next_allowed``, poisoning the
+# host. Cap it so a server can still ask us to slow down, but only within a
+# bounded window (matches the configurable request-timeout ceiling).
+MAX_PENALTY_SECONDS = 300.0
 
 
 class RateLimiter:
@@ -90,10 +100,23 @@ class RateLimiter:
     def penalize(self, host: str, seconds: float) -> None:
         """Back off all requests to ``host`` for at least ``seconds``.
 
-        Used to honour a Gemini status-44 (SLOW_DOWN) response.
+        Used to honour a Gemini status-44 (SLOW_DOWN) response. ``seconds`` is
+        server-controlled, so it is sanitized: a non-finite value (``inf``/NaN)
+        is rejected and anything over ``MAX_PENALTY_SECONDS`` is clamped, so a
+        malicious server cannot pin the host (and a held semaphore slot) forever.
         """
+        seconds = float(seconds)
+        if not math.isfinite(seconds) and seconds == float("inf"):
+            # An explicit "wait forever" is treated as the maximum bounded wait.
+            seconds = MAX_PENALTY_SECONDS
+        elif not math.isfinite(seconds):
+            # NaN (or -inf): not a meaningful backoff -- ignore rather than
+            # writing a value that would wedge the reservation.
+            return
+        seconds = min(max(seconds, 0.0), MAX_PENALTY_SECONDS)
+        if seconds <= 0.0:
+            return
+
         now = self._clock()
-        self._next_allowed[host] = max(
-            self._next_allowed.get(host, 0.0), now + float(seconds)
-        )
+        self._next_allowed[host] = max(self._next_allowed.get(host, 0.0), now + seconds)
         logger.debug("Backing off host after slow-down", host=host, seconds=seconds)
