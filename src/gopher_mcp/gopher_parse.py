@@ -128,15 +128,26 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
             if 0 <= candidate <= 65535:
                 port = candidate
 
-        # Construct the next URL. Percent-encode the selector (keeping '/')
-        # so a selector containing spaces, '?', '#' or '%' round-trips back
-        # through parse_gopher_url instead of mis-splitting into a bogus query.
-        # Bracket an IPv6 literal host so its colons don't collide with the
-        # port separator and break the re-parse.
-        next_url = (
-            f"gopher://{bracket_host(host)}:{port}/"
-            f"{item_type}{quote(selector, safe='/')}"
-        )
+        # hURL web-link convention: a selector of the form "URL:<target>"
+        # (overwhelmingly on type-h items, but recognised by selector prefix
+        # like real clients do) is a direct link to <target> -- usually an
+        # http/https/gemini URL -- NOT a gopher selector. Surface the real
+        # destination so the model can follow it, instead of a gopher:// URL
+        # that would just re-fetch the gopher host. Match the exact "URL:"
+        # prefix so an ordinary selector that merely starts with "url" is left
+        # alone.
+        if selector.startswith("URL:") and len(selector) > 4:
+            next_url = selector[4:]
+        else:
+            # Construct the next URL. Percent-encode the selector (keeping '/')
+            # so a selector containing spaces, '?', '#' or '%' round-trips back
+            # through parse_gopher_url instead of mis-splitting into a bogus
+            # query. Bracket an IPv6 literal host so its colons don't collide
+            # with the port separator and break the re-parse.
+            next_url = (
+                f"gopher://{bracket_host(host)}:{port}/"
+                f"{item_type}{quote(selector, safe='/')}"
+            )
 
         return GopherMenuItem(
             type=item_type,

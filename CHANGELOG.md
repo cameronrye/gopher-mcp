@@ -20,6 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Gopher menu items using the hURL web-link convention (a `URL:<target>`
+  selector, typically on a type-`h` item) now expose the real destination as
+  `next_url` instead of a `gopher://` URL pointing back at the gopher host, so
+  web/gemini links on real-world menus are followable.
+- Gopher text-mode un-dot-stuffing (`..` → `.`) is now applied only when the
+  RFC 1436 `.` terminator is actually present. An unframed document (no
+  terminator) is returned verbatim, so a literal leading `..` is no longer
+  corrupted to `.`.
 - A server-side Gemini protocol fault (missing CRLF, over-long meta, bad status
   line, empty response) now returns a distinct `PROTOCOL_ERROR` instead of
   `INVALID_REQUEST`, so the model is told the server misbehaved rather than that

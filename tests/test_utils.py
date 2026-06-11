@@ -160,6 +160,32 @@ class TestParseMenuLine:
         assert result.host == "error.host"
         assert result.port == 1
 
+    def test_hurl_web_link_selector(self):
+        """The hURL convention encodes a web link as a 'URL:<target>' selector
+        (usually on a type-h item). nextUrl must point at the real destination,
+        not a gopher:// URL aimed back at the gopher host."""
+        line = "hExample site\tURL:https://example.com/path\tgopher.host\t70"
+        result = parse_menu_line(line)
+
+        assert result is not None
+        assert result.type == "h"
+        assert result.selector == "URL:https://example.com/path"
+        assert result.next_url == "https://example.com/path"
+
+    def test_hurl_web_link_preserves_query_and_fragment(self):
+        line = "hSearch\tURL:gemini://example.org/q?a=b#frag\tgopher.host\t70"
+        result = parse_menu_line(line)
+        assert result is not None
+        assert result.next_url == "gemini://example.org/q?a=b#frag"
+
+    def test_non_hurl_selector_starting_with_url_text_is_not_a_web_link(self):
+        """Only an exact 'URL:' prefix triggers the hURL convention; a normal
+        selector that merely starts with 'url' stays a gopher selector."""
+        line = "0urls.txt\t/urls.txt\texample.com\t70"
+        result = parse_menu_line(line)
+        assert result is not None
+        assert result.next_url == "gopher://example.com:70/0/urls.txt"
+
     def test_empty_line(self):
         """Test parsing empty line."""
         result = parse_menu_line("")

@@ -570,6 +570,14 @@ class TestResponseProcessing:
         result = client._process_text_response(b"just text\nno terminator")
         assert result.text == "just text\nno terminator"
 
+    def test_process_text_response_unframed_does_not_undot_stuff(self):
+        """Un-dot-stuffing is part of the RFC 1436 period-termination framing.
+        Without a trailing '.' terminator the document is unframed, so a leading
+        '..' is literal content and must NOT be collapsed to '.'."""
+        client = GopherClient()
+        result = client._process_text_response(b"..literal dots\nplain text")
+        assert result.text == "..literal dots\nplain text"
+
     def test_process_menu_response_handles_cr_only_line_endings(self):
         """Legacy CR-only line separators are split, not merged into one line."""
         client = GopherClient()
