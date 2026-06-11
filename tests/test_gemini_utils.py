@@ -537,6 +537,30 @@ class TestGemtextParsingRobustness:
         ]
         assert "code with trailing   " in pre_contents
 
+    def test_preformat_content_lines_serialize_lean(self):
+        """A code block must not repeat a 6-key metadata dict (plus duplicated
+        alt_text/language) on every content line -- that tripled the serialized
+        size of code blocks. Content lines serialize to just content+is_toggle."""
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("```python\nprint(1)\nprint(2)\n```")
+        dumped = document.model_dump()
+        content_lines = [
+            line
+            for line in dumped["lines"]
+            if line["type"] == "preformat" and line["preformat"]["is_toggle"] is False
+        ]
+        assert len(content_lines) == 2
+        for line in content_lines:
+            assert set(line["preformat"].keys()) == {"content", "is_toggle"}
+        # The opening toggle still carries the block-level language/metadata.
+        opening = next(
+            line
+            for line in dumped["lines"]
+            if line["type"] == "preformat" and line["preformat"]["is_toggle"] is True
+        )
+        assert opening["preformat"]["language"] == "python"
+
     def test_does_not_split_on_vertical_tab(self):
         from gopher_mcp.utils import parse_gemtext
 

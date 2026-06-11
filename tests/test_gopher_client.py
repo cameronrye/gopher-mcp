@@ -507,6 +507,27 @@ class TestResponseProcessing:
         assert item2.title == "Test Directory"
         assert item2.next_url == "gopher://example.com:70/1/testdir/"
 
+    def test_process_menu_response_caps_items_and_flags_truncation(self):
+        """Over-cap menus are sliced to max_menu_items with truncated=True, and
+        the parser stops early rather than building the whole directory."""
+        client = GopherClient(max_menu_items=3)
+        raw = (
+            "".join(
+                f"0File {i}\t/f{i}\texample.com\t70\r\n" for i in range(20)
+            ).encode()
+            + b".\r\n"
+        )
+        result = client._process_menu_response(raw)
+        assert len(result.items) == 3
+        assert result.truncated is True
+
+    def test_process_menu_response_not_truncated_when_under_cap(self):
+        client = GopherClient(max_menu_items=10)
+        raw = b"0Only\t/only\texample.com\t70\r\n.\r\n"
+        result = client._process_menu_response(raw)
+        assert len(result.items) == 1
+        assert result.truncated is False
+
     def test_process_menu_response_skips_terminator_and_blanks(self):
         """The '.' terminator and blank lines are not emitted as items."""
         client = GopherClient()

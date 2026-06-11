@@ -551,6 +551,19 @@ class GemtextPreformat(BaseModel):
         default_factory=dict, description="Additional metadata"
     )
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: Any) -> dict[str, Any]:
+        """Drop null/empty fields on serialization.
+
+        Block-level metadata (alt_text/language/metadata) is populated only on
+        the opening toggle line; a content line then serializes to just its
+        ``content`` and ``is_toggle`` instead of repeating empty alt_text,
+        language and an empty metadata dict on every line. Attribute access is
+        unaffected; only the serialized dict is trimmed.
+        """
+        data: dict[str, Any] = handler(self)
+        return {k: v for k, v in data.items() if v is not None and v != {}}
+
 
 class GemtextLine(BaseModel):
     """Model for a single line in gemtext format."""
