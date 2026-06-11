@@ -56,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reached instead of building the entire directory before slicing, so a 1 MB
   directory no longer materialises tens of thousands of model objects to keep a
   small slice. Truncation is still flagged on the result.
+- Client-certificate Gemini requests now reuse a per-certificate TLS client
+  (and its SSL context) instead of rebuilding it on every request, so the system
+  CA bundle load and cert/key PEM reads — blocking work that ran on the event
+  loop — happen once per certificate rather than per fetch.
 - Release/CI hygiene: `prepare-release.py` now bumps the version with an anchored
   match (no longer corrupting `target-version` / `python_version` / `minversion`
   in `pyproject.toml`) and also updates `server.json`; GitHub release notes no
