@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-06-22
+
+### Security
+
+- Upgraded runtime dependencies to clear the advisories that `pip-audit` was
+  reporting against the 0.5.0 dependency set:
+  - `starlette` 1.2.1 → 1.3.1 (CVE-2026-54283, CVE-2026-54282)
+  - `cryptography` 48.0.0 → 48.0.1 (GHSA-537c-gmf6-5ccf)
+  - `pydantic-settings` 2.12.0 → 2.14.2 (GHSA-4xgf-cpjx-pc3j)
+  - `msgpack` 1.1.2 → 1.2.1 (GHSA-6v7p-g79w-8964)
+
+### Changed
+
+- Bumped CI workflow actions: `actions/checkout` 6 → 7 and
+  `softprops/action-gh-release` 3.0.0 → 3.0.1. These affect the release/CI
+  pipeline only and do not change the published package.
+
 ## [0.5.0] - 2026-06-11
 
 ### Security
