@@ -341,28 +341,34 @@ The server can be configured through environment variables for both protocols:
 
 ### Gopher Configuration
 
-| Variable                   | Description                    | Default         | Example                |
-| -------------------------- | ------------------------------ | --------------- | ---------------------- |
-| `GOPHER_MAX_RESPONSE_SIZE` | Maximum response size in bytes | `1048576` (1MB) | `2097152`              |
-| `GOPHER_TIMEOUT_SECONDS`   | Request timeout in seconds     | `30`            | `60`                   |
-| `GOPHER_CACHE_ENABLED`     | Enable response caching        | `true`          | `false`                |
-| `GOPHER_CACHE_TTL_SECONDS` | Cache time-to-live in seconds  | `300`           | `600`                  |
-| `GOPHER_MAX_CACHE_ENTRIES` | Max cached entries (LRU)       | `1000`          | `2000`                 |
-| `GOPHER_ALLOWED_HOSTS`     | Comma-separated allowed hosts  | `None` (all)    | `example.com,test.com` |
-| `GOPHER_ALLOW_LOCAL_HOSTS` | Permit loopback/private hosts  | `false`         | `true`                 |
+| Variable                         | Description                    | Default         | Example                |
+| -------------------------------- | ------------------------------ | --------------- | ---------------------- |
+| `GOPHER_MAX_RESPONSE_SIZE`       | Maximum response size in bytes | `1048576` (1MB) | `2097152`              |
+| `GOPHER_TIMEOUT_SECONDS`         | Request timeout in seconds     | `30`            | `60`                   |
+| `GOPHER_CACHE_ENABLED`           | Enable response caching        | `true`          | `false`                |
+| `GOPHER_CACHE_TTL_SECONDS`       | Cache time-to-live in seconds  | `300`           | `600`                  |
+| `GOPHER_MAX_CACHE_ENTRIES`       | Max cached entries (LRU)       | `1000`          | `2000`                 |
+| `GOPHER_ALLOWED_HOSTS`           | Comma-separated allowed hosts  | `None` (all)    | `example.com,test.com` |
+| `GOPHER_ALLOW_LOCAL_HOSTS`       | Permit loopback/private hosts  | `false`         | `true`                 |
+| `GOPHER_REQUESTS_PER_MINUTE`     | Per-host request cap (0 = off) | `60`            | `30`                   |
+| `GOPHER_MAX_CONCURRENT_REQUESTS` | Simultaneous fetches (0 = off) | `5`             | `2`                    |
+| `GOPHER_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`           | `false`         | `true`                 |
 
 ### Gemini Configuration
 
-| Variable                      | Description                        | Default         | Example                |
-| ----------------------------- | ---------------------------------- | --------------- | ---------------------- |
-| `GEMINI_MAX_RESPONSE_SIZE`    | Maximum response size in bytes     | `1048576` (1MB) | `2097152`              |
-| `GEMINI_TIMEOUT_SECONDS`      | Request timeout in seconds         | `30`            | `60`                   |
-| `GEMINI_CACHE_ENABLED`        | Enable response caching            | `true`          | `false`                |
-| `GEMINI_CACHE_TTL_SECONDS`    | Cache time-to-live in seconds      | `300`           | `600`                  |
-| `GEMINI_ALLOWED_HOSTS`        | Comma-separated allowed hosts      | `None` (all)    | `example.org,test.org` |
-| `GEMINI_ALLOW_LOCAL_HOSTS`    | Permit loopback/private hosts      | `false`         | `true`                 |
-| `GEMINI_TOFU_ENABLED`         | Enable TOFU certificate validation | `true`          | `false`                |
-| `GEMINI_CLIENT_CERTS_ENABLED` | Enable client certificate support  | `true`          | `false`                |
+| Variable                         | Description                        | Default         | Example                |
+| -------------------------------- | ---------------------------------- | --------------- | ---------------------- |
+| `GEMINI_MAX_RESPONSE_SIZE`       | Maximum response size in bytes     | `1048576` (1MB) | `2097152`              |
+| `GEMINI_TIMEOUT_SECONDS`         | Request timeout in seconds         | `30`            | `60`                   |
+| `GEMINI_CACHE_ENABLED`           | Enable response caching            | `true`          | `false`                |
+| `GEMINI_CACHE_TTL_SECONDS`       | Cache time-to-live in seconds      | `300`           | `600`                  |
+| `GEMINI_ALLOWED_HOSTS`           | Comma-separated allowed hosts      | `None` (all)    | `example.org,test.org` |
+| `GEMINI_ALLOW_LOCAL_HOSTS`       | Permit loopback/private hosts      | `false`         | `true`                 |
+| `GEMINI_TOFU_ENABLED`            | Enable TOFU certificate validation | `true`          | `false`                |
+| `GEMINI_CLIENT_CERTS_ENABLED`    | Enable client certificate support  | `true`          | `false`                |
+| `GEMINI_REQUESTS_PER_MINUTE`     | Per-host request cap (0 = off)     | `60`            | `30`                   |
+| `GEMINI_MAX_CONCURRENT_REQUESTS` | Simultaneous fetches (0 = off)     | `5`             | `2`                    |
+| `GEMINI_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`               | `false`         | `true`                 |
 
 > **SSRF protection:** by default both tools reject targets that resolve to loopback,
 > link-local (including cloud metadata `169.254.169.254`), or private/RFC1918 addresses.
@@ -370,8 +376,8 @@ The server can be configured through environment variables for both protocols:
 > deliberately need to reach local hosts (e.g. testing a server on localhost).
 
 The tables above cover the most common settings. Additional options include cache
-sizing (`*_MAX_CACHE_ENTRIES`), per-host rate limiting (`*_REQUESTS_PER_MINUTE`),
-concurrency caps (`*_MAX_CONCURRENT_REQUESTS`), rendered-output limits
+sizing (`*_MAX_CACHE_ENTRIES`), robots policy caching (`*_ROBOTS_CACHE_TTL_SECONDS`,
+`*_ROBOTS_HONOR_AI_TOKENS`), rendered-output limits
 (`*_MAX_RENDERED_CHARS`), Gemini TOFU/certificate storage paths
 (`GEMINI_TOFU_STORAGE_PATH`, `GEMINI_CLIENT_CERTS_STORAGE_PATH`), MIME filtering
 (`GEMINI_DENIED_MIME_TYPES`), and server/logging settings under the `GOPHER_MCP_`
@@ -398,6 +404,86 @@ export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se"
 # Run with custom config
 uv run task serve
 ```
+
+## Network Etiquette
+
+Gopherspace and Geminispace are served largely by individuals running small
+machines. This server is built to be a guest there.
+
+### What this tool does and does not do
+
+`gopher-mcp` fetches a resource when someone asks their assistant for it, and
+returns the content to that conversation. It does **not** train on what it
+fetches, archive it, rehost it, or make it searchable. It does not follow links
+on its own: every URL it retrieves was named by the caller.
+
+Neither protocol has a user-agent field, so nothing identifies this client on
+the wire and a server cannot recognise or block it by name. That is a property
+of Gopher and Gemini, not a choice made here. What it does do, when robots
+checking is enabled below, is honour rules written against the token
+`gopher-mcp`, so an operator who wants to single it out has a way to.
+
+### Rate limiting
+
+Both clients space out requests to the same host and cap how many fetches run at
+once. Unlike earlier versions, **these are on by default**: one request per
+second per host (`*_REQUESTS_PER_MINUTE=60`) and five concurrent fetches
+(`*_MAX_CONCURRENT_REQUESTS=5`). Set either to `0` to disable it. A Gemini server
+answering `44 SLOW_DOWN` is always honoured regardless of these settings.
+
+### Robot exclusion (`robots.txt`)
+
+Set `GOPHER_RESPECT_ROBOTS_TXT=true` / `GEMINI_RESPECT_ROBOTS_TXT=true` to have
+the server fetch `/robots.txt` from the host root and honour it before
+retrieving anything. It is off by default because it costs an extra round-trip
+per host, and because a host serving a blanket `Disallow: /` would otherwise
+silently break an existing deployment. Policies are cached per host for 24 hours
+(`*_ROBOTS_CACHE_TTL_SECONDS`).
+
+Which convention applies depends on the protocol:
+
+- **Gemini** follows the official [companion specification][gemini-robots],
+  which defines the virtual agents `archiver`, `indexer`, `researcher` and
+  `webproxy`. This server matches `gopher-mcp`, `webproxy`, `indexer` and `*`.
+  It does not claim `archiver` or `researcher`: nothing here retains content,
+  and `researcher` is defined for tools that operate without surfacing what they
+  fetch.
+- **Gopher** follows the convention [Veronica-2 documents][veronica]. This
+  server matches `gopher-mcp` and `*`. It does not claim `veronica`, which
+  belongs to Floodgap's indexer.
+
+Both use the original 1994 `robots.txt` grammar rather than RFC 9309, so only
+`#`, `User-agent:` and `Disallow:` are recognised and every other field,
+including `Allow:`, is ignored. This matters: an RFC 9309 parser would act on
+`Allow:` lines that authors on these networks expect to be dropped, making it
+_more_ permissive than intended.
+
+By default the server also honours rules naming AI crawler tokens such as
+`ClaudeBot`, `GPTBot` and `CCBot` (`*_ROBOTS_HONOR_AI_TOKENS`). These are not
+part of either protocol's convention, but an operator who wrote one meant "no
+LLM tooling", and that is the request being made.
+
+Two known limitations, both documented rather than papered over:
+
+- **Gopher fails open.** The protocol has no status codes, so a missing
+  selector, an error document and an empty file are indistinguishable on the
+  wire. RFC 9309 §2.3.1.4 would have an unreachable policy deny everything,
+  which would block most of Gopherspace. Instead the parser is lenient: content
+  that yields no `User-agent:` group imposes no rules. Gemini, which does have
+  status codes, fails closed on a temporary (4x) failure and treats `51 NOT
+FOUND` as "no policy".
+- **Gopher path rules are best-effort.** A Gopher URI carries the item type as
+  the first path character, so `gopher://host/1/archive` has the URI path
+  `/1/archive` but the on-wire selector `/archive`. Rules are tested against both
+  spellings, but `Disallow: /` is the only form guaranteed to behave the way its
+  author expects.
+
+There is no per-directory or per-user `robots.txt`. Neither protocol convention
+nor RFC 9309 §2.3 defines one; on shared hosts the established pattern is a
+single file at the root using path prefixes.
+
+[gemini-robots]: https://geminiprotocol.net/docs/companion/robots.gmi
+[veronica]: gopher://gopher.floodgap.com/0/v2/help/indexer
 
 ## Contributing
 

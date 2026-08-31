@@ -86,19 +86,43 @@ class GopherConfig(BaseSettings):
         le=1000000,
     )
     requests_per_minute: float = Field(
-        default=0.0,
+        default=60.0,  # one request per second, per host
         description="Per-host outbound request rate cap (politeness for small "
-        "Gopher servers); 0 = unlimited.",
+        "Gopher servers); 0 = unlimited. Defaults to one request per second "
+        "per host, which is imperceptible when browsing but stops a model "
+        "looping over the fetch tools from hammering one hobbyist server.",
         ge=0,
         le=6000,
     )
     max_concurrent_requests: int = Field(
-        default=0,
+        default=5,  # matches the batch tools' own concurrency
         description="Cap on simultaneous in-flight fetches (0 = unlimited); a "
         "coarse bound on concurrent sockets/memory, complementary to the "
-        "per-host rate limit. Off by default.",
+        "per-host rate limit. Defaults to the batch tools' own concurrency so "
+        "parallel tool calls cannot multiply past it.",
         ge=0,
         le=1000,
+    )
+    respect_robots_txt: bool = Field(
+        default=False,
+        description="Fetch and honour /robots.txt from the host root before "
+        "retrieving a resource, following the convention Veronica-2 documents "
+        "(User-agent 'gopher-mcp' and '*'). Off by default because it adds a "
+        "round-trip per host; see docs for the fail-open caveat.",
+    )
+    robots_cache_ttl_seconds: int = Field(
+        default=86400,  # 24 hours; RFC 9309 s2.4 permits up to this
+        description="How long a fetched robots.txt policy stays valid, in "
+        "seconds. RFC 9309 s2.4 permits up to 24 hours.",
+        ge=0,
+        le=604800,  # at most one week
+    )
+    robots_honor_ai_tokens: bool = Field(
+        default=True,
+        description="Also honour Disallow rules aimed at named AI crawler "
+        "tokens (ClaudeBot, GPTBot, CCBot, ...). These are not part of the "
+        "Gopher convention, but an operator who wrote one meant 'no LLM "
+        "tooling'.",
     )
 
     model_config = SettingsConfigDict(
@@ -208,20 +232,42 @@ class GeminiConfig(BaseSettings):
         le=10485760,
     )
     requests_per_minute: float = Field(
-        default=0.0,
+        default=60.0,  # one request per second, per host
         description="Per-host outbound request rate cap (politeness for small "
-        "Gemini servers); 0 = unlimited. A status-44 SLOW_DOWN is always "
-        "honoured regardless of this setting.",
+        "Gemini servers); 0 = unlimited. Defaults to one request per second "
+        "per host. A status-44 SLOW_DOWN is always honoured regardless of "
+        "this setting.",
         ge=0,
         le=6000,
     )
     max_concurrent_requests: int = Field(
-        default=0,
+        default=5,  # matches the batch tools' own concurrency
         description="Cap on simultaneous in-flight fetches (0 = unlimited); a "
         "coarse bound on concurrent sockets/memory, complementary to the "
-        "per-host rate limit. Off by default.",
+        "per-host rate limit. Defaults to the batch tools' own concurrency so "
+        "parallel tool calls cannot multiply past it.",
         ge=0,
         le=1000,
+    )
+    respect_robots_txt: bool = Field(
+        default=False,
+        description="Fetch and honour /robots.txt from the capsule root before "
+        "retrieving a resource, following the Gemini companion specification "
+        "(virtual agents 'webproxy' and 'indexer', plus '*'). Off by default "
+        "because it adds a round-trip per host.",
+    )
+    robots_cache_ttl_seconds: int = Field(
+        default=86400,  # 24 hours; RFC 9309 s2.4 permits up to this
+        description="How long a fetched robots.txt policy stays valid, in "
+        "seconds. RFC 9309 s2.4 permits up to 24 hours.",
+        ge=0,
+        le=604800,  # at most one week
+    )
+    robots_honor_ai_tokens: bool = Field(
+        default=True,
+        description="Also honour Disallow rules aimed at named AI crawler "
+        "tokens (ClaudeBot, GPTBot, CCBot, ...). Not part of the companion "
+        "spec, but capsules that name them mean 'no LLM tooling'.",
     )
     denied_mime_types: list[str] = Field(
         default_factory=list,

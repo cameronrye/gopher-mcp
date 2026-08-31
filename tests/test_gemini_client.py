@@ -198,6 +198,9 @@ class TestGeminiClientFetch:
             cache_enabled=False,
             tofu_enabled=False,
             client_certs_enabled=False,
+            # Rate limiting is on by default and would serialize same-host
+            # requests to one per second, hiding the concurrency behaviour.
+            requests_per_minute=0,
         )
         inflight = 0
         peak = 0

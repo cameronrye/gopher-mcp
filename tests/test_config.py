@@ -37,3 +37,81 @@ def test_configure_logging_writes_application_logs_to_file(tmp_path):
 
     contents = log_file.read_text(encoding="utf-8")
     assert "ssrf_block_event" in contents
+
+
+class TestPolitenessDefaults:
+    """Rate limiting ships enabled; robots checking ships opt-in."""
+
+    def test_rate_limiting_is_on_by_default(self):
+        from gopher_mcp.config import GeminiConfig, GopherConfig
+
+        assert GopherConfig().requests_per_minute == 60.0
+        assert GeminiConfig().requests_per_minute == 60.0
+
+    def test_concurrency_is_capped_by_default(self):
+        from gopher_mcp.config import GeminiConfig, GopherConfig
+
+        assert GopherConfig().max_concurrent_requests == 5
+        assert GeminiConfig().max_concurrent_requests == 5
+
+    def test_robots_is_off_by_default(self):
+        from gopher_mcp.config import GeminiConfig, GopherConfig
+
+        assert GopherConfig().respect_robots_txt is False
+        assert GeminiConfig().respect_robots_txt is False
+
+    def test_robots_defaults(self):
+        from gopher_mcp.config import GeminiConfig, GopherConfig
+
+        for cfg in (GopherConfig(), GeminiConfig()):
+            assert cfg.robots_cache_ttl_seconds == 86400
+            assert cfg.robots_honor_ai_tokens is True
+
+    def test_robots_env_vars(self, monkeypatch):
+        from gopher_mcp.config import GeminiConfig, GopherConfig
+
+        monkeypatch.setenv("GOPHER_RESPECT_ROBOTS_TXT", "true")
+        monkeypatch.setenv("GOPHER_ROBOTS_CACHE_TTL_SECONDS", "3600")
+        monkeypatch.setenv("GEMINI_RESPECT_ROBOTS_TXT", "true")
+        monkeypatch.setenv("GEMINI_ROBOTS_HONOR_AI_TOKENS", "false")
+
+        gopher = GopherConfig()
+        assert gopher.respect_robots_txt is True
+        assert gopher.robots_cache_ttl_seconds == 3600
+
+        gemini = GeminiConfig()
+        assert gemini.respect_robots_txt is True
+        assert gemini.robots_honor_ai_tokens is False
+
+    def test_defaults_match_the_client_constants(self):
+        """config.py restates these as literals (the module's convention).
+
+        This test is the guard against the two drifting apart.
+        """
+        from gopher_mcp import gemini_client, gopher_client
+        from gopher_mcp.config import GeminiConfig, GopherConfig
+
+        # Each client module carries its own copy, as it already does for
+        # response size and timeout; guard both against drifting from config.
+        for module, cfg in (
+            (gopher_client, GopherConfig()),
+            (gemini_client, GeminiConfig()),
+        ):
+            assert cfg.requests_per_minute == module.DEFAULT_REQUESTS_PER_MINUTE
+            assert cfg.max_concurrent_requests == (
+                module.DEFAULT_MAX_CONCURRENT_REQUESTS
+            )
+            assert cfg.robots_cache_ttl_seconds == (
+                module.DEFAULT_ROBOTS_CACHE_TTL_SECONDS
+            )
+
+    def test_the_two_client_modules_agree(self):
+        """gopher_client and gemini_client each carry their own copy."""
+        from gopher_mcp import gemini_client, gopher_client
+
+        for const in (
+            "DEFAULT_REQUESTS_PER_MINUTE",
+            "DEFAULT_MAX_CONCURRENT_REQUESTS",
+            "DEFAULT_ROBOTS_CACHE_TTL_SECONDS",
+        ):
+            assert getattr(gopher_client, const) == getattr(gemini_client, const)

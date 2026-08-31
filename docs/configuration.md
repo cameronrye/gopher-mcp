@@ -83,8 +83,11 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GOPHER_MAX_SEARCH_LENGTH` | Integer | `256` | Maximum search query length. |
 | `GOPHER_MAX_RENDERED_CHARS` | Integer | `50000` | Maximum characters of rendered text returned to the model (longer output is truncated and flagged). |
 | `GOPHER_MAX_MENU_ITEMS` | Integer | `1000` | Maximum Gopher menu items returned to the model (`0` = unlimited; larger menus are truncated and flagged). |
-| `GOPHER_REQUESTS_PER_MINUTE` | Float | `0` (off) | Per-host outbound rate limit. |
-| `GOPHER_MAX_CONCURRENT_REQUESTS` | Integer | `0` (unlimited) | Maximum concurrent requests. |
+| `GOPHER_REQUESTS_PER_MINUTE` | Float | `60` | Per-host outbound rate limit; `0` disables it. |
+| `GOPHER_MAX_CONCURRENT_REQUESTS` | Integer | `5` | Maximum concurrent requests; `0` is unlimited. |
+| `GOPHER_RESPECT_ROBOTS_TXT` | Boolean | `false` | Fetch and honour `/robots.txt` from the host root, per the convention Veronica-2 documents. Fails open: Gopher has no status codes, so an unreachable policy cannot be distinguished from an absent one. |
+| `GOPHER_ROBOTS_CACHE_TTL_SECONDS` | Integer | `86400` | Lifetime of a cached robots policy (max `604800`). |
+| `GOPHER_ROBOTS_HONOR_AI_TOKENS` | Boolean | `true` | Also honour rules naming AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). |
 
 ## Gemini Protocol Configuration (`GEMINI_`)
 
@@ -104,8 +107,11 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GEMINI_CLIENT_CERTS_ENABLED` | Boolean | `true` | Enable automatic per-host client certificates. |
 | `GEMINI_CLIENT_CERTS_STORAGE_PATH` | Directory path | `~/.gemini/certs/` | Client-certificate storage directory. |
 | `GEMINI_MAX_RENDERED_CHARS` | Integer | `50000` | Maximum characters of rendered text returned to the model (longer output is truncated and flagged). |
-| `GEMINI_REQUESTS_PER_MINUTE` | Float | `0` (off) | Per-host outbound rate limit. Gemini status 44 SLOW_DOWN is always honoured. |
-| `GEMINI_MAX_CONCURRENT_REQUESTS` | Integer | `0` (unlimited) | Maximum concurrent requests. |
+| `GEMINI_REQUESTS_PER_MINUTE` | Float | `60` | Per-host outbound rate limit; `0` disables it. Gemini status 44 SLOW_DOWN is always honoured. |
+| `GEMINI_MAX_CONCURRENT_REQUESTS` | Integer | `5` | Maximum concurrent requests; `0` is unlimited. |
+| `GEMINI_RESPECT_ROBOTS_TXT` | Boolean | `false` | Fetch and honour `/robots.txt` from the capsule root, per the Gemini companion specification (virtual agents `webproxy` and `indexer`, plus `*`). Fails closed on a temporary (4x) failure; `51 NOT FOUND` means no policy. |
+| `GEMINI_ROBOTS_CACHE_TTL_SECONDS` | Integer | `86400` | Lifetime of a cached robots policy (max `604800`). |
+| `GEMINI_ROBOTS_HONOR_AI_TOKENS` | Boolean | `true` | Also honour rules naming AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). |
 | `GEMINI_DENIED_MIME_TYPES` | Comma-separated | empty | MIME types to reject; supports wildcards like `image/*`. |
 
 !!! note "TLS and certificates are not env-configurable"
@@ -184,8 +190,10 @@ GOPHER_ALLOW_LOCAL_HOSTS=false
 GEMINI_ALLOW_LOCAL_HOSTS=false
 GEMINI_TOFU_ENABLED=true
 GEMINI_TOFU_REJECT_EXPIRED=true
-GOPHER_REQUESTS_PER_MINUTE=60
-GEMINI_REQUESTS_PER_MINUTE=60
+GOPHER_REQUESTS_PER_MINUTE=30
+GEMINI_REQUESTS_PER_MINUTE=30
+GOPHER_RESPECT_ROBOTS_TXT=true
+GEMINI_RESPECT_ROBOTS_TXT=true
 GOPHER_MCP_LOG_LEVEL=INFO
 ```
 
