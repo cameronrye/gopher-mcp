@@ -18,6 +18,19 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 # list input, so the helpers accept both spellings.
 
 
+def _blank_path_is_unset(v: object) -> object:
+    """Treat an empty environment value for an optional path as "not set".
+
+    ``FOO_PATH=`` is the natural way to spell "leave this at the default" in an
+    env file, but pydantic coerces the empty string to ``Path(".")`` -- a
+    directory, which then fails at use (opening it as a log file raises
+    IsADirectoryError at startup) rather than at parse time.
+    """
+    if isinstance(v, str) and not v.strip():
+        return None
+    return v
+
+
 def _split_list_value(value: str) -> list[str]:
     """Split a raw environment value into entries.
 
@@ -314,6 +327,13 @@ class GeminiConfig(_ProtocolConfig):
         default=None,
         description="Client certificates storage directory path",
     )
+
+    @field_validator("tofu_storage_path", "client_certs_storage_path", mode="before")
+    @classmethod
+    def blank_path_is_unset(cls, v: object) -> object:
+        """Read an empty ``GEMINI_*_PATH`` as unset rather than the cwd."""
+        return _blank_path_is_unset(v)
+
     requests_per_minute: float = Field(
         default=60.0,  # one request per second, per host
         description="Per-host outbound request rate cap (politeness for small "
@@ -370,6 +390,13 @@ class ServerConfig(BaseSettings):
         default=None,
         description="Log file path (optional, logs to stdout if not set)",
     )
+
+    @field_validator("log_file_path", mode="before")
+    @classmethod
+    def blank_path_is_unset(cls, v: object) -> object:
+        """Read an empty ``GOPHER_MCP_LOG_FILE_PATH`` as unset rather than the cwd."""
+        return _blank_path_is_unset(v)
+
     model_config = SettingsConfigDict(
         # Namespace server settings so common ambient vars (LOG_LEVEL,
         # DEVELOPMENT_MODE, ...) set by other tooling don't silently bleed in.

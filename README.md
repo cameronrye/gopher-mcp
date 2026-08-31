@@ -32,12 +32,12 @@ modern Python practices, it provides secure, efficient gateways to these distinc
 - **Dual Protocol Support**: `gopher_fetch` and `gemini_fetch` tools for comprehensive protocol coverage
 - **Comprehensive Gopher Support**: Handles menus (type 1), text files (type 0), search servers (type 7), and binary files
 - **Full Gemini Implementation**: Native gemtext parsing, TLS security, and status code handling
-- **Advanced Security**: TOFU certificate validation, client certificates, and secure TLS connections
-- **Safety First**: Built-in timeouts, size limits, input sanitization, and host allowlists
+- **Advanced Security**: TOFU certificate validation with dedicated inspection and recovery tools, scoped client certificates, and secure TLS connections
+- **Safety First**: Built-in timeouts, size limits, input sanitization, SSRF protection, per-host rate limiting, and host allowlists
 - **LLM-Optimized**: Returns structured JSON responses designed for AI consumption
 - **Cross-Platform**: Works seamlessly on Windows, macOS, and Linux
 - **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
-- **High Performance**: Async/await patterns with intelligent caching
+- **High Performance**: Async/await patterns with intelligent caching — and cached results say so, with a per-request `refresh` bypass
 
 ## Documentation
 
@@ -199,9 +199,20 @@ uv run task <command>       # Direct taskipy usage
 
 ## Usage
 
-The server provides four MCP tools for exploring alternative internet protocols:
-`gopher_fetch` and `gemini_fetch` for single resources, plus `gopher_batch_fetch`
-and `gemini_batch_fetch` for fetching several URLs at once (bounded concurrency, capped list length).
+The server registers six MCP tools:
+
+| Tool                  | Purpose                                                         |
+| --------------------- | --------------------------------------------------------------- |
+| `gopher_fetch`        | Fetch one Gopher resource                                       |
+| `gemini_fetch`        | Fetch one Gemini resource                                       |
+| `gopher_batch_fetch`  | Fetch several Gopher URLs at once (bounded concurrency, max 50) |
+| `gemini_batch_fetch`  | Fetch several Gemini URLs at once (bounded concurrency, max 50) |
+| `gemini_trust_list`   | Inspect the Gemini TOFU trust store (read-only)                 |
+| `gemini_trust_update` | Remove or re-pin one host's certificate (**destructive**)       |
+
+The four fetch tools are annotated read-only and open-world. The trust-store
+tools never touch the network, and are split read from write so a client can gate
+the destructive one on its own.
 
 ### `gopher_fetch` Tool
 
@@ -210,6 +221,7 @@ Fetches Gopher menus, text files, or metadata by URL with comprehensive error ha
 **Parameters:**
 
 - `url` (string, required): Full Gopher URL (e.g., `gopher://gopher.floodgap.com/1/`)
+- `refresh` (boolean, optional, default `false`): Skip the cached copy and re-fetch from the server
 
 **Response Types:**
 
@@ -230,6 +242,7 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 
 - `url` (string, required): Full Gemini URL (e.g., `gemini://geminiprotocol.net/`)
 - `input` (string, optional): Text to answer a Gemini input prompt (status 10/11); it is percent-encoded into the query string
+- `refresh` (boolean, optional, default `false`): Skip the cached copy and re-fetch from the server
 
 **Response Types:**
 
@@ -244,7 +257,53 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 - **GeminiErrorResult**: For errors (status 40-69)
   - Detailed error information with status codes
 - **GeminiCertificateResult**: For certificate requests (status 60-69)
-  - Certificate requirement information
+  - Certificate requirement information. Note that **no MCP tool generates a
+    client certificate**: one that already exists for the host/port/path scope is
+    attached automatically, but a capsule answering status 60 cannot be satisfied
+    through the tool surface, so retrying will not help.
+
+`GeminiErrorResult` is an alias for the same `ErrorResult` model `gopher_fetch`
+returns, not a separate type — its `error` object simply carries the extra
+`status` and `temporary` keys when the server actually answered.
+
+### Cached Results and `refresh`
+
+Successful bodies are cached per protocol for a few minutes. A result that came
+from the cache says so, so a replay is never mistaken for the current state of a
+resource:
+
+- `cached` — `true` when the result was replayed from the local cache
+- `cached_at` — when that copy was actually fetched (UNIX timestamp)
+- `cache_age_seconds` — how old the copy was when it was returned
+
+These appear only on the kinds that are actually cached (Gopher `menu`, `text`,
+`binary`; Gemini `gemtext`, `success`, `binary`). Errors, redirects and
+input/certificate prompts are never cached.
+
+Pass `refresh: true` to `gopher_fetch` or `gemini_fetch` when the user wants the
+current state — it skips the cache for that one call and still stores the fresh
+response. The batch tools do not take `refresh`.
+
+### Gemini Trust-Store Tools
+
+Gemini has no certificate authorities: the first certificate seen for a host is
+pinned, and every later connection must present the same one. When a host reissues
+its certificate — routine for self-signed certs, usually at expiry — the fetch
+fails with `CERTIFICATE_CHANGED`. Two tools handle that without hand-editing
+`~/.gemini/tofu.json`:
+
+- **`gemini_trust_list`** (read-only) reports what is pinned, optionally for one
+  `host`: fingerprint, port, first/last seen and expiry.
+- **`gemini_trust_update`** (destructive) removes (`action: "remove"`) or
+  replaces (`action: "pin"`) the pin of one named `host`. There is no wildcard.
+
+A fingerprint change is also exactly what an active machine-in-the-middle attack
+looks like, and the two are indistinguishable from the client. So a pin is only
+ever changed after the user confirms the new certificate is expected — checked
+against the operator or another device, never on the say-so of a fetched page. To
+enforce that, `action: "remove"` requires the fingerprint **currently** pinned
+(as reported by `gemini_trust_list`); a mismatch returns `FINGERPRINT_MISMATCH`
+and changes nothing.
 
 ### Example URLs to Try
 
@@ -307,19 +366,26 @@ gopher-mcp/
 ├── src/gopher_mcp/          # Main package
 │   ├── __init__.py          # Package initialization
 │   ├── __main__.py          # CLI entry point (transports, --host/--port)
-│   ├── server.py            # FastMCP server + MCP tool definitions
+│   ├── server.py            # FastMCP server + the six MCP tool definitions
+│   ├── client_base.py       # Shared fetch scaffolding for both clients
 │   ├── gopher_client.py     # Gopher protocol client
 │   ├── gopher_transport.py  # Low-level Gopher transport
+│   ├── gopher_parse.py      # Gopher URL and menu parsing
 │   ├── gemini_client.py     # Gemini protocol client
 │   ├── gemini_tls.py        # Gemini TLS connection handling
+│   ├── gemini_parse.py      # Gemini URL and response parsing
+│   ├── gemtext.py           # Gemtext document parsing
+│   ├── mime.py              # MIME type detection and filtering
 │   ├── tofu.py              # Trust-on-First-Use certificate store
-│   ├── client_certs.py      # Gemini client certificate management
+│   ├── client_certs.py      # Gemini client certificate storage
 │   ├── ssrf.py              # SSRF protection / address filtering
 │   ├── ratelimit.py         # Per-host rate limiting
-│   ├── cache.py             # Per-protocol response cache
+│   ├── robots.py            # robots.txt fetching and policy gate
+│   ├── cache.py             # Shared TTL + LRU response cache
 │   ├── config.py            # Pydantic settings models
 │   ├── models.py            # Pydantic data models
-│   └── utils.py             # Utility functions
+│   ├── helpers.py           # Shared URL/IO/sanitization helpers
+│   └── utils.py             # Backward-compatible facade re-exporting the above
 ├── tests/                   # Comprehensive test suite
 ├── docs/                    # MkDocs documentation
 ├── scripts/                 # Development scripts
@@ -361,31 +427,34 @@ The server can be configured through environment variables for both protocols:
 
 ### Gopher Configuration
 
-| Variable                         | Description                    | Default         | Example                |
-| -------------------------------- | ------------------------------ | --------------- | ---------------------- |
-| `GOPHER_MAX_RESPONSE_SIZE`       | Maximum response size in bytes | `1048576` (1MB) | `2097152`              |
-| `GOPHER_TIMEOUT_SECONDS`         | Request timeout in seconds     | `30`            | `60`                   |
-| `GOPHER_CACHE_ENABLED`           | Enable response caching        | `true`          | `false`                |
-| `GOPHER_CACHE_TTL_SECONDS`       | Cache time-to-live in seconds  | `300`           | `600`                  |
-| `GOPHER_MAX_CACHE_ENTRIES`       | Max cached entries (LRU)       | `1000`          | `2000`                 |
-| `GOPHER_ALLOWED_HOSTS`           | Comma-separated allowed hosts  | `None` (all)    | `example.com,test.com` |
-| `GOPHER_ALLOW_LOCAL_HOSTS`       | Permit loopback/private hosts  | `false`         | `true`                 |
-| `GOPHER_REQUESTS_PER_MINUTE`     | Per-host request cap (0 = off) | `60`            | `30`                   |
-| `GOPHER_MAX_CONCURRENT_REQUESTS` | Simultaneous fetches (0 = off) | `5`             | `2`                    |
-| `GOPHER_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`           | `false`         | `true`                 |
+| Variable                         | Description                     | Default         | Example                |
+| -------------------------------- | ------------------------------- | --------------- | ---------------------- |
+| `GOPHER_MAX_RESPONSE_SIZE`       | Maximum response size in bytes  | `1048576` (1MB) | `2097152`              |
+| `GOPHER_TIMEOUT_SECONDS`         | Request timeout in seconds      | `30`            | `60`                   |
+| `GOPHER_CACHE_ENABLED`           | Enable response caching         | `true`          | `false`                |
+| `GOPHER_CACHE_TTL_SECONDS`       | Cache TTL in seconds; `0` = off | `300`           | `600`                  |
+| `GOPHER_MAX_CACHE_ENTRIES`       | Max cached entries (LRU)        | `1000`          | `2000`                 |
+| `GOPHER_ALLOWED_HOSTS`           | Allowed hosts (list)            | unset (all)     | `example.com,test.com` |
+| `GOPHER_ALLOWED_PORTS`           | Allowed ports (list)            | unset (any)     | `70`                   |
+| `GOPHER_ALLOW_LOCAL_HOSTS`       | Permit loopback/private hosts   | `false`         | `true`                 |
+| `GOPHER_REQUESTS_PER_MINUTE`     | Per-host request cap (0 = off)  | `60`            | `30`                   |
+| `GOPHER_MAX_CONCURRENT_REQUESTS` | Simultaneous fetches (0 = off)  | `5`             | `2`                    |
+| `GOPHER_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`            | `false`         | `true`                 |
 
 ### Gemini Configuration
 
 | Variable                         | Description                        | Default         | Example                |
 | -------------------------------- | ---------------------------------- | --------------- | ---------------------- |
 | `GEMINI_MAX_RESPONSE_SIZE`       | Maximum response size in bytes     | `1048576` (1MB) | `2097152`              |
-| `GEMINI_TIMEOUT_SECONDS`         | Request timeout in seconds         | `30`            | `60`                   |
+| `GEMINI_TIMEOUT_SECONDS`         | Whole-fetch wire-time budget       | `30`            | `60`                   |
 | `GEMINI_CACHE_ENABLED`           | Enable response caching            | `true`          | `false`                |
-| `GEMINI_CACHE_TTL_SECONDS`       | Cache time-to-live in seconds      | `300`           | `600`                  |
-| `GEMINI_ALLOWED_HOSTS`           | Comma-separated allowed hosts      | `None` (all)    | `example.org,test.org` |
+| `GEMINI_CACHE_TTL_SECONDS`       | Cache TTL in seconds; `0` = off    | `300`           | `600`                  |
+| `GEMINI_MAX_CACHE_ENTRIES`       | Max cached entries (LRU)           | `1000`          | `2000`                 |
+| `GEMINI_ALLOWED_HOSTS`           | Allowed hosts (list)               | unset (all)     | `example.org,test.org` |
+| `GEMINI_ALLOWED_PORTS`           | Allowed ports (list)               | unset (any)     | `1965`                 |
 | `GEMINI_ALLOW_LOCAL_HOSTS`       | Permit loopback/private hosts      | `false`         | `true`                 |
 | `GEMINI_TOFU_ENABLED`            | Enable TOFU certificate validation | `true`          | `false`                |
-| `GEMINI_CLIENT_CERTS_ENABLED`    | Enable client certificate support  | `true`          | `false`                |
+| `GEMINI_CLIENT_CERTS_ENABLED`    | Store and attach client certs      | `true`          | `false`                |
 | `GEMINI_REQUESTS_PER_MINUTE`     | Per-host request cap (0 = off)     | `60`            | `30`                   |
 | `GEMINI_MAX_CONCURRENT_REQUESTS` | Simultaneous fetches (0 = off)     | `5`             | `2`                    |
 | `GEMINI_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`               | `false`         | `true`                 |
@@ -395,15 +464,35 @@ The server can be configured through environment variables for both protocols:
 > Set `GOPHER_ALLOW_LOCAL_HOSTS` / `GEMINI_ALLOW_LOCAL_HOSTS` to `true` only when you
 > deliberately need to reach local hosts (e.g. testing a server on localhost).
 
-The tables above cover the most common settings. Additional options include cache
-sizing (`*_MAX_CACHE_ENTRIES`), robots policy caching (`*_ROBOTS_CACHE_TTL_SECONDS`,
-`*_ROBOTS_HONOR_AI_TOKENS`), rendered-output limits
-(`*_MAX_RENDERED_CHARS`), Gemini TOFU/certificate storage paths
-(`GEMINI_TOFU_STORAGE_PATH`, `GEMINI_CLIENT_CERTS_STORAGE_PATH`), MIME filtering
+**Timeouts.** `*_TIMEOUT_SECONDS` is one overall deadline per fetch, not a
+per-phase timeout. For Gemini, DNS, connect and TLS handshake, the trust-store
+write, send and read all draw down the same budget, and when robots checking is
+enabled the `/robots.txt` probe spends from it too — so a slow host cannot spend
+the full value on each step in turn.
+
+**List-valued variables.** `*_ALLOWED_HOSTS`, `*_ALLOWED_PORTS` and
+`GEMINI_DENIED_MIME_TYPES` accept either the comma-separated form (`a,b`) or a
+JSON array (`["a", "b"]`); whitespace around entries is stripped. Leave one
+**unset** (or empty) to mean "no restriction". A value that is present but names
+no entries — `" , "`, or `"$A,$B"` where both shell variables are empty — is a
+**startup error**, because an empty allowlist cannot be told apart from an absent
+one and would silently drop the restriction you meant to apply. A port outside
+`1`–`65535` in an allowlist is a startup error for the same reason: it could
+never match, so every fetch would be refused at runtime instead.
+
+**Caching.** `*_CACHE_TTL_SECONDS=0` disables caching rather than storing entries
+that expire the instant they are written.
+
+The tables above cover the most common settings. Additional options include
+robots policy caching (`*_ROBOTS_CACHE_TTL_SECONDS`, `*_ROBOTS_HONOR_AI_TOKENS`),
+rendered-output limits (`*_MAX_RENDERED_CHARS`, `GOPHER_MAX_MENU_ITEMS`), Gemini
+TOFU/certificate storage paths and expiry policy (`GEMINI_TOFU_STORAGE_PATH`,
+`GEMINI_TOFU_REJECT_EXPIRED`, `GEMINI_CLIENT_CERTS_STORAGE_PATH`), MIME filtering
 (`GEMINI_DENIED_MIME_TYPES`), and server/logging settings under the `GOPHER_MCP_`
 prefix. See the full
 [Configuration Guide](https://cameronrye.github.io/gopher-mcp/configuration/) for
-every variable, its type, range, and default.
+every variable, its type, range, and default, or `config/example.env` for a
+ready-to-edit starting point.
 
 ### Example Configuration
 

@@ -1,358 +1,394 @@
 #!/usr/bin/env python3
-"""
-Configuration validation script for Gopher & Gemini MCP Server.
+"""Configuration validation for the Gopher & Gemini MCP Server.
 
-This script validates environment variables and configuration settings
-to ensure they are properly formatted and within acceptable ranges.
+Checks the environment variables the server actually reads, against the bounds
+``src/gopher_mcp/config.py`` actually enforces, and flags variables that look
+like configuration but are silently ignored.
+
+Usage::
+
+    python scripts/validate-config.py             # validate the environment
+    python scripts/validate-config.py .env        # validate an env file
+    python scripts/validate-config.py config/example.env
+
+An env file is parsed the way the server reads one (``KEY=value`` lines, ``#``
+comments); real environment variables take precedence over it, matching
+pydantic-settings' own ordering. The script deliberately has no imports outside
+the standard library so it can be run before the package is installed.
 """
 
+from __future__ import annotations
+
+import json
 import os
 import sys
 from pathlib import Path
 from typing import Any
 
+# Accepted spellings for a boolean, matching pydantic's own parsing.
+BOOLEAN_VALUES = {
+    "true",
+    "false",
+    "1",
+    "0",
+    "yes",
+    "no",
+    "on",
+    "off",
+    "t",
+    "f",
+    "y",
+    "n",
+}
+
+LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
+
+
+class Spec:
+    """One environment variable the server reads.
+
+    Bounds mirror the Field constraints in ``src/gopher_mcp/config.py``; keep the
+    two in step when a bound changes there.
+    """
+
+    def __init__(
+        self,
+        name: str,
+        kind: str,
+        *,
+        minimum: float | None = None,
+        maximum: float | None = None,
+        exclusive_min: float | None = None,
+        note: str = "",
+    ) -> None:
+        self.name = name
+        self.kind = kind
+        self.minimum = minimum
+        self.maximum = maximum
+        self.exclusive_min = exclusive_min
+        self.note = note
+
+
+def _protocol_specs(prefix: str, default_port_example: str) -> list[Spec]:
+    """Build the specs shared by both protocol namespaces."""
+    return [
+        Spec(f"{prefix}MAX_RESPONSE_SIZE", "int", minimum=1024, maximum=104857600),
+        Spec(f"{prefix}TIMEOUT_SECONDS", "float", exclusive_min=0, maximum=300),
+        Spec(f"{prefix}CACHE_ENABLED", "bool"),
+        Spec(
+            f"{prefix}CACHE_TTL_SECONDS",
+            "int",
+            minimum=0,
+            maximum=86400,
+            note="0 disables caching entirely",
+        ),
+        Spec(f"{prefix}MAX_CACHE_ENTRIES", "int", minimum=1, maximum=100000),
+        Spec(f"{prefix}ALLOWED_HOSTS", "host_list"),
+        Spec(f"{prefix}ALLOW_LOCAL_HOSTS", "bool"),
+        Spec(
+            f"{prefix}ALLOWED_PORTS",
+            "port_list",
+            note=f"e.g. {default_port_example}",
+        ),
+        Spec(f"{prefix}MAX_RENDERED_CHARS", "int", minimum=0, maximum=10485760),
+        Spec(f"{prefix}REQUESTS_PER_MINUTE", "float", minimum=0, maximum=6000),
+        Spec(f"{prefix}MAX_CONCURRENT_REQUESTS", "int", minimum=0, maximum=1000),
+        Spec(f"{prefix}RESPECT_ROBOTS_TXT", "bool"),
+        Spec(f"{prefix}ROBOTS_CACHE_TTL_SECONDS", "int", minimum=0, maximum=604800),
+        Spec(f"{prefix}ROBOTS_HONOR_AI_TOKENS", "bool"),
+    ]
+
+
+SPECS: list[Spec] = [
+    *_protocol_specs("GOPHER_", "70"),
+    Spec("GOPHER_MAX_SELECTOR_LENGTH", "int", minimum=1, maximum=65536),
+    Spec("GOPHER_MAX_SEARCH_LENGTH", "int", minimum=1, maximum=4096),
+    Spec("GOPHER_MAX_MENU_ITEMS", "int", minimum=0, maximum=1000000),
+    *_protocol_specs("GEMINI_", "1965"),
+    Spec("GEMINI_TOFU_ENABLED", "bool"),
+    Spec("GEMINI_TOFU_REJECT_EXPIRED", "bool"),
+    Spec("GEMINI_CLIENT_CERTS_ENABLED", "bool"),
+    Spec("GEMINI_TOFU_STORAGE_PATH", "file_path"),
+    Spec("GEMINI_CLIENT_CERTS_STORAGE_PATH", "dir_path"),
+    Spec("GEMINI_DENIED_MIME_TYPES", "mime_list"),
+    Spec("GOPHER_MCP_LOG_LEVEL", "log_level"),
+    Spec("GOPHER_MCP_STRUCTURED_LOGGING", "bool"),
+    Spec("GOPHER_MCP_LOG_FILE_PATH", "file_path"),
+]
+
+KNOWN_NAMES = {spec.name for spec in SPECS}
+
+# Variables people set expecting them to do something. They are ignored: either
+# the setting never existed, or the real name carries a prefix.
+IGNORED_NAMES: dict[str, str] = {
+    "GEMINI_TLS_VERSION": (
+        "TLS 1.2 is the enforced minimum, fixed in code and not configurable"
+    ),
+    "GEMINI_TLS_VERIFY_HOSTNAME": (
+        "server identity is verified by TOFU, not hostname/CA-chain checks"
+    ),
+    "GEMINI_TLS_CLIENT_CERT_PATH": (
+        "client certificates are managed under "
+        "GEMINI_CLIENT_CERTS_STORAGE_PATH; there is no external cert/key setting"
+    ),
+    "GEMINI_TLS_CLIENT_KEY_PATH": (
+        "client certificates are managed under "
+        "GEMINI_CLIENT_CERTS_STORAGE_PATH; there is no external cert/key setting"
+    ),
+    "GEMINI_CLIENT_CERT_STORAGE_PATH": "did you mean GEMINI_CLIENT_CERTS_STORAGE_PATH?",
+    "MAX_REDIRECTS": "redirects are returned to the caller, never followed automatically",
+    "MAX_CONCURRENT_CONNECTIONS": (
+        "did you mean GOPHER_MAX_CONCURRENT_REQUESTS / GEMINI_MAX_CONCURRENT_REQUESTS?"
+    ),
+    "STRICT_HOST_VALIDATION": "use GOPHER_ALLOWED_HOSTS / GEMINI_ALLOWED_HOSTS",
+    "DEVELOPMENT_MODE": "no such setting; raise GOPHER_MCP_LOG_LEVEL instead",
+    "LOG_LEVEL": "did you mean GOPHER_MCP_LOG_LEVEL?",
+    "STRUCTURED_LOGGING": "did you mean GOPHER_MCP_STRUCTURED_LOGGING?",
+    "LOG_FILE_PATH": "did you mean GOPHER_MCP_LOG_FILE_PATH?",
+}
+
+
+def parse_env_file(path: Path) -> dict[str, str]:
+    """Read ``KEY=value`` lines from an env file, ignoring comments and blanks."""
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def split_list_value(value: str) -> list[str]:
+    """Split a list-valued variable, accepting JSON arrays and commas.
+
+    Mirrors ``gopher_mcp.config._split_list_value``.
+    """
+    stripped = value.strip()
+    if stripped.startswith("["):
+        decoded = json.loads(stripped)
+        return [str(item).strip() for item in decoded if str(item).strip()]
+    return [entry.strip() for entry in stripped.split(",") if entry.strip()]
+
 
 class ConfigValidator:
     """Validates configuration settings for the MCP server."""
 
-    def __init__(self) -> None:
+    def __init__(self, values: dict[str, str], source: str) -> None:
+        self.values = values
+        self.source = source
         self.errors: list[str] = []
         self.warnings: list[str] = []
-        self.config: dict[str, Any] = {}
 
     def validate_all(self) -> bool:
-        """Validate all configuration settings."""
+        """Validate every setting and report the outcome."""
         print("🔍 Validating Gopher & Gemini MCP Server Configuration...")
+        print(f"   Source: {self.source}")
         print()
 
-        # Load environment variables
-        self._load_config()
-
-        # Validate each category
-        self._validate_gopher_config()
-        self._validate_gemini_config()
-        self._validate_tls_config()
-        self._validate_logging_config()
-        self._validate_security_config()
-        self._validate_performance_config()
-
-        # Report results
-        self._report_results()
-
-        return len(self.errors) == 0
-
-    def _load_config(self):
-        """Load configuration from environment variables."""
-        # Gopher configuration
-        self.config.update(
-            {
-                "gopher_max_response_size": os.getenv(
-                    "GOPHER_MAX_RESPONSE_SIZE", "1048576"
-                ),
-                "gopher_timeout_seconds": os.getenv("GOPHER_TIMEOUT_SECONDS", "30"),
-                "gopher_cache_enabled": os.getenv("GOPHER_CACHE_ENABLED", "true"),
-                "gopher_cache_ttl_seconds": os.getenv(
-                    "GOPHER_CACHE_TTL_SECONDS", "300"
-                ),
-                "gopher_max_cache_entries": os.getenv(
-                    "GOPHER_MAX_CACHE_ENTRIES", "1000"
-                ),
-                "gopher_allowed_hosts": os.getenv("GOPHER_ALLOWED_HOSTS", ""),
-                "gopher_max_selector_length": os.getenv(
-                    "GOPHER_MAX_SELECTOR_LENGTH", "1024"
-                ),
-                "gopher_max_search_length": os.getenv(
-                    "GOPHER_MAX_SEARCH_LENGTH", "256"
-                ),
-            }
-        )
-
-        # Gemini configuration
-        self.config.update(
-            {
-                "gemini_max_response_size": os.getenv(
-                    "GEMINI_MAX_RESPONSE_SIZE", "1048576"
-                ),
-                "gemini_timeout_seconds": os.getenv("GEMINI_TIMEOUT_SECONDS", "30"),
-                "gemini_cache_enabled": os.getenv("GEMINI_CACHE_ENABLED", "true"),
-                "gemini_cache_ttl_seconds": os.getenv(
-                    "GEMINI_CACHE_TTL_SECONDS", "300"
-                ),
-                "gemini_max_cache_entries": os.getenv(
-                    "GEMINI_MAX_CACHE_ENTRIES", "1000"
-                ),
-                "gemini_allowed_hosts": os.getenv("GEMINI_ALLOWED_HOSTS", ""),
-                "gemini_tofu_enabled": os.getenv("GEMINI_TOFU_ENABLED", "true"),
-                "gemini_client_certs_enabled": os.getenv(
-                    "GEMINI_CLIENT_CERTS_ENABLED", "true"
-                ),
-                "gemini_tofu_storage_path": os.getenv("GEMINI_TOFU_STORAGE_PATH", ""),
-                "gemini_client_cert_storage_path": os.getenv(
-                    "GEMINI_CLIENT_CERT_STORAGE_PATH", ""
-                ),
-            }
-        )
-
-        # TLS configuration
-        self.config.update(
-            {
-                "gemini_tls_version": os.getenv("GEMINI_TLS_VERSION", "TLSv1.2"),
-                "gemini_tls_verify_hostname": os.getenv(
-                    "GEMINI_TLS_VERIFY_HOSTNAME", "true"
-                ),
-                "gemini_tls_client_cert_path": os.getenv(
-                    "GEMINI_TLS_CLIENT_CERT_PATH", ""
-                ),
-                "gemini_tls_client_key_path": os.getenv(
-                    "GEMINI_TLS_CLIENT_KEY_PATH", ""
-                ),
-            }
-        )
-
-        # Other configuration
-        self.config.update(
-            {
-                "log_level": os.getenv("LOG_LEVEL", "INFO"),
-                "structured_logging": os.getenv("STRUCTURED_LOGGING", "true"),
-                "log_file_path": os.getenv("LOG_FILE_PATH", ""),
-                "development_mode": os.getenv("DEVELOPMENT_MODE", "false"),
-                "strict_host_validation": os.getenv("STRICT_HOST_VALIDATION", "false"),
-                "max_redirects": os.getenv("MAX_REDIRECTS", "5"),
-                "max_concurrent_connections": os.getenv(
-                    "MAX_CONCURRENT_CONNECTIONS", "10"
-                ),
-            }
-        )
-
-    def _validate_gopher_config(self):
-        """Validate Gopher protocol configuration."""
         print("📡 Validating Gopher configuration...")
-
-        # Validate numeric values
-        self._validate_positive_int(
-            "gopher_max_response_size",
-            "GOPHER_MAX_RESPONSE_SIZE",
-            1024,
-            100 * 1024 * 1024,
-        )
-        self._validate_positive_float(
-            "gopher_timeout_seconds", "GOPHER_TIMEOUT_SECONDS", 1.0, 300.0
-        )
-        self._validate_positive_int(
-            "gopher_cache_ttl_seconds", "GOPHER_CACHE_TTL_SECONDS", 1, 86400
-        )
-        self._validate_positive_int(
-            "gopher_max_cache_entries", "GOPHER_MAX_CACHE_ENTRIES", 1, 100000
-        )
-        self._validate_positive_int(
-            "gopher_max_selector_length", "GOPHER_MAX_SELECTOR_LENGTH", 1, 8192
-        )
-        self._validate_positive_int(
-            "gopher_max_search_length", "GOPHER_MAX_SEARCH_LENGTH", 1, 2048
-        )
-
-        # Validate boolean values
-        self._validate_boolean("gopher_cache_enabled", "GOPHER_CACHE_ENABLED")
-
-        # Validate host list
-        self._validate_host_list("gopher_allowed_hosts", "GOPHER_ALLOWED_HOSTS")
-
-    def _validate_gemini_config(self):
-        """Validate Gemini protocol configuration."""
+        self._validate_prefix("GOPHER_", skip_prefix="GOPHER_MCP_")
         print("🔐 Validating Gemini configuration...")
+        self._validate_prefix("GEMINI_")
+        print("📝 Validating server and logging configuration...")
+        self._validate_prefix("GOPHER_MCP_")
+        print("🛡️ Checking for ignored variables...")
+        self._check_ignored()
 
-        # Validate numeric values
-        self._validate_positive_int(
-            "gemini_max_response_size",
-            "GEMINI_MAX_RESPONSE_SIZE",
-            1024,
-            100 * 1024 * 1024,
-        )
-        self._validate_positive_float(
-            "gemini_timeout_seconds", "GEMINI_TIMEOUT_SECONDS", 1.0, 300.0
-        )
-        self._validate_positive_int(
-            "gemini_cache_ttl_seconds", "GEMINI_CACHE_TTL_SECONDS", 1, 86400
-        )
-        self._validate_positive_int(
-            "gemini_max_cache_entries", "GEMINI_MAX_CACHE_ENTRIES", 1, 100000
-        )
+        self._report_results()
+        return not self.errors
 
-        # Validate boolean values
-        self._validate_boolean("gemini_cache_enabled", "GEMINI_CACHE_ENABLED")
-        self._validate_boolean("gemini_tofu_enabled", "GEMINI_TOFU_ENABLED")
-        self._validate_boolean(
-            "gemini_client_certs_enabled", "GEMINI_CLIENT_CERTS_ENABLED"
-        )
+    def _validate_prefix(self, prefix: str, skip_prefix: str | None = None) -> None:
+        for spec in SPECS:
+            if not spec.name.startswith(prefix):
+                continue
+            if skip_prefix and spec.name.startswith(skip_prefix):
+                continue
+            if spec.name in self.values:
+                self._validate(spec, self.values[spec.name])
 
-        # Validate host list
-        self._validate_host_list("gemini_allowed_hosts", "GEMINI_ALLOWED_HOSTS")
-
-        # Validate storage paths
-        self._validate_storage_path(
-            "gemini_tofu_storage_path", "GEMINI_TOFU_STORAGE_PATH"
-        )
-        self._validate_storage_path(
-            "gemini_client_cert_storage_path", "GEMINI_CLIENT_CERT_STORAGE_PATH"
-        )
-
-    def _validate_tls_config(self):
-        """Validate TLS configuration."""
-        print("🔒 Validating TLS configuration...")
-
-        # Validate TLS version
-        tls_version = self.config["gemini_tls_version"]
-        if tls_version not in ["TLSv1.2", "TLSv1.3"]:
-            self.errors.append(
-                f"GEMINI_TLS_VERSION must be 'TLSv1.2' or 'TLSv1.3', got: {tls_version}"
-            )
-
-        # Validate boolean values
-        self._validate_boolean(
-            "gemini_tls_verify_hostname", "GEMINI_TLS_VERIFY_HOSTNAME"
-        )
-
-        # Validate certificate files
-        cert_path = self.config["gemini_tls_client_cert_path"]
-        key_path = self.config["gemini_tls_client_key_path"]
-
-        if cert_path and not key_path:
-            self.errors.append(
-                "GEMINI_TLS_CLIENT_KEY_PATH must be set when GEMINI_TLS_CLIENT_CERT_PATH is set"
-            )
-        elif key_path and not cert_path:
-            self.errors.append(
-                "GEMINI_TLS_CLIENT_CERT_PATH must be set when GEMINI_TLS_CLIENT_KEY_PATH is set"
-            )
-
-        if cert_path and not Path(cert_path).exists():
-            self.errors.append(f"Client certificate file not found: {cert_path}")
-        if key_path and not Path(key_path).exists():
-            self.errors.append(f"Client key file not found: {key_path}")
-
-    def _validate_logging_config(self):
-        """Validate logging configuration."""
-        print("📝 Validating logging configuration...")
-
-        # Validate log level
-        log_level = self.config["log_level"].upper()
-        if log_level not in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]:
-            self.errors.append(
-                f"LOG_LEVEL must be one of: DEBUG, INFO, WARNING, ERROR, CRITICAL, got: {log_level}"
-            )
-
-        # Validate boolean values
-        self._validate_boolean("structured_logging", "STRUCTURED_LOGGING")
-        self._validate_boolean("development_mode", "DEVELOPMENT_MODE")
-
-        # Validate log file path
-        log_file = self.config["log_file_path"]
-        if log_file:
-            log_dir = Path(log_file).parent
-            if not log_dir.exists():
-                self.warnings.append(f"Log directory does not exist: {log_dir}")
-
-    def _validate_security_config(self):
-        """Validate security configuration."""
-        print("🛡️ Validating security configuration...")
-
-        # Validate boolean values
-        self._validate_boolean("strict_host_validation", "STRICT_HOST_VALIDATION")
-
-        # Validate max redirects
-        self._validate_positive_int("max_redirects", "MAX_REDIRECTS", 0, 20)
-
-    def _validate_performance_config(self):
-        """Validate performance configuration."""
-        print("⚡ Validating performance configuration...")
-
-        # Validate connection limits
-        self._validate_positive_int(
-            "max_concurrent_connections", "MAX_CONCURRENT_CONNECTIONS", 1, 100
-        )
-
-    def _validate_positive_int(
-        self, key: str, env_var: str, min_val: int, max_val: int
-    ):
-        """Validate a positive integer value."""
-        try:
-            value = int(self.config[key])
-            if value < min_val or value > max_val:
-                self.errors.append(
-                    f"{env_var} must be between {min_val} and {max_val}, got: {value}"
-                )
-        except ValueError:
-            self.errors.append(
-                f"{env_var} must be a valid integer, got: {self.config[key]}"
-            )
-
-    def _validate_positive_float(
-        self, key: str, env_var: str, min_val: float, max_val: float
-    ):
-        """Validate a positive float value."""
-        try:
-            value = float(self.config[key])
-            if value < min_val or value > max_val:
-                self.errors.append(
-                    f"{env_var} must be between {min_val} and {max_val}, got: {value}"
-                )
-        except ValueError:
-            self.errors.append(
-                f"{env_var} must be a valid number, got: {self.config[key]}"
-            )
-
-    def _validate_boolean(self, key: str, env_var: str):
-        """Validate a boolean value."""
-        value = self.config[key].lower()
-        if value not in ["true", "false", "1", "0", "yes", "no", "on", "off"]:
-            self.errors.append(
-                f"{env_var} must be a boolean value (true/false, 1/0, yes/no, on/off), got: {self.config[key]}"
-            )
-
-    def _validate_host_list(self, key: str, env_var: str):
-        """Validate a comma-separated host list."""
-        hosts = self.config[key]
-        if not hosts:
-            return
-
-        host_list = [h.strip() for h in hosts.split(",")]
-        for host in host_list:
-            if not host:
-                self.errors.append(f"{env_var} contains empty host name")
-            elif " " in host:
-                self.errors.append(
-                    f"{env_var} host names cannot contain spaces: {host}"
-                )
-            elif not self._is_valid_hostname(host):
+    def _check_ignored(self) -> None:
+        for name, reason in IGNORED_NAMES.items():
+            if name in self.values:
+                self.warnings.append(f"{name} is not read by the server ({reason})")
+        for name in sorted(self.values):
+            if name in KNOWN_NAMES or name in IGNORED_NAMES:
+                continue
+            if name.startswith(("GOPHER_", "GEMINI_")):
                 self.warnings.append(
-                    f"{env_var} contains potentially invalid hostname: {host}"
+                    f"{name} is not a recognized setting and will be ignored"
                 )
 
-    def _validate_storage_path(self, key: str, env_var: str):
-        """Validate a storage path."""
-        path = self.config[key]
-        if not path:
-            return
+    def _validate(self, spec: Spec, value: str) -> None:
+        """Dispatch to the checker for this spec's kind."""
+        getattr(self, f"_validate_{spec.kind}")(spec, value)
 
-        path_obj = Path(path)
-        if path_obj.exists() and not path_obj.is_dir() and not path_obj.suffix:
-            # If it exists and is not a directory and has no extension, assume it should be a directory
+    def _range_error(self, spec: Spec, value: Any) -> None:
+        if spec.exclusive_min is not None:
+            bounds = f"greater than {spec.exclusive_min} and at most {spec.maximum}"
+        else:
+            bounds = f"between {spec.minimum} and {spec.maximum}"
+        suffix = f" ({spec.note})" if spec.note else ""
+        self.errors.append(f"{spec.name} must be {bounds}, got: {value}{suffix}")
+
+    def _in_range(self, spec: Spec, value: float) -> bool:
+        if spec.exclusive_min is not None and value <= spec.exclusive_min:
+            return False
+        if spec.minimum is not None and value < spec.minimum:
+            return False
+        return not (spec.maximum is not None and value > spec.maximum)
+
+    def _validate_int(self, spec: Spec, value: str) -> None:
+        try:
+            parsed = int(value)
+        except ValueError:
+            self.errors.append(f"{spec.name} must be a valid integer, got: {value!r}")
+            return
+        if not self._in_range(spec, parsed):
+            self._range_error(spec, parsed)
+
+    def _validate_float(self, spec: Spec, value: str) -> None:
+        try:
+            parsed = float(value)
+        except ValueError:
+            self.errors.append(f"{spec.name} must be a valid number, got: {value!r}")
+            return
+        if not self._in_range(spec, parsed):
+            self._range_error(spec, parsed)
+
+    def _validate_bool(self, spec: Spec, value: str) -> None:
+        if value.strip().lower() not in BOOLEAN_VALUES:
+            self.errors.append(
+                f"{spec.name} must be a boolean value "
+                f"(true/false, 1/0, yes/no, on/off), got: {value!r}"
+            )
+
+    def _entries(self, spec: Spec, value: str) -> list[str] | None:
+        """Split a list value, or record why it cannot be used."""
+        if not value.strip():
+            # Unset or empty means "no restriction"; nothing to check.
+            return None
+        try:
+            entries = split_list_value(value)
+        except json.JSONDecodeError:
+            self.errors.append(
+                f"{spec.name} looks like a JSON array but is not valid JSON: {value!r}"
+            )
+            return None
+        if not entries:
+            self.errors.append(
+                f"{spec.name} is set to {value!r} but names no entries; unset it "
+                "instead — an empty allowlist cannot be told apart from an absent "
+                "one, so the server refuses to start"
+            )
+            return None
+        return entries
+
+    def _validate_host_list(self, spec: Spec, value: str) -> None:
+        # A malformed hostname is a warning, not an error: the server accepts the
+        # allowlist and simply never matches that entry, so reporting it as a
+        # startup failure would be wrong.
+        entries = self._entries(spec, value)
+        for host in entries or []:
+            if not self._is_valid_hostname(host):
+                self.warnings.append(
+                    f"{spec.name} contains a hostname that can never match: {host!r}"
+                )
+
+    def _validate_port_list(self, spec: Spec, value: str) -> None:
+        entries = self._entries(spec, value)
+        for entry in entries or []:
+            try:
+                port = int(entry)
+            except ValueError:
+                self.errors.append(
+                    f"{spec.name} contains a non-numeric port: {entry!r}"
+                )
+                continue
+            if not 1 <= port <= 65535:
+                self.errors.append(
+                    f"{spec.name} port must be between 1 and 65535: {port}"
+                )
+
+    def _validate_mime_list(self, spec: Spec, value: str) -> None:
+        # An empty deny list is legitimate (no filtering), so only the JSON
+        # spelling can fail here.
+        if value.strip().startswith("["):
+            try:
+                split_list_value(value)
+            except json.JSONDecodeError:
+                self.errors.append(
+                    f"{spec.name} looks like a JSON array but is not valid JSON: "
+                    f"{value!r}"
+                )
+                return
+        for entry in [e.strip() for e in value.split(",") if e.strip()]:
+            if "/" not in entry:
+                self.warnings.append(
+                    f"{spec.name} entry {entry!r} is not a type/subtype or type/* "
+                    "pattern and will never match"
+                )
+
+    def _empty_path(self, spec: Spec, value: str) -> bool:
+        """Flag an empty path value, which reads as '.' rather than 'unset'."""
+        if value.strip():
+            return False
+        self.errors.append(
+            f"{spec.name} is set to an empty value, which is read as the path "
+            f'"." rather than as unset. Comment the variable out to use the '
+            "default."
+        )
+        return True
+
+    def _validate_file_path(self, spec: Spec, value: str) -> None:
+        if self._empty_path(spec, value):
+            return
+        path = Path(value).expanduser()
+        if path.is_dir():
+            self.errors.append(
+                f"{spec.name} points to a directory, expected a file: {value}"
+            )
+        elif not path.parent.exists():
             self.warnings.append(
-                f"{env_var} points to existing file, expected directory: {path}"
+                f"{spec.name} parent directory does not exist: {path.parent}"
+            )
+
+    def _validate_dir_path(self, spec: Spec, value: str) -> None:
+        if self._empty_path(spec, value):
+            return
+        path = Path(value).expanduser()
+        if path.exists() and not path.is_dir():
+            self.errors.append(
+                f"{spec.name} points to an existing file, expected a directory: {value}"
+            )
+        elif not path.exists() and not path.parent.exists():
+            self.warnings.append(
+                f"{spec.name} parent directory does not exist: {path.parent}"
+            )
+
+    def _validate_log_level(self, spec: Spec, value: str) -> None:
+        if value.strip().upper() not in LOG_LEVELS:
+            self.errors.append(
+                f"{spec.name} must be one of: {', '.join(sorted(LOG_LEVELS))}, "
+                f"got: {value!r}"
             )
 
     def _is_valid_hostname(self, hostname: str) -> bool:
         """Check if hostname is roughly valid."""
-        if len(hostname) > 253:
+        if not hostname or len(hostname) > 253:
             return False
-        if hostname.startswith(".") or hostname.endswith("."):
+        if hostname.startswith("."):
             return False
         allowed = set(
-            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-"
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]"
         )
         return all(c in allowed for c in hostname)
 
-    def _report_results(self):
+    def _report_results(self) -> None:
         """Report validation results."""
         print()
         print("=" * 60)
@@ -379,15 +415,54 @@ class ConfigValidator:
             print("❌ Configuration validation failed")
 
         print()
-        print("💡 TIP: See config/example.env for configuration examples")
-        print("📖 DOC: See docs/ directory for detailed documentation")
+        print("💡 TIP: See config/example.env for every variable and its default")
+        print("📖 DOC: See docs/configuration.md for types, ranges and defaults")
 
 
-def main():
+def collect_values(env_file: Path | None) -> tuple[dict[str, str], str]:
+    """Gather the settings to check, and describe where they came from."""
+    relevant = KNOWN_NAMES | set(IGNORED_NAMES)
+    values: dict[str, str] = {}
+    sources: list[str] = []
+
+    if env_file is not None:
+        values.update(parse_env_file(env_file))
+        sources.append(str(env_file))
+
+    # Process environment wins, as it does for pydantic-settings.
+    from_environ = {
+        name: value
+        for name, value in os.environ.items()
+        if name in relevant or name.startswith(("GOPHER_", "GEMINI_"))
+    }
+    if from_environ:
+        values.update(from_environ)
+        sources.append("process environment")
+
+    return values, " + ".join(
+        sources
+    ) if sources else "process environment (nothing set)"
+
+
+def main() -> None:
     """Main entry point."""
-    validator = ConfigValidator()
-    success = validator.validate_all()
-    sys.exit(0 if success else 1)
+    args = sys.argv[1:]
+    if args and args[0] in {"-h", "--help"}:
+        print(__doc__)
+        sys.exit(0)
+
+    env_file: Path | None = None
+    if args:
+        env_file = Path(args[0])
+        if not env_file.is_file():
+            print(f"❌ No such env file: {env_file}")
+            sys.exit(2)
+    elif Path(".env").is_file():
+        env_file = Path(".env")
+
+    values, source = collect_values(env_file)
+    validator = ConfigValidator(values, source)
+    sys.exit(0 if validator.validate_all() else 1)
 
 
 if __name__ == "__main__":

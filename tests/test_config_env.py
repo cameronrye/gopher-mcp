@@ -8,7 +8,12 @@ before validation runs, so only the real env path exercises that seam.
 import pytest
 from pydantic import ValidationError
 
-from gopher_mcp.config import GeminiConfig, GopherConfig
+from gopher_mcp.config import (
+    GeminiConfig,
+    GopherConfig,
+    ServerConfig,
+    configure_logging,
+)
 
 CONFIGS = [(GopherConfig, "GOPHER_"), (GeminiConfig, "GEMINI_")]
 
@@ -166,3 +171,30 @@ class TestZeroCacheTtl:
         config = config_cls()
         assert config.cache_ttl_seconds == 600
         assert config.cache_enabled is True
+
+
+class TestBlankPathIsUnset:
+    """An empty path value in an env file means "leave the default alone"."""
+
+    @pytest.mark.parametrize(
+        ("env_var", "attribute"),
+        [
+            ("GEMINI_TOFU_STORAGE_PATH", "tofu_storage_path"),
+            ("GEMINI_CLIENT_CERTS_STORAGE_PATH", "client_certs_storage_path"),
+        ],
+    )
+    def test_blank_gemini_path_is_none(self, monkeypatch, env_var, attribute):
+        monkeypatch.setenv(env_var, "")
+        assert getattr(GeminiConfig(), attribute) is None
+
+    def test_blank_log_path_does_not_break_logging(self, monkeypatch):
+        """Coerced to Path("."), it reached configure_logging and raised
+        IsADirectoryError, so the server could not start."""
+        monkeypatch.setenv("GOPHER_MCP_LOG_FILE_PATH", "   ")
+        config = ServerConfig()
+        assert config.log_file_path is None
+        configure_logging(config)
+
+    def test_a_real_path_still_parses(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("GOPHER_MCP_LOG_FILE_PATH", str(tmp_path / "server.log"))
+        assert ServerConfig().log_file_path == tmp_path / "server.log"

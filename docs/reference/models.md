@@ -36,9 +36,20 @@ recipes, see the [API Reference](../api-reference.md).
 
 ::: gopher_mcp.models.GeminiRedirectResult
 
-::: gopher_mcp.models.GeminiErrorResult
-
 ::: gopher_mcp.models.GeminiCertificateResult
+
+!!! note "`GeminiErrorResult` is `ErrorResult`"
+    There is no separate Gemini error model: `GeminiErrorResult` is an alias for the `ErrorResult` documented under [Gopher Result Models](#gopher-result-models) above, which both protocols return. Its `error` field is `dict[str, Any]` precisely so a Gemini failure can carry the numeric `status` and the boolean `temporary` beside the `code` and `message`; a Gopher failure omits those keys.
+
+## Trust-Store Tool Results
+
+Returned by the `gemini_trust_list` and `gemini_trust_update` tools. See the
+[API Reference](../api-reference.md#gemini_trust_list) for the recovery
+procedure they support.
+
+::: gopher_mcp.models.TOFUTrustListResult
+
+::: gopher_mcp.models.TOFUTrustUpdateResult
 
 ## Gemtext Document Models
 

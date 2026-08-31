@@ -52,9 +52,11 @@ gopher-mcp --transport sse
 
 ### Example Tool Usage
 
-The server exposes four MCP tools: `gopher_fetch` and `gemini_fetch` for single
-resources, plus `gopher_batch_fetch` and `gemini_batch_fetch` for fetching
-several URLs at once. For example, `gopher_fetch` retrieves any Gopher resource:
+The server exposes six MCP tools: `gopher_fetch` and `gemini_fetch` for single
+resources, `gopher_batch_fetch` and `gemini_batch_fetch` for fetching several
+URLs at once, and `gemini_trust_list` / `gemini_trust_update` for inspecting and
+recovering the Gemini TOFU trust store. For example, `gopher_fetch` retrieves any
+Gopher resource:
 
 ```json
 {

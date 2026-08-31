@@ -7,6 +7,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `robots.txt` support for both protocols, honouring the `gopher-mcp` and
+  generic `*` user-agents (and, optionally, AI-crawler tokens). Gopher fails
+  open when a policy cannot be retrieved; Gemini fails closed, per RFC 9309.
+- Per-host rate limiting and a concurrency cap, **on by default** (60 requests
+  per minute per host, 5 concurrent requests). Requests to the same host are
+  paced, so a batch aimed at a single server is spaced out rather than
+  parallel; batching across several hosts is where the speedup now comes from.
+- Fetch results say whether they came from cache and when the copy was
+  originally fetched, and `gopher_fetch` / `gemini_fetch` take a `refresh`
+  argument that bypasses the cache for one request while still repopulating it.
+  A model can no longer mistake a five-minute-old page for the current one.
+- `gemini_trust_list` and `gemini_trust_update` tools make a legitimate
+  certificate rotation recoverable. Self-signed Gemini certificates are
+  reissued routinely, and until now a rotation produced a `CERTIFICATE_CHANGED`
+  error whose only remedy was hand-editing the TOFU store on disk. Listing is
+  read-only; removing a pin requires naming the fingerprint being replaced, so
+  the tool cannot be used to wave away an unexpected certificate change.
+
+### Security
+
+- Server-controlled text is stripped of control characters before it reaches
+  the model. Gopher menu titles, selectors and hosts, Gemini text and gemtext
+  bodies, and every status-meta string (input prompts, error and certificate
+  messages) could previously carry ANSI/OSC escape sequences; only the Gopher
+  text path was filtered. The latin-1 decode fallback could also synthesise C1
+  control characters from high bytes.
+- A sensitive `input` answer no longer reaches the logs. When the URL built
+  from `url` plus the answer failed validation, the returned and logged
+  pydantic error embedded the tail of the offending value — so the end of a
+  password answered to a status-11 prompt was written to the log file.
+- An allowlist that names no hosts (`" , "`, or `"$A,$B"` with empty shell
+  interpolations) is now a startup error instead of silently meaning "no
+  restriction at all". The same misconfiguration on ports already failed
+  closed, so the two knobs behaved oppositely.
+- DNS resolution runs on its own bounded thread pool. A cancelled lookup leaves
+  its worker parked in the resolver, so a batch naming tarpit hosts could pin
+  every thread in the event loop's shared executor and stall unrelated fetches
+  on both protocols long past their deadlines.
+
+### Fixed
+
+- `GEMINI_DENIED_MIME_TYPES` in its documented comma-separated form crashed the
+  server at startup: the field's annotation made pydantic-settings JSON-decode
+  the value before the parsing validator could run. All three list-valued
+  variables now accept both the comma-separated and JSON-array spellings.
+- The Gemini request timeout is one budget for the whole exchange. It was
+  applied independently to DNS, the handshake, the send and the read — and
+  again to the `robots.txt` probe — so an adversarial server could hold a tool
+  call for many times the configured value.
+- TOFU trust-store persistence no longer runs on the event loop. A
+  cross-process lock, a full store re-read and two `fsync` calls ran inline on
+  every first contact with a host, stalling all in-flight requests; a wedged
+  lock holder in another instance froze the process indefinitely. The lock wait
+  is now bounded.
+- An oversized `robots.txt` is truncated and parsed as RFC 9309 expects. Under
+  Gemini's fail-closed policy it previously made an entire capsule permanently
+  unreachable while re-downloading the file on every request.
+- A bare two-digit Gemini failure status (`51`, valid per the ABNF for 4x/5x/6x
+  replies) is no longer reported as a malformed response, which told the model
+  the server misbehaved instead of that the page was missing.
+- A menu item's type character survives the round trip into `next_url`. A `?`
+  type turned a link into a search against the root selector, and a `#` type
+  discarded the selector entirely.
+- Gemtext links resolve against the request URL. Relative links are the norm in
+  gemtext, so the model was handed targets it could not fetch.
+- An SSRF-blocked target reports as blocked rather than as an unretrievable
+  `robots.txt` that suggests turning robots checking off, and a connect timeout
+  reports as a timeout rather than as a TLS failure.
+- Neither transport can now return a truncated body as complete, or discard a
+  complete response as a timeout, when a response lands exactly on the size cap.
+- Gemini fails over across resolved addresses instead of trying only the first,
+  so a dual-homed capsule whose first address is down is still reachable.
+- A per-host `robots.txt` lock can no longer be swept while coroutines are
+  still queued on it, which let two requests fetch the same policy at once.
+- Extra `#` characters in a gemtext heading stay part of the heading text,
+  bare-CR gemtext is normalised, the Gemini URL length cap no longer counts the
+  CRLF against the spec's 1024 bytes, and text beginning `BM`, `MZ` or `ID3` is
+  no longer classified as binary and withheld from the model.
+
+### Changed
+
+- A cache TTL of `0` disables caching, matching the "0 means off" convention of
+  the neighbouring settings, instead of storing entries that expire before they
+  can ever be served. A port outside 1-65535 in an allowlist is a startup error
+  rather than a configuration that rejects every request at fetch time.
+- The `gopher_fetch` and `gemini_fetch` tool descriptions now state how to
+  submit a type-7 search, what batching does and does not parallelise, and that
+  fetched content is untrusted third-party data.
+- `ErrorResult` and `GeminiErrorResult` are one model; `GeminiErrorResult`
+  remains as an alias. The split had already caused drift — Gopher errors could
+  not carry the integer fields Gemini errors use.
+
+### Removed
+
+- Helpers that no production code called: `guess_mime_type`,
+  `format_gopher_url`, `sanitize_selector` (whose hardcoded 255-character cap
+  contradicted the client's configurable 1024-character limit),
+  `validate_gemini_url_components`, and `TOFUManager.cleanup_expired` /
+  `ClientCertificateManager.cleanup_expired`. `sanitize_display_text` and
+  `resolve_gemini_reference` are now exported from `gopher_mcp.utils`.
+
 ## [0.5.1] - 2026-06-22
 
 ### Security

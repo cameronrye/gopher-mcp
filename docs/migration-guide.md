@@ -13,7 +13,7 @@ The server added comprehensive Gemini protocol support (introduced in v0.2.0) al
 - **Gemini Protocol Support**: Full implementation of Gemini v0.24.1
 - **`gemini_fetch` Tool**: New MCP tool for Gemini protocol access
 - **TLS Security**: Mandatory TLS with TOFU certificate validation
-- **Client Certificates**: Automatic generation and management
+- **Client Certificates**: Scoped storage, attached automatically when present
 - **Gemtext Parser**: Native gemtext parsing with structured output
 - **Dual Caching**: Separate cache systems for each protocol
 
@@ -23,6 +23,51 @@ The server added comprehensive Gemini protocol support (introduced in v0.2.0) al
 - ✅ Existing configuration variables unchanged
 - ✅ No breaking changes to API or behavior
 - ✅ Existing scripts and integrations continue to work
+
+## Public API Changes
+
+These affect code that imports from `gopher_mcp` directly. Nothing here changes
+the MCP tool surface, so MCP clients are unaffected.
+
+### Removed as unused
+
+Importing any of these now raises `ImportError` (or `AttributeError` for the
+methods):
+
+| Removed | Was in |
+|---------|--------|
+| `guess_mime_type` | `gopher_mcp.utils` |
+| `format_gopher_url` | `gopher_mcp.utils` |
+| `validate_gemini_url_components` | `gopher_mcp.utils` |
+| `sanitize_selector` | `gopher_mcp.utils` |
+| `TOFUManager.cleanup_expired` | `gopher_mcp.tofu` |
+| `ClientCertificateManager.cleanup_expired` | `gopher_mcp.client_certs` |
+
+### Added to `gopher_mcp.utils`
+
+| Added | Purpose |
+|-------|---------|
+| `sanitize_display_text` | Strip non-printable characters from server-controlled text before returning it |
+| `resolve_gemini_reference` | Resolve a gemtext link or redirect target against the URL it was fetched from |
+
+### `GeminiErrorResult` is now `ErrorResult`
+
+The two error models were merged. `gopher_mcp.models.GeminiErrorResult` is an
+alias for `ErrorResult`, so `isinstance(x, ErrorResult)` is now true for a Gemini
+error and both spellings import fine. The merged model's `error` field is
+`dict[str, Any]` rather than the old Gopher-only `dict[str, str]` — which is what
+lets a Gemini failure carry the numeric `status` and boolean `temporary`
+alongside `code` and `message`. Code that assumed `dict[str, str]` should read
+`error["code"]` and use `error.get("status")` / `error.get("temporary")`.
+
+### New tools and result fields
+
+- Two tools were added: `gemini_trust_list` and `gemini_trust_update`, with the
+  result models `TOFUTrustListResult` and `TOFUTrustUpdateResult`.
+- Cacheable result models grew `cached`, `cached_at` and `cache_age_seconds`;
+  `gopher_fetch` and `gemini_fetch` grew an optional `refresh` argument, and
+  `GopherClient.fetch` / `GeminiClient.fetch` grew a keyword-only `refresh`.
+  Both are additive.
 
 ## Migration Steps
 
@@ -122,8 +167,8 @@ python scripts/validate-config.py
 | Caching | ✅ | ✅ | Separate cache systems |
 | Host Allowlists | ✅ | ✅ | Independent configuration |
 | Timeout Configuration | ✅ | ✅ | Independent settings |
-| Certificate Validation | N/A | ✅ TOFU | Gemini-specific security |
-| Client Certificates | N/A | ✅ Auto-generated | Gemini-specific feature |
+| Certificate Validation | N/A | ✅ TOFU | Gemini-specific security; inspect and recover with `gemini_trust_list` / `gemini_trust_update` |
+| Client Certificates | N/A | ✅ Scoped storage | Attached automatically when one exists; no MCP tool creates one |
 
 ## Common Migration Scenarios
 

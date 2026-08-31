@@ -25,19 +25,23 @@ The Gemini protocol is a modern, lightweight internet protocol that sits between
 ### Security Features
 
 - ✅ **TOFU (Trust-on-First-Use) certificate validation**
-- ✅ **Client certificate generation and management**
-- ✅ **Scope-based certificate isolation**
+- ✅ **Trust-store inspection and recovery tools** (`gemini_trust_list`,
+  `gemini_trust_update`)
+- ✅ **Scope-based client certificate isolation and storage**
 - ✅ **Certificate fingerprint verification**
-- ✅ **Secure certificate storage**
 - ✅ **Host allowlist support**
 
 ### Performance Features
 
-- ✅ **Intelligent response caching**
+- ✅ **Intelligent response caching, with cache provenance on every cacheable
+  result and a per-request `refresh` bypass**
 - ✅ **Async/await architecture**
-- ✅ **Connection pooling and reuse**
+- ✅ **Per-host rate limiting and a concurrency cap**
 - ✅ **Configurable timeouts and limits**
-- ✅ **Memory-efficient streaming**
+- ✅ **Bounded reads that stop at the configured size cap**
+
+Each fetch opens its own TLS connection and closes it afterwards; there is no
+connection pooling or reuse.
 
 ## Usage
 
@@ -49,38 +53,68 @@ result = await gemini_fetch("gemini://geminiprotocol.net/")
 
 # The result will be one of:
 # - GeminiGemtextResult: For gemtext content
-# - GeminiSuccessResult: For other content types
+# - GeminiSuccessResult: For other text content types
+# - GeminiBinaryResult: For binary content (metadata only)
 # - GeminiInputResult: For input requests
 # - GeminiRedirectResult: For redirects
-# - GeminiErrorResult: For errors
+# - GeminiErrorResult: For errors (an alias for the shared ErrorResult)
 # - GeminiCertificateResult: For certificate requests
+
+# Skip the cache for one read when the user wants the current state
+result = await gemini_fetch("gemini://geminiprotocol.net/", refresh=True)
 ```
+
+### Cache Provenance
+
+The cacheable result kinds — `gemtext`, `success` and `binary` — carry three
+extra fields so a replay is never mistaken for a live fetch:
+
+| Field | Meaning |
+|-------|---------|
+| `cached` | `true` when the result came from the local cache rather than the server |
+| `cached_at` | UNIX timestamp at which that copy was fetched (`null` when `cached` is `false`) |
+| `cache_age_seconds` | Age of that copy, in seconds, at the moment it was returned (`null` when `cached` is `false`) |
+
+Input prompts, redirects, certificate prompts and errors are never cached and do
+not carry these fields. Pass `refresh=True` to `gemini_fetch` to bypass the cache
+for a single request — the fresh response still repopulates the entry.
 
 ### Response Types
 
 #### GeminiGemtextResult
 
-For `text/gemini` content, returns a structured document:
+For `text/gemini` content, returns a structured document. Each line carries only
+the structured field matching its type, and link references are resolved against
+the URL the document was fetched from, so every `url` handed back is absolute and
+directly fetchable — a source line of `=> /about.gmi About` becomes
+`gemini://example.org/about.gmi`:
 
 ```json
 {
   "kind": "gemtext",
   "document": {
     "lines": [
-      {"type": "heading1", "text": "Welcome to Gemini"},
-      {"type": "text", "text": "This is a paragraph."},
-      {"type": "link", "url": "gemini://example.org/", "text": "Example Link"}
+      {
+        "type": "heading1",
+        "content": "# Welcome to Gemini",
+        "level": 1,
+        "heading": {"level": 1, "text": "Welcome to Gemini", "raw_content": "# Welcome to Gemini"}
+      },
+      {"type": "text", "content": "This is a paragraph."},
+      {
+        "type": "link",
+        "content": "=> /about.gmi About",
+        "link": {"url": "gemini://example.org/about.gmi", "text": "About"}
+      }
     ],
     "links": [
-      {"url": "gemini://example.org/", "text": "Example Link", "line_number": 3}
-    ],
-    "headings": [
-      {"level": 1, "text": "Welcome to Gemini", "line_number": 1}
+      {"url": "gemini://example.org/about.gmi", "text": "About"}
     ]
   },
-  "raw_content": "# Welcome to Gemini\nThis is a paragraph.\n=> gemini://example.org/ Example Link",
+  "raw_content": "# Welcome to Gemini\nThis is a paragraph.\n=> /about.gmi About",
   "charset": "utf-8",
-  "size": 67
+  "size": 63,
+  "truncated": false
 }
 ```
 
@@ -92,15 +126,14 @@ For non-gemtext **text** content (e.g. `text/plain`):
 {
   "kind": "success",
   "mime_type": {
-    "full_type": "text/plain",
-    "main_type": "text",
-    "sub_type": "plain",
+    "type": "text",
+    "subtype": "plain",
     "charset": "utf-8",
-    "is_text": true,
-    "is_gemtext": false
+    "lang": null
   },
   "content": "Plain text content here",
-  "size": 23
+  "size": 23,
+  "truncated": false
 }
 ```
 
@@ -114,11 +147,10 @@ resource directly if you need the bytes.
 {
   "kind": "binary",
   "mime_type": {
-    "full_type": "image/png",
-    "main_type": "image",
-    "sub_type": "png",
-    "is_text": false,
-    "is_gemtext": false
+    "type": "image",
+    "subtype": "png",
+    "charset": "utf-8",
+    "lang": null
   },
   "size": 1048576,
   "note": "Binary content not returned to preserve context"
@@ -139,50 +171,118 @@ For input requests (status 10-11):
 
 #### GeminiRedirectResult
 
-For redirects (status 30-31):
+For redirects (status 30-31). The target is resolved against the request URL, so
+`new_url` is absolute even when the server sent a relative reference:
 
 ```json
 {
   "kind": "redirect",
-  "url": "gemini://newlocation.example.org/",
+  "new_url": "gemini://newlocation.example.org/",
   "permanent": false
 }
 ```
 
 #### GeminiErrorResult
 
-For errors (status 40-69):
+For errors (status 40-59), and for failures raised on this side of the wire.
+`GeminiErrorResult` is an **alias for `ErrorResult`**, the single error model both
+protocols return — its `error` object is `dict[str, Any]`, which is what lets a
+Gemini failure carry the numeric `status` and the boolean `temporary` that a
+Gopher failure has no use for. The machine-readable `code` is always present;
+`status` and `temporary` appear only when the server actually answered:
 
 ```json
 {
   "kind": "error",
-  "status": 51,
-  "message": "Not found",
-  "is_temporary": false,
-  "is_server_error": true
+  "error": {
+    "code": "PERMANENT_ERROR",
+    "message": "Not found",
+    "status": 51,
+    "temporary": false
+  },
+  "request_info": {}
 }
 ```
+
+##### Error codes
+
+| `code` | Meaning |
+|--------|---------|
+| `TEMPORARY_ERROR` | Server answered with status 40-49; `temporary` is `true` |
+| `PERMANENT_ERROR` | Server answered with status 50-59; `temporary` is `false` |
+| `INVALID_REQUEST` | The URL failed validation (bad scheme, over-long, host not in the allowlist, port out of range) |
+| `INVALID_STATUS` | Defensive fallback for a status outside 10-69; a malformed or out-of-range status on the wire is reported as `PROTOCOL_ERROR` |
+| `INVALID_REDIRECT` | A 3x response with a missing target, or one pointing at the URL just requested (a one-hop loop) |
+| `PROTOCOL_ERROR` | The server's response was malformed (missing CRLF, unparseable status, over-long `META`) |
+| `CONTENT_FILTERED` | The response MIME type matched `GEMINI_DENIED_MIME_TYPES` |
+| `TLS_ERROR` | The TLS connection or handshake failed |
+| `CERTIFICATE_CHANGED` | The certificate does not match the fingerprint pinned for this host |
+| `CERTIFICATE_EXPIRED` | The certificate matches the pin but is outside its validity window (`GEMINI_TOFU_REJECT_EXPIRED=true`) |
+| `CERTIFICATE_UNVERIFIED` | No fingerprint was available to compare against, so the peer could not be authenticated |
+| `CERTIFICATE_STORE_UNAVAILABLE` | The TOFU trust store was locked by another process, so the certificate could not be recorded. The certificate itself was never in question — retry once the other process releases the store |
+| `BLOCKED` | The SSRF guard refused the target (loopback, private range, or a disallowed port) |
+| `BLOCKED_BY_ROBOTS` | `GEMINI_RESPECT_ROBOTS_TXT` is on and the capsule disallows this resource, or its policy could not be retrieved |
+| `FETCH_ERROR` | The request timed out, or an unexpected internal failure occurred |
 
 ## Security
 
 ### TOFU Certificate Validation
 
-The client implements Trust-on-First-Use (TOFU) certificate validation:
+Gemini has no certificate authorities, and this client's TLS layer performs no
+CA-chain or hostname verification, so the pinned fingerprint is the only thing
+that authenticates a Gemini server:
 
 1. **First connection**: Certificate fingerprint is stored
-2. **Subsequent connections**: Fingerprint is verified against stored value
-3. **Certificate changes**: User intervention required (in MCP context, this means an error)
+2. **Subsequent connections**: Fingerprint is verified against the stored value
+3. **Certificate changes**: the fetch fails with `CERTIFICATE_CHANGED`, and
+   changing the pin is a deliberate, user-confirmed step (below)
 
 TOFU data is stored in `~/.gemini/tofu.json` by default.
 
+#### Inspecting and recovering the trust store
+
+Two MCP tools operate on the store, and neither touches the network:
+
+- **`gemini_trust_list`** — read-only. Reports the pinned certificates,
+  optionally filtered to one `host`: fingerprint, port, first/last seen, and
+  expiry. It changes nothing, so a client may run it freely.
+- **`gemini_trust_update`** — marked **destructive**. Removes (`action="remove"`)
+  or replaces (`action="pin"`) the pin of exactly one named `host`, at one
+  `port`. There is no wildcard form.
+
+Self-signed certificates in Geminispace are reissued routinely, usually at
+expiry, so a `CERTIFICATE_CHANGED` failure is often a legitimate rotation. It is
+also indistinguishable from an active machine-in-the-middle attack. The pin is
+therefore only ever changed after the user confirms the new certificate is
+expected — ideally by checking its fingerprint with the operator or another
+device, and never on the say-so of a fetched page, which is untrusted data.
+
+Two properties keep the destructive tool from becoming a reflex:
+
+- For `action="remove"` the caller must pass the fingerprint **currently
+  pinned** — the value `gemini_trust_list` reports. A mismatch returns
+  `FINGERPRINT_MISMATCH` and changes nothing, so a pin cannot be dropped
+  without naming what is being dropped.
+- Only the named host is affected, and only the named host is reported back, so
+  a modification can never enumerate the rest of the store.
+
+This is the supported alternative to hand-editing `~/.gemini/tofu.json`, which
+takes no lock (and so can lose a concurrent writer's pins) and makes it easy to
+clear more trust than intended. Step-by-step guidance is in
+[Gemini Troubleshooting](gemini-troubleshooting.md#problem-tofu-fingerprint-mismatch).
+
+If `GEMINI_TOFU_ENABLED=false` there is no store at all, both tools return
+`TOFU_DISABLED`, and Gemini connections are unauthenticated.
+
 ### Client Certificates
 
-The client supports automatic client certificate generation and management:
+Client certificates are scoped per host, port and path, stored under
+`~/.gemini/certs/` with owner-only permissions, and reused for the same scope. A
+certificate that already covers the requested scope is attached to the TLS
+connection automatically when `GEMINI_CLIENT_CERTS_ENABLED=true` (the default).
 
-1. **Scope-based isolation**: Certificates are generated per hostname or path scope
-2. **Automatic generation**: Certificates are created on-demand when requested
-3. **Secure storage**: Private keys are stored securely in `~/.gemini/certs/`
-4. **Certificate reuse**: Same certificate is used for the same scope
+!!! warning "Nothing in the MCP surface generates a client certificate"
+    The fetch path only *looks up* a certificate for the requested scope; it never creates one, and `GeminiClient.generate_client_certificate()` is exposed by no MCP tool. A capsule answering **status 60 (certificate required)** therefore cannot be satisfied through the MCP tools — retrying returns status 60 again. Report the requirement to the user, or reach the resource with a standalone Gemini client. Embedders using this package as a library can call `generate_client_certificate(host, port, path)` themselves, after which the fetch path picks the certificate up for that scope.
 
 ### Host Allowlists
 
@@ -192,6 +292,17 @@ Configure allowed hosts for additional security:
 export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se,kennedy.gemi.dev"
 ```
 
+### Fetched Content Is Untrusted
+
+Everything a capsule sends — page bodies, gemtext link labels, the `META` string
+of an input prompt, certificate message or error — is third-party data, not
+instruction. It is stripped of non-printable characters (ANSI escape sequences,
+NUL, and other C0/C1 controls) before it reaches the client, so the returned text
+is not a byte-exact copy of what the server sent: `size` still reports the
+original byte count, but terminal-injection sequences are gone. Newlines, tabs
+and carriage returns survive in multi-line bodies, where line structure carries
+meaning; in single-field values such as a `META` they are dropped as noise.
+
 ## Configuration
 
 ### Environment Variables
@@ -199,11 +310,12 @@ export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se,kennedy.gemi.dev"
 | Variable | Description | Default | Example |
 |----------|-------------|---------|---------|
 | `GEMINI_MAX_RESPONSE_SIZE` | Maximum response size in bytes | `1048576` | `2097152` |
-| `GEMINI_TIMEOUT_SECONDS` | Request timeout in seconds | `30` | `60` |
+| `GEMINI_TIMEOUT_SECONDS` | Overall wire-time budget for one fetch, shared with the robots.txt probe | `30` | `60` |
 | `GEMINI_CACHE_ENABLED` | Enable response caching | `true` | `false` |
-| `GEMINI_CACHE_TTL_SECONDS` | Cache time-to-live in seconds | `300` | `600` |
+| `GEMINI_CACHE_TTL_SECONDS` | Cache time-to-live in seconds (`0` disables caching) | `300` | `600` |
 | `GEMINI_MAX_CACHE_ENTRIES` | Maximum cache entries | `1000` | `2000` |
-| `GEMINI_ALLOWED_HOSTS` | Comma-separated allowed hosts | `None` | `example.org,test.org` |
+| `GEMINI_ALLOWED_HOSTS` | Allowed hosts, comma-separated or a JSON array; a value naming none is a startup error | unset | `example.org,test.org` |
+| `GEMINI_ALLOWED_PORTS` | Allowed ports, same spellings; entries must be within `1`-`65535` | unset | `1965` |
 | `GEMINI_TOFU_ENABLED` | Enable TOFU certificate validation | `true` | `false` |
 | `GEMINI_TOFU_REJECT_EXPIRED` | Fail closed on certificates outside their validity window | `false` | `true` |
 | `GEMINI_CLIENT_CERTS_ENABLED` | Enable automatic client certificate management | `true` | `false` |
@@ -212,8 +324,8 @@ export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se,kennedy.gemi.dev"
 | `GEMINI_MAX_RENDERED_CHARS` | LLM-facing cap on returned text characters (0 = unlimited) | `50000` | `100000` |
 | `GEMINI_REQUESTS_PER_MINUTE` | Per-host request rate cap (0 = unlimited) | `60` | `30` |
 | `GEMINI_MAX_CONCURRENT_REQUESTS` | Cap on simultaneous in-flight fetches (0 = unlimited) | `5` | `2` |
-| `GEMINI_DENIED_MIME_TYPES` | Comma-separated MIME deny list (supports `type/*`) | Empty | `text/html,image/*` |
-| `GEMINI_RESPECT_ROBOTS_TXT` | Honour `/robots.txt` from the capsule root | `false` | `true` |
+| `GEMINI_DENIED_MIME_TYPES` | MIME deny list, comma-separated or a JSON array (supports `type/*`) | Empty | `text/html,image/*` |
+| `GEMINI_RESPECT_ROBOTS_TXT` | Honour `/robots.txt` from the capsule root; an over-cap policy is truncated and parsed | `false` | `true` |
 | `GEMINI_ROBOTS_CACHE_TTL_SECONDS` | Lifetime of a cached robots policy, in seconds | `86400` | `3600` |
 | `GEMINI_ROBOTS_HONOR_AI_TOKENS` | Also honour rules naming AI crawler tokens | `true` | `false` |
 
@@ -224,8 +336,9 @@ from gopher_mcp.gemini_client import GeminiClient
 
 # Custom client configuration. TLS 1.2 is the enforced minimum (TLS 1.2 and
 # 1.3 are supported) and server trust is handled by TOFU, so there are no TLS
-# version or hostname-verification knobs. Client certificates are generated
-# and managed automatically when client_certs_enabled is True.
+# version or hostname-verification knobs. client_certs_enabled turns on storage
+# and automatic attachment of scoped client certificates; creating one is a
+# separate, explicit call to client.generate_client_certificate().
 client = GeminiClient(
     max_response_size=2 * 1024 * 1024,  # 2MB
     timeout_seconds=60.0,

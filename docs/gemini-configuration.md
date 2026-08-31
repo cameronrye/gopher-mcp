@@ -18,8 +18,13 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: Float (seconds)
 - **Default**: `30.0`
-- **Range**: `1.0` - `300.0`
-- **Description**: Request timeout for Gemini connections
+- **Range**: greater than `0` up to `300.0`
+- **Description**: One wire-time budget for an entire fetch, not a per-phase
+  timeout: DNS resolution, connect and TLS handshake, the TOFU trust-store
+  write, sending the request and reading the response all draw down the same
+  deadline, so a slow server cannot spend the full value on each phase in turn.
+  When `GEMINI_RESPECT_ROBOTS_TXT` is enabled, the `/robots.txt` probe shares
+  that budget with the fetch it guards rather than getting one of its own.
 - **Example**: `GEMINI_TIMEOUT_SECONDS=60.0`
 
 ### Caching Configuration
@@ -36,8 +41,13 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: Integer (seconds)
 - **Default**: `300` (5 minutes)
-- **Range**: `1` - `86400` (1 second - 24 hours)
-- **Description**: Time-to-live for cached Gemini responses
+- **Range**: `0` - `86400` (up to 24 hours)
+- **Description**: Time-to-live for cached Gemini responses. `0` turns caching
+  off entirely — every entry would expire the instant it was stored, so the
+  cache is disabled rather than filled with unusable entries. A longer TTL does
+  not hide staleness from the caller: every cacheable result reports `cached`,
+  `cached_at` and `cache_age_seconds`, and `gemini_fetch` takes `refresh` to
+  bypass the cache for one request.
 - **Example**: `GEMINI_CACHE_TTL_SECONDS=600`
 
 #### `GEMINI_MAX_CACHE_ENTRIES`
@@ -52,10 +62,24 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 #### `GEMINI_ALLOWED_HOSTS`
 
-- **Type**: String (comma-separated)
-- **Default**: Empty (all hosts allowed)
-- **Description**: Comma-separated list of allowed Gemini hosts
+- **Type**: String (comma-separated, or a JSON array such as `["a", "b"]`)
+- **Default**: Unset (all hosts allowed)
+- **Description**: Hosts this client may connect to. Whitespace around each
+  entry is ignored. A value that is set but names no hosts — `" , "`, or
+  `"$A,$B"` with empty interpolations — is refused at startup rather than read
+  as "no restriction"; unset the variable to allow all hosts.
 - **Example**: `GEMINI_ALLOWED_HOSTS=geminiprotocol.net,warmedal.se,kennedy.gemi.dev`
+
+#### `GEMINI_ALLOWED_PORTS`
+
+- **Type**: String (comma-separated, or a JSON array such as `[1965, 1966]`)
+- **Default**: Unset (any non-dangerous port)
+- **Description**: Positive port allowlist. When set, only these ports may be
+  connected to, closing the arbitrary-port port-scanning gap. As with the host
+  allowlist, a value naming no ports is refused at startup; so is any port
+  outside `1`–`65535`, which could never match a request and would otherwise
+  reject every fetch at runtime.
+- **Example**: `GEMINI_ALLOWED_PORTS=1965`
 
 #### `GEMINI_ALLOW_LOCAL_HOSTS`
 
@@ -68,7 +92,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: Boolean
 - **Default**: `true`
-- **Description**: Enable Trust-on-First-Use certificate validation. Gemini TLS runs without CA-chain validation, so TOFU is the only peer authentication; disabling it leaves connections unauthenticated and MITM-able.
+- **Description**: Enable Trust-on-First-Use certificate validation. Gemini TLS runs without CA-chain validation, so TOFU is the only peer authentication; disabling it leaves connections unauthenticated and MITM-able. With it off there is also no trust store, and the `gemini_trust_list` / `gemini_trust_update` tools return `TOFU_DISABLED`.
 - **Example**: `GEMINI_TOFU_ENABLED=true`
 
 #### `GEMINI_TOFU_REJECT_EXPIRED`
@@ -82,7 +106,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: Boolean
 - **Default**: `true`
-- **Description**: Enable automatic client certificate generation and management. Certificates are created and reused per host/path scope on demand; you do not supply cert/key files yourself.
+- **Description**: Enable client certificate storage and automatic attachment. A certificate that already covers the requested host/port/path scope is attached to the connection; you do not supply cert/key files yourself. It does **not** create certificates: nothing in the MCP tool surface does, so a capsule answering status 60 cannot be satisfied through the tools (see [Client Certificate Issues](gemini-troubleshooting.md#client-certificate-issues)).
 - **Example**: `GEMINI_CLIENT_CERTS_ENABLED=true`
 
 ### Storage Configuration
@@ -98,7 +122,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: String (directory path)
 - **Default**: `~/.gemini/certs/`
-- **Description**: Directory where automatically generated client certificates and their private keys are stored. The directory is created with owner-only (`700`) permissions.
+- **Description**: Directory where client certificates and their private keys are stored, scoped per host/port/path. The directory is created with owner-only (`700`) permissions. Nothing in the MCP tool surface writes certificates here, so the directory stays empty unless an embedder calls `GeminiClient.generate_client_certificate()`.
 - **Example**: `GEMINI_CLIENT_CERTS_STORAGE_PATH=/custom/path/certs/`
 
 ### Content and Rate Limiting
@@ -129,7 +153,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 #### `GEMINI_DENIED_MIME_TYPES`
 
-- **Type**: String (comma-separated)
+- **Type**: String (comma-separated, or a JSON array such as `["text/html"]`)
 - **Default**: Empty (no content filtering)
 - **Description**: MIME types, or `type/*` wildcards, to reject as filtered content. Empty means no content filtering.
 - **Example**: `GEMINI_DENIED_MIME_TYPES=text/html,image/*`
@@ -140,7 +164,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: Boolean
 - **Default**: `false`
-- **Description**: Fetch and honour `/robots.txt` from the capsule root before retrieving a resource, following the [Gemini companion specification](https://geminiprotocol.net/docs/companion/robots.gmi) (virtual agents `webproxy` and `indexer`, plus `*`, alongside `gopher-mcp`). Off by default because it adds a round-trip per host. **Fails closed** on a temporary (4x) robots fetch failure; `51 NOT FOUND` means "no policy".
+- **Description**: Fetch and honour `/robots.txt` from the capsule root before retrieving a resource, following the [Gemini companion specification](https://geminiprotocol.net/docs/companion/robots.gmi) (virtual agents `webproxy` and `indexer`, plus `*`, alongside `gopher-mcp`). Off by default because it adds a round-trip per host, and the probe spends from the same `GEMINI_TIMEOUT_SECONDS` budget as the fetch it guards. **Fails closed** on a temporary (4x) robots fetch failure; `51 NOT FOUND` means "no policy". A policy larger than the 500 KB read cap is truncated at the last complete line and parsed (RFC 9309 section 2.5) rather than treated as unavailable. A target the SSRF guard refuses is reported as `BLOCKED`, not as an unreachable robots.txt — disabling robots checking would not make it reachable.
 - **Example**: `GEMINI_RESPECT_ROBOTS_TXT=true`
 
 #### `GEMINI_ROBOTS_CACHE_TTL_SECONDS`
@@ -218,19 +242,23 @@ GEMINI_MAX_CONCURRENT_REQUESTS=20
 Use the built-in configuration validation script:
 
 ```bash
-# Validate current configuration
+# Validate the configuration in the environment
 python scripts/validate-config.py
 
-# Or use the task runner
-uv run task validate-config
+# Or validate a specific env file without exporting it
+python scripts/validate-config.py config/example.env
 ```
 
 The validator checks:
 
-- Value ranges and types
-- File path existence
+- Value ranges and types, against the bounds the server itself enforces
 - Boolean value formats
-- Host list formatting
+- List-valued variables in both spellings (comma-separated and JSON array),
+  including the fail-closed rules: a value naming no entries, or a port outside
+  `1`-`65535`, is a startup error
+- Storage paths and log-file directories
+- Variables that look like configuration but are **not** read by the server
+  (unprefixed names, and settings that never existed such as `GEMINI_TLS_VERSION`)
 
 ## Security Considerations
 
@@ -263,20 +291,35 @@ The validator checks:
    Solution: Use true/false, 1/0, yes/no, on/off
    ```
 
-2. **File Path Issues**
+2. **Allowlist That Names Nothing**
+
+   ```
+   Error: GEMINI_ALLOWED_HOSTS is set to ' , ' but names no hosts; unset it to allow all hosts.
+   Solution: Remove the variable, or give it at least one host
+   ```
+
+3. **File Path Issues**
 
    ```
    Error: TOFU storage directory not writable
    Solution: Check directory permissions and ownership
    ```
 
-3. **TOFU Certificate Mismatch**
+4. **TOFU Certificate Mismatch**
 
    ```
-   Error: TOFU validation failed: certificate fingerprint changed
-   Solution: Confirm the server legitimately rotated its certificate, then remove the
-   stale host entry from ~/.gemini/tofu.json (or delete the file to re-pin on next use)
+   Error [CERTIFICATE_CHANGED]: Server certificate failed TOFU verification
+   Solution: Inspect the pin with the gemini_trust_list tool, confirm out of band
+   that the server legitimately rotated its certificate, then drop or replace that
+   one host's pin with gemini_trust_update
    ```
+
+   A fingerprint change is routine at expiry and is also what an active
+   machine-in-the-middle attack looks like — the two are indistinguishable from
+   the client, so confirm before changing a pin. Full procedure:
+   [Gemini Troubleshooting](gemini-troubleshooting.md#problem-tofu-fingerprint-mismatch).
+   Editing `~/.gemini/tofu.json` by hand still works but takes no lock and makes
+   it easy to clear more trust than intended; prefer the tools.
 
 ### Diagnostic Commands
 

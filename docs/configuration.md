@@ -22,7 +22,25 @@ Settings are grouped into three namespaces, each with its own prefix:
     Boolean values must be exactly `true` or `false`.
 
 `config/example.env` in the repository lists every variable with its default and
-is the most convenient starting point.
+is the most convenient starting point. As shipped it is a no-op: every value in
+it is the default, so copying it to `.env` changes nothing until you edit it.
+
+!!! warning "Path variables must be commented out, not left empty"
+    `GEMINI_TOFU_STORAGE_PATH=`, `GEMINI_CLIENT_CERTS_STORAGE_PATH=` and `GOPHER_MCP_LOG_FILE_PATH=` are read as the path `.`, **not** as "unset" — the server would then treat the current directory as the trust store, the certificate directory, or the log file. Comment those three variables out to use their defaults. This does not apply to the list-valued variables, where an empty value correctly means "no restriction".
+
+### List-valued variables
+
+`*_ALLOWED_HOSTS`, `*_ALLOWED_PORTS` and `GEMINI_DENIED_MIME_TYPES` accept either
+the comma-separated form (`a,b`) or a JSON array (`["a", "b"]`). Surrounding
+whitespace on each entry is stripped, so `a, b` and `a,b` are equivalent.
+
+Leave a list variable **unset** (or set it to the empty string) to mean "no
+restriction". A value that is present but names no entries — `" , "`, or
+`"$A,$B"` where both shell variables are empty — is a **startup error** naming
+the variable, because an empty allowlist is indistinguishable from an absent one
+and would silently drop the restriction you meant to apply. A port outside
+`1`–`65535` in an allowlist is a startup error for the same reason: it could
+never match a request, so every fetch would be refused at runtime instead.
 
 ## Configuration Methods
 
@@ -72,20 +90,20 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `GOPHER_MAX_RESPONSE_SIZE` | Integer (bytes) | `1048576` (1 MB) | Maximum response size. Validated to 1 KB – 100 MB. |
-| `GOPHER_TIMEOUT_SECONDS` | Float (seconds) | `30.0` | Request timeout (max 300). |
+| `GOPHER_TIMEOUT_SECONDS` | Float (seconds) | `30.0` | Overall deadline for one fetch, covering DNS, connect, send and read (max 300). |
 | `GOPHER_CACHE_ENABLED` | Boolean | `true` | Enable response caching. |
-| `GOPHER_CACHE_TTL_SECONDS` | Integer (seconds) | `300` | How long cached responses stay valid (max 86400). |
+| `GOPHER_CACHE_TTL_SECONDS` | Integer (seconds) | `300` | How long cached responses stay valid (max 86400). `0` disables caching, since every entry would expire the instant it was stored. |
 | `GOPHER_MAX_CACHE_ENTRIES` | Integer | `1000` | Maximum cached entries (LRU eviction). |
-| `GOPHER_ALLOWED_HOSTS` | Comma-separated | empty (all) | Restrict connections to these hosts. |
+| `GOPHER_ALLOWED_HOSTS` | Comma-separated or JSON array | unset (all) | Restrict connections to these hosts. A value naming no hosts is rejected at startup. |
 | `GOPHER_ALLOW_LOCAL_HOSTS` | Boolean | `false` | Allow loopback/private hosts (disables SSRF protection). |
-| `GOPHER_ALLOWED_PORTS` | Comma-separated | empty (any) | Optional positive port allowlist. When set, only these ports may be connected to (closes the arbitrary-port port-scanning gap). |
+| `GOPHER_ALLOWED_PORTS` | Comma-separated or JSON array | unset (any) | Optional positive port allowlist. When set, only these ports may be connected to (closes the arbitrary-port port-scanning gap). A value naming no ports, or a port outside `1`–`65535`, is rejected at startup. |
 | `GOPHER_MAX_SELECTOR_LENGTH` | Integer | `1024` | Maximum Gopher selector length. |
 | `GOPHER_MAX_SEARCH_LENGTH` | Integer | `256` | Maximum search query length. |
 | `GOPHER_MAX_RENDERED_CHARS` | Integer | `50000` | Maximum characters of rendered text returned to the model (longer output is truncated and flagged). |
 | `GOPHER_MAX_MENU_ITEMS` | Integer | `1000` | Maximum Gopher menu items returned to the model (`0` = unlimited; larger menus are truncated and flagged). |
 | `GOPHER_REQUESTS_PER_MINUTE` | Float | `60` | Per-host outbound rate limit; `0` disables it. |
 | `GOPHER_MAX_CONCURRENT_REQUESTS` | Integer | `5` | Maximum concurrent requests; `0` is unlimited. |
-| `GOPHER_RESPECT_ROBOTS_TXT` | Boolean | `false` | Fetch and honour `/robots.txt` from the host root, per the convention Veronica-2 documents. Fails open: Gopher has no status codes, so an unreachable policy cannot be distinguished from an absent one. |
+| `GOPHER_RESPECT_ROBOTS_TXT` | Boolean | `false` | Fetch and honour `/robots.txt` from the host root, per the convention Veronica-2 documents. Fails open: Gopher has no status codes, so an unreachable policy cannot be distinguished from an absent one. A policy larger than the 500 KB cap is truncated at the last complete line and parsed (RFC 9309 section 2.5). |
 | `GOPHER_ROBOTS_CACHE_TTL_SECONDS` | Integer | `86400` | Lifetime of a cached robots policy (max `604800`). |
 | `GOPHER_ROBOTS_HONOR_AI_TOKENS` | Boolean | `true` | Also honour rules naming AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). |
 
@@ -94,14 +112,14 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | Variable | Type | Default | Description |
 |----------|------|---------|-------------|
 | `GEMINI_MAX_RESPONSE_SIZE` | Integer (bytes) | `1048576` (1 MB) | Maximum response size. Validated to 1 KB – 100 MB. |
-| `GEMINI_TIMEOUT_SECONDS` | Float (seconds) | `30.0` | Request timeout (max 300). |
+| `GEMINI_TIMEOUT_SECONDS` | Float (seconds) | `30.0` | One wire-time budget for the whole fetch — DNS, connect and handshake, trust-store write, send and read — not a per-phase timeout (max 300). When robots checking is on, the `/robots.txt` probe spends from the same budget. |
 | `GEMINI_CACHE_ENABLED` | Boolean | `true` | Enable response caching. |
-| `GEMINI_CACHE_TTL_SECONDS` | Integer (seconds) | `300` | How long cached responses stay valid (max 86400). |
+| `GEMINI_CACHE_TTL_SECONDS` | Integer (seconds) | `300` | How long cached responses stay valid (max 86400). `0` disables caching, since every entry would expire the instant it was stored. |
 | `GEMINI_MAX_CACHE_ENTRIES` | Integer | `1000` | Maximum cached entries (LRU eviction). |
-| `GEMINI_ALLOWED_HOSTS` | Comma-separated | empty (all) | Restrict connections to these hosts. |
+| `GEMINI_ALLOWED_HOSTS` | Comma-separated or JSON array | unset (all) | Restrict connections to these hosts. A value naming no hosts is rejected at startup. |
 | `GEMINI_ALLOW_LOCAL_HOSTS` | Boolean | `false` | Allow loopback/private hosts (disables SSRF protection). |
-| `GEMINI_ALLOWED_PORTS` | Comma-separated | empty (any) | Optional positive port allowlist. When set, only these ports may be connected to (closes the arbitrary-port port-scanning gap). |
-| `GEMINI_TOFU_ENABLED` | Boolean | `true` | Enable Trust-on-First-Use certificate validation. |
+| `GEMINI_ALLOWED_PORTS` | Comma-separated or JSON array | unset (any) | Optional positive port allowlist. When set, only these ports may be connected to (closes the arbitrary-port port-scanning gap). A value naming no ports, or a port outside `1`–`65535`, is rejected at startup. |
+| `GEMINI_TOFU_ENABLED` | Boolean | `true` | Enable Trust-on-First-Use certificate validation. It is the only peer authentication Gemini has here, so turning it off leaves connections unauthenticated — and leaves the `gemini_trust_list` / `gemini_trust_update` tools with no store to act on (`TOFU_DISABLED`). |
 | `GEMINI_TOFU_STORAGE_PATH` | File path | `~/.gemini/tofu.json` | TOFU trust-store location. |
 | `GEMINI_TOFU_REJECT_EXPIRED` | Boolean | `false` | Fail closed on a certificate outside its validity window. |
 | `GEMINI_CLIENT_CERTS_ENABLED` | Boolean | `true` | Enable automatic per-host client certificates. |
@@ -109,10 +127,10 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GEMINI_MAX_RENDERED_CHARS` | Integer | `50000` | Maximum characters of rendered text returned to the model (longer output is truncated and flagged). |
 | `GEMINI_REQUESTS_PER_MINUTE` | Float | `60` | Per-host outbound rate limit; `0` disables it. Gemini status 44 SLOW_DOWN is always honoured. |
 | `GEMINI_MAX_CONCURRENT_REQUESTS` | Integer | `5` | Maximum concurrent requests; `0` is unlimited. |
-| `GEMINI_RESPECT_ROBOTS_TXT` | Boolean | `false` | Fetch and honour `/robots.txt` from the capsule root, per the Gemini companion specification (virtual agents `webproxy` and `indexer`, plus `*`). Fails closed on a temporary (4x) failure; `51 NOT FOUND` means no policy. |
+| `GEMINI_RESPECT_ROBOTS_TXT` | Boolean | `false` | Fetch and honour `/robots.txt` from the capsule root, per the Gemini companion specification (virtual agents `webproxy` and `indexer`, plus `*`). Fails closed on a temporary (4x) failure; `51 NOT FOUND` means no policy. A policy larger than the 500 KB cap is truncated and parsed (RFC 9309 section 2.5). |
 | `GEMINI_ROBOTS_CACHE_TTL_SECONDS` | Integer | `86400` | Lifetime of a cached robots policy (max `604800`). |
 | `GEMINI_ROBOTS_HONOR_AI_TOKENS` | Boolean | `true` | Also honour rules naming AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). |
-| `GEMINI_DENIED_MIME_TYPES` | Comma-separated | empty | MIME types to reject; supports wildcards like `image/*`. |
+| `GEMINI_DENIED_MIME_TYPES` | Comma-separated or JSON array | empty | MIME types to reject; supports wildcards like `image/*`. |
 
 !!! note "TLS and certificates are not env-configurable"
     Gemini always uses TLS 1.2+ and verifies the server identity via TOFU (the
@@ -145,6 +163,10 @@ GOPHER_MCP_LOG_LEVEL=DEBUG
 GOPHER_CACHE_ENABLED=false
 GEMINI_CACHE_ENABLED=false
 ```
+
+For a one-off fresh read you do not need to disable caching at all: pass
+`refresh: true` to `gopher_fetch` or `gemini_fetch`, and check the `cached` /
+`cache_age_seconds` fields a cacheable result carries.
 
 ### Production
 
@@ -199,18 +221,34 @@ GOPHER_MCP_LOG_LEVEL=INFO
 
 ## Configuration Validation
 
-Use the built-in validation script to check your configuration:
+Use the built-in validation script to check your configuration. It validates the
+variables the server actually reads, against the bounds the server actually
+enforces, and exits non-zero when it finds an error:
 
 ```bash
+# Validate the environment (and ./.env, if present)
 python scripts/validate-config.py
+
+# Or validate a specific env file without exporting it
+python scripts/validate-config.py config/example.env
 ```
 
 Common validation errors:
 
-1. **Invalid size values** — must be positive integers within range
-2. **Invalid timeout values** — must be positive floats within range
-3. **Invalid boolean values** — only `true` or `false` are accepted
-4. **Invalid host lists** — comma-separated, without spaces
+1. **Invalid size values** — must be integers within range
+2. **Invalid timeout values** — must be floats greater than `0`, up to `300`
+3. **Invalid boolean values** — `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`
+4. **Empty allowlists** — a `*_ALLOWED_HOSTS` or `*_ALLOWED_PORTS` value that
+   names no entries is refused at startup; unset the variable instead
+5. **Out-of-range ports** — every entry in a `*_ALLOWED_PORTS` list must be
+   between `1` and `65535`
+6. **Empty path values** — `GEMINI_TOFU_STORAGE_PATH=`,
+   `GEMINI_CLIENT_CERTS_STORAGE_PATH=` and `GOPHER_MCP_LOG_FILE_PATH=` are read
+   as the path `.`; comment them out instead
+
+It also warns about variables that look like settings but are ignored — an
+unprefixed `LOG_LEVEL`, or settings that never existed such as
+`GEMINI_TLS_VERSION`.
 
 ## Environment Variable Precedence
 
