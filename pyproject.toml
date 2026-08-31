@@ -1,5 +1,9 @@
 [build-system]
-requires = ["hatchling"]
+# Pinned deliberately: an unpinned backend is resolved fresh on every `uv build`,
+# so a hatchling release can turn a green repo red with no commit of ours. That
+# happened with 1.32.0, which raised the default core metadata version to 2.5 and
+# broke `twine check` until twine 7. Floor is what we test against.
+requires = ["hatchling>=1.32,<2"]
 build-backend = "hatchling.build"
 
 [project]
@@ -53,7 +57,9 @@ dev = [
     "pre-commit>=3.5.0",
     "bandit>=1.7.5",
     "pip-audit>=2.7.0",
-    "twine>=4.0.0",
+    # 6.x caps core metadata at 2.4 (it monkeypatches packaging), which
+    # rejects the 2.5 metadata hatchling >=1.32 emits.
+    "twine>=7.0.0",
     "hypothesis>=6.100.0",
 ]
 docs = [
