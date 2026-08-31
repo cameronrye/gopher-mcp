@@ -26,9 +26,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error whose only remedy was hand-editing the TOFU store on disk. Listing is
   read-only; removing a pin requires naming the fingerprint being replaced, so
   the tool cannot be used to wave away an unexpected certificate change.
+- `gemini_client_cert_list` and `gemini_client_cert_update` tools make a
+  capsule that replies status 60 reachable. The fetch path only ever looked up
+  an existing client certificate and nothing generated one, so the model
+  retried, got 60 again, and there was no supported way forward. A status-60
+  result now also carries the next step, so the tools are discoverable at the
+  moment they are needed. Creation is never automatic: a client certificate is
+  a persistent pseudonymous identity attached to every in-scope request, so
+  minting one because a server asked would let any capsule make the user
+  identifiable. The scope is the URL that failed and everything below it,
+  creation refuses to replace an identity whose private key is unrecoverable,
+  and removal must name the fingerprint it destroys.
 
 ### Security
 
+- A Gemini client certificate is no longer attached to requests outside its
+  scope. Scope matching ran on the raw request path, so a certificate scoped to
+  `/app` was sent with a request for `/app/../secret` — which the server
+  resolves outside that scope — and a hostile capsule needed only to publish
+  such a link to make the user's identity leak. Paths (including `%2e`-encoded
+  dot segments) are now normalized before any scope decision.
+- Two client certificates minted for the same host within one second no longer
+  share a key pair. Certificate files were named from the host and a
+  whole-second timestamp, so the second write destroyed the first identity's
+  private key unrecoverably and left it reporting a fingerprint no server would
+  ever present. Filenames are now unique per identity and a residual collision
+  fails rather than truncating a key.
 - Server-controlled text is stripped of control characters before it reaches
   the model. Gopher menu titles, selectors and hosts, Gemini text and gemtext
   bodies, and every status-meta string (input prompts, error and certificate
@@ -50,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The `mcp` dependency is capped below 2.x, so `pip install gopher-mcp` yields
+  a server that starts. mcp 2.x renamed `FastMCP` to `MCPServer`, so the
+  unbounded `mcp>=1.0.0` resolved to a release this code cannot import against.
+  CI never saw it, because `uv sync --locked` installs the locked 1.x; a user
+  installing from PyPI got an immediate `ModuleNotFoundError`. Lifting the cap
+  means migrating to the 2.x API.
+- An empty value for an optional path setting is read as unset rather than as
+  the current directory. `GOPHER_MCP_LOG_FILE_PATH=` — the natural way to write
+  "leave this at the default", and how the shipped `config/example.env` had it
+  — became `Path(".")`, which logging then tried to open as a file, so copying
+  the example config stopped the server from starting.
 - `GEMINI_DENIED_MIME_TYPES` in its documented comma-separated form crashed the
   server at startup: the field's annotation made pydantic-settings JSON-decode
   the value before the parsing validator could run. All three list-valued
@@ -109,6 +143,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `validate_gemini_url_components`, and `TOFUManager.cleanup_expired` /
   `ClientCertificateManager.cleanup_expired`. `sanitize_display_text` and
   `resolve_gemini_reference` are now exported from `gopher_mcp.utils`.
+- Embedders using the library directly should note that
+  `ClientCertificateManager` now names certificate files by a random `key_id`
+  rather than by subject, rolls a failed store write back instead of leaving
+  the registry and the disk disagreeing, and raises when a private key survives
+  its removal. `docs/migration-guide.md` covers these.
 
 ## [0.5.1] - 2026-06-22
 
