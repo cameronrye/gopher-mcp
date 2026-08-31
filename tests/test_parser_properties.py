@@ -32,6 +32,7 @@ from gopher_mcp.utils import (
     format_gopher_url,
     parse_gemini_response,
     parse_gemini_url,
+    parse_gemtext,
     parse_gopher_menu,
     parse_gopher_url,
     parse_menu_line,
@@ -48,6 +49,7 @@ PROPERTY = settings(
 )
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_CONTROL_RE_KEEPING_TAB = re.compile(r"[\x00-\x08\x0a-\x1f\x7f]")
 
 # Selector/search characters that survive ``format_gopher_url`` (which does not
 # percent-encode) and round-trip back through ``parse_gopher_url`` (which
@@ -56,6 +58,14 @@ _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 # forbids tab/CR/LF; urlparse strips them anyway).
 _SAFE_SELECTOR_CHARS = "".join(
     c for c in string.printable if c not in "%?# \t\n\r\x0b\x0c"
+)
+# ``format_gopher_url`` and ``parse_menu_line`` percent-encode the selector and
+# search, so the round-trip alphabet is wider: '%', '?', '#' and the space are
+# encoded rather than read as URL syntax. TAB/CR/LF stay out (``sanitize_selector``
+# forbids them) and so do VT/FF, which would decode back to control characters
+# that ``parse_gopher_url`` rejects.
+_ROUND_TRIP_SELECTOR_CHARS = "".join(
+    c for c in string.printable if c not in "\t\n\r\x0b\x0c"
 )
 # Gemini path chars: the gemini parser does NOT percent-decode, so ``%`` is kept
 # verbatim and is allowed. ``?`` (query), ``#`` (fragment) and whitespace
@@ -102,6 +112,21 @@ gopher_types = st.sampled_from("0123456789+gIThicsdp;<MT")
 
 safe_selectors = st.text(alphabet=_SAFE_SELECTOR_CHARS, max_size=64)
 safe_search = st.text(alphabet=_SAFE_SELECTOR_CHARS, min_size=1, max_size=64)
+
+round_trip_selectors = st.text(alphabet=_ROUND_TRIP_SELECTOR_CHARS, max_size=64)
+round_trip_search = st.text(
+    alphabet=_ROUND_TRIP_SELECTOR_CHARS, min_size=1, max_size=64
+)
+
+# Every single character a server can put in the item-type field, including the
+# URL-significant ones ('?', '#', '/', '%') and the control bytes.
+# TAB/CR/LF are the menu line's own framing, so they can never reach the type
+# field; everything else a server can put there is fair game.
+item_types = st.one_of(
+    st.sampled_from("0123456789+gIThicsdp;<MT"),
+    st.sampled_from("?#/%&= ~.\x00\x1b\x7f"),
+    st.characters(blacklist_categories=("Cs",), blacklist_characters="\t\r\n"),
+)
 
 # Every C0 control byte and DEL except TAB (0x09): a percent-encoded ``%09`` is
 # the legitimate type-7 search separator, handled by splitting rather than
@@ -193,8 +218,8 @@ def test_parse_gemini_response_never_crashes(raw: bytes) -> None:
     host=hosts,
     port=st.one_of(st.just(70), st.integers(min_value=1, max_value=65535)),
     gopher_type=gopher_types,
-    selector=safe_selectors,
-    search=st.one_of(st.none(), safe_search),
+    selector=round_trip_selectors,
+    search=st.one_of(st.none(), round_trip_search),
 )
 def test_gopher_url_round_trip(
     host: str,
@@ -234,8 +259,8 @@ def test_gemini_url_round_trip(
 ) -> None:
     path = "/" + path_tail
     url = format_gemini_url(host, port, path, query)
-    # Stay within the spec's request-line bound; ASCII inputs keep this rare.
-    assume(len(url.encode("utf-8")) + len(b"\r\n") <= 1024)
+    # Stay within the spec's 1024-byte <URL> bound; ASCII inputs keep this rare.
+    assume(len(url.encode("utf-8")) <= 1024)
     result = parse_gemini_url(url)
 
     assert result.host == host
@@ -244,9 +269,61 @@ def test_gemini_url_round_trip(
     assert result.query == (query if query else None)
 
 
+@PROPERTY
+@given(
+    item_type=item_types,
+    selector=round_trip_selectors,
+    host=regname_hosts,
+    # Port 0 is legal on an info line but not in a URL, so it has no round trip.
+    port=st.integers(min_value=1, max_value=65535),
+)
+def test_menu_item_next_url_round_trips(
+    item_type: str, selector: str, host: str, port: int
+) -> None:
+    # The type and selector are entirely server-controlled, so the constructed
+    # nextUrl must re-parse to the same item -- a raw '?' type turned the
+    # selector into a search, and a raw '#' made it vanish into a fragment.
+    item = parse_menu_line(f"{item_type}Title\t{selector}\t{host}\t{port}")
+    assert item is not None
+
+    parsed = parse_gopher_url(item.next_url)
+    assert parsed.gopher_type == item_type
+    assert parsed.selector == item.selector
+    assert parsed.search is None
+    assert parsed.host == host
+    assert parsed.port == port
+
+
 # ---------------------------------------------------------------------------
 # 3. Security invariants
 # ---------------------------------------------------------------------------
+
+
+@PROPERTY
+@given(line=st.text(max_size=200))
+def test_menu_item_fields_never_carry_control_characters(line: str) -> None:
+    # Every menu field reaches the model (and often a terminal) verbatim, so an
+    # ANSI escape or other control character must never survive parsing.
+    item = parse_menu_line(line)
+    if item is None:
+        return
+    assert not _CONTROL_RE.search(item.title)
+    assert not _CONTROL_RE.search(item.selector)
+    assert not _CONTROL_RE.search(item.host)
+    assert not _CONTROL_RE.search(item.next_url)
+
+
+@PROPERTY
+@given(content=st.text(max_size=500))
+def test_gemtext_lines_never_carry_control_characters(content: str) -> None:
+    document = parse_gemtext(content)
+    for line in document.lines:
+        # TAB is meaningful inside a line (notably in preformatted blocks) and
+        # is deliberately kept; nothing else in the control range is.
+        assert not _CONTROL_RE_KEEPING_TAB.search(line.content)
+    for link in document.links:
+        assert not _CONTROL_RE.search(link.url)
+        assert link.text is None or not _CONTROL_RE.search(link.text)
 
 
 @PROPERTY

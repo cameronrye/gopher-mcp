@@ -7,6 +7,7 @@ models, so it sits below the protocol parsers in the import graph.
 
 from typing import Any, Optional
 
+from .helpers import resolve_gemini_reference, sanitize_display_text
 from .models import (
     GemtextDocument,
     GemtextHeading,
@@ -123,13 +124,18 @@ def _extract_preformat_metadata(alt_text: str | None, content: str) -> dict[str,
     return metadata
 
 
-def _parse_gemtext_link_line(line: str) -> dict[str, str | None] | None:
+def _parse_gemtext_link_line(
+    line: str, base_url: str | None = None
+) -> dict[str, str | None] | None:
     """Parse a gemtext link line.
 
     Format: =>[whitespace]<URL>[whitespace]<link-text>
 
     Args:
         line: Raw link line starting with '=>'
+        base_url: URL the document was fetched from, used to resolve a relative
+            reference into an absolute URL the caller can actually fetch.
+            Relative references are the norm in gemtext.
 
     Returns:
         Dict with 'url' and 'text' keys, or None if invalid
@@ -147,14 +153,17 @@ def _parse_gemtext_link_line(line: str) -> dict[str, str | None] | None:
     if not parts:
         return None  # No URL found
 
-    url = parts[0].strip()
+    url = sanitize_display_text(parts[0].strip(), keep_whitespace=False)
     if not url:
         return None  # Empty URL
+
+    if base_url:
+        url = resolve_gemini_reference(base_url, url)
 
     # Extract link text if present
     text = None
     if len(parts) > 1:
-        text = parts[1].strip()
+        text = sanitize_display_text(parts[1].strip(), keep_whitespace=False)
         if not text:  # Empty text after whitespace
             text = None
 
@@ -212,43 +221,38 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
         GemtextLine object if this is a heading, None otherwise
     """
 
-    # Strip the leading marker run, then any extra '#'s (a 4th '#' is content,
-    # not a 4th level -- gemtext only defines H1-H3), then surrounding space.
-    if line_content.startswith("###"):
-        heading_text = line_content[3:].lstrip("#").strip()
-        heading_obj = GemtextHeading(
-            level=3, text=heading_text, raw_content=line_content
-        )
-        return _create_gemtext_line(
-            GemtextLineType.HEADING_3, line_content, heading=heading_obj, level=3
-        )
-    elif line_content.startswith("##"):
-        heading_text = line_content[2:].lstrip("#").strip()
-        heading_obj = GemtextHeading(
-            level=2, text=heading_text, raw_content=line_content
-        )
-        return _create_gemtext_line(
-            GemtextLineType.HEADING_2, line_content, heading=heading_obj, level=2
-        )
-    elif line_content.startswith("#"):
-        heading_text = line_content[1:].lstrip("#").strip()
-        heading_obj = GemtextHeading(
-            level=1, text=heading_text, raw_content=line_content
-        )
-        return _create_gemtext_line(
-            GemtextLineType.HEADING_1, line_content, heading=heading_obj, level=1
-        )
+    if not line_content.startswith("#"):
+        return None
 
-    return None
+    # Gemtext defines H1-H3 only, so the marker run is capped at three: a 4th
+    # consecutive '#' is the first character of the heading text, not a deeper
+    # level, and must be kept ("####note" is an H3 reading "#note").
+    marker_length = len(line_content) - len(line_content.lstrip("#"))
+    level = min(marker_length, 3)
+    heading_text = line_content[level:].strip()
+    line_type = {
+        1: GemtextLineType.HEADING_1,
+        2: GemtextLineType.HEADING_2,
+        3: GemtextLineType.HEADING_3,
+    }[level]
+
+    heading_obj = GemtextHeading(
+        level=level, text=heading_text, raw_content=line_content
+    )
+    return _create_gemtext_line(
+        line_type, line_content, heading=heading_obj, level=level
+    )
 
 
 def _parse_link(
-    line_content: str,
+    line_content: str, base_url: str | None = None
 ) -> tuple["GemtextLine", Optional["GemtextLink"]] | None:
     """Parse a link line.
 
     Args:
         line_content: Raw line content
+        base_url: URL the document was fetched from, used to resolve a relative
+            link reference
 
     Returns:
         Tuple of (GemtextLine, GemtextLink) if this is a valid link, (GemtextLine as text, None) if invalid link syntax, None if not a link
@@ -257,7 +261,7 @@ def _parse_link(
     if not line_content.startswith("=>"):
         return None
 
-    link_data = _parse_gemtext_link_line(line_content)
+    link_data = _parse_gemtext_link_line(line_content, base_url)
     if link_data and link_data["url"]:
         link_obj = GemtextLink(url=link_data["url"], text=link_data["text"])
         line = _create_gemtext_line(GemtextLineType.LINK, line_content, link=link_obj)
@@ -323,11 +327,14 @@ def _parse_text(line_content: str) -> "GemtextLine":
     return _create_gemtext_line(GemtextLineType.TEXT, line_content)
 
 
-def parse_gemtext(content: str) -> "GemtextDocument":
+def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument":
     """Parse gemtext content into structured format.
 
     Args:
         content: Raw gemtext content
+        base_url: URL the content was fetched from. Relative link references are
+            resolved against it so every returned link is directly fetchable;
+            without it they are returned as written.
 
     Returns:
         Parsed gemtext document
@@ -339,11 +346,19 @@ def parse_gemtext(content: str) -> "GemtextDocument":
     in_preformat = False
     current_alt_text = None
 
-    # Split on CRLF/LF only. ``str.splitlines()`` also breaks on \v, \f, NEL,
+    # Strip control characters before splitting: the body is server-controlled
+    # and reaches the model (and often a terminal) verbatim, and the latin-1
+    # decode fallback maps 0x80-0x9F to C1 controls (0x9B is a single-byte CSI).
+    # Line-structural whitespace is preserved.
+    content = sanitize_display_text(content)
+
+    # Split on CRLF/LF/CR only. ``str.splitlines()`` also breaks on \v, \f, NEL,
     # U+2028/U+2029 etc., which are NOT gemtext line terminators and would
-    # corrupt line structure. Drop a single trailing empty element so a final
-    # newline doesn't synthesize an extra blank line (matching splitlines).
-    normalized = content.replace("\r\n", "\n")
+    # corrupt line structure; a legacy bare CR is one, and without normalizing it
+    # a whole page would collapse into a single text line. Drop a single trailing
+    # empty element so a final newline doesn't synthesize an extra blank line
+    # (matching splitlines).
+    normalized = content.replace("\r\n", "\n").replace("\r", "\n")
     raw_lines = normalized.split("\n")
     if raw_lines and raw_lines[-1] == "":
         raw_lines.pop()
@@ -426,7 +441,7 @@ def parse_gemtext(content: str) -> "GemtextDocument":
 
         elif line_content.startswith("=>"):
             # Link line
-            result = _parse_link(line_content)
+            result = _parse_link(line_content, base_url)
             if result:
                 line, link_obj = result
                 lines.append(line)

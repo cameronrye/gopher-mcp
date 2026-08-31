@@ -34,8 +34,14 @@ def guess_mime_type(gopher_type: str, selector: str = "") -> str:
 
     mime_type = type_mappings.get(gopher_type, "application/octet-stream")
 
+    # The item type is authoritative in Gopher, so an extension hint may only
+    # refine a deliberately generic type ('9' binary, 'I' image, or a type the
+    # table doesn't know). Letting it win everywhere turned a type-1 menu named
+    # "archive.zip" into application/zip and a type-0 "notes.pdf" into a PDF.
+    refinable = gopher_type in {"9", "I"} or gopher_type not in type_mappings
+
     # Refine based on file extension if available
-    if selector and "." in selector:
+    if refinable and selector and "." in selector:
         extension = selector.split(".")[-1].lower()
         extension_mappings = {
             "txt": "text/plain",
@@ -129,8 +135,40 @@ def get_default_gemini_mime_type() -> "GeminiMimeType":
     return GeminiMimeType(type="text", subtype="gemini", charset="utf-8", lang=None)
 
 
+def _looks_like_bmp(content: bytes) -> bool:
+    """Whether ``content`` is a BMP rather than text starting with "BM"."""
+    # The 14-byte BITMAPFILEHEADER reserves bytes 6-9, which real encoders zero.
+    return len(content) >= 14 and content[6:10] == b"\x00\x00\x00\x00"
+
+
+def _looks_like_id3(content: bytes) -> bool:
+    """Whether ``content`` is an ID3v2 tag rather than text starting with "ID3"."""
+    # ID3v2: "ID3", major version (2-4) and revision (never 0xFF), flags, then a
+    # four-byte synchsafe size whose bytes all have the high bit clear.
+    return (
+        len(content) >= 10
+        and content[3] in (2, 3, 4)
+        and content[4] != 0xFF
+        and all(byte < 0x80 for byte in content[6:10])
+    )
+
+
+def _looks_like_pe(content: bytes) -> bool:
+    """Whether ``content`` is a PE executable rather than text starting with "MZ"."""
+    # The DOS stub's e_lfanew (offset 0x3C) points at the "PE\0\0" signature.
+    if len(content) < 0x40:
+        return False
+    pe_offset = int.from_bytes(content[0x3C:0x40], "little")
+    return content[pe_offset : pe_offset + 4] == b"PE\x00\x00"
+
+
 def detect_binary_mime_type(content: bytes) -> str:
     """Detect MIME type from binary content headers.
+
+    Signatures that are only two or three printable ASCII bytes ("BM", "MZ",
+    "ID3") need corroborating structure: matching them on the prefix alone
+    classified ordinary prose as binary, and the Gemini success path then
+    withholds binary content from the model entirely.
 
     Args:
         content: Binary content to analyze
@@ -153,7 +191,7 @@ def detect_binary_mime_type(content: bytes) -> str:
         return "image/gif"
     elif header.startswith(b"RIFF") and len(content) > 11 and content[8:12] == b"WEBP":
         return "image/webp"
-    elif header.startswith(b"BM"):
+    elif header.startswith(b"BM") and _looks_like_bmp(content):
         return "image/bmp"
 
     # Document formats
@@ -163,16 +201,21 @@ def detect_binary_mime_type(content: bytes) -> str:
         # Could be ZIP, DOCX, XLSX, etc.
         return "application/zip"
 
-    # Audio/Video formats
-    elif header.startswith(b"ID3") or header.startswith(b"\xff\xfb"):
+    # Audio/Video formats. MPEG audio frame syncs cover MPEG-1 and MPEG-2
+    # Layer III, with and without a CRC.
+    elif (header.startswith(b"ID3") and _looks_like_id3(content)) or header[:2] in (
+        b"\xff\xfb",
+        b"\xff\xf3",
+        b"\xff\xf2",
+    ):
         return "audio/mpeg"
     elif header.startswith(b"OggS"):
         return "audio/ogg"
     elif header.startswith(b"RIFF") and len(content) > 11 and content[8:12] == b"WAVE":
         return "audio/wav"
-    elif header.startswith(b"\x00\x00\x00\x18ftypmp4") or header.startswith(
-        b"\x00\x00\x00\x20ftypmp4"
-    ):
+    elif len(content) >= 12 and content[4:8] == b"ftyp":
+        # Any ISO base-media file: the box size varies and the brand may be
+        # isom/mp42/M4V/... -- keying on the 'ftyp' box is the standard check.
         return "video/mp4"
 
     # Archive formats
@@ -182,7 +225,7 @@ def detect_binary_mime_type(content: bytes) -> str:
         return "application/x-7z-compressed"
 
     # Executable formats
-    elif header.startswith(b"MZ"):
+    elif header.startswith(b"MZ") and _looks_like_pe(content):
         return "application/x-msdownload"
     elif header.startswith(b"\x7fELF"):
         return "application/x-executable"

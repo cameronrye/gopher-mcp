@@ -123,6 +123,42 @@ class TestParseGeminiResponse:
         with pytest.raises(ValueError, match="missing space after status"):
             parse_gemini_response(b"20text/plain\r\n")
 
+    @pytest.mark.parametrize("status", [40, 44, 51, 59, 60, 62])
+    def test_bare_failure_status_is_accepted(self, status):
+        """The spec's ABNF makes the space + message optional for 4x/5x/6x
+        (``tempfail = "4" DIGIT [SP errormsg] CRLF``). Rejecting a bare status
+        told the model the server misbehaved instead of surfacing the real
+        failure (e.g. NOT_FOUND)."""
+        response = parse_gemini_response(f"{status}\r\n".encode())
+
+        assert int(response.status) == status
+        assert response.meta == ""
+        assert response.body == b""
+
+    def test_bare_failure_status_maps_to_the_real_error(self):
+        result = process_gemini_response(
+            parse_gemini_response(b"51\r\n"), "gemini://example.org/missing"
+        )
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["status"] == 51
+        assert result.error["temporary"] is False
+
+    @pytest.mark.parametrize("status", [10, 11, 20, 30, 31])
+    def test_bare_status_rejected_where_meta_is_mandatory(self, status):
+        """1x/2x/3x require the SP and the field -- the meta is the prompt, the
+        MIME type or the redirect target."""
+        with pytest.raises(ValueError, match="requires a meta field"):
+            parse_gemini_response(f"{status}\r\n".encode())
+
+    def test_success_with_explicitly_empty_meta_still_allowed(self):
+        """ "20 " (space, empty meta) is spec-valid and defaults to text/gemini;
+        only the bare two-digit form is malformed."""
+        response = parse_gemini_response(b"20 \r\nhi")
+
+        assert response.meta == ""
+        assert response.body == b"hi"
+
     def test_non_digit_status(self):
         """Test non-digit status code."""
         with pytest.raises(ValueError, match="Invalid status code"):
@@ -286,7 +322,8 @@ class TestDetectBinaryMimeType:
 
     def test_mp3_detection(self):
         """Test MP3 audio detection."""
-        mp3_header = b"ID3" + b"fake_mp3_data"
+        # A real ID3v2.3 header: version/revision, flags, synchsafe size.
+        mp3_header = b"ID3\x03\x00\x00\x00\x00\x02\x01" + b"fake_mp3_data"
         mime_type = detect_binary_mime_type(mp3_header)
         assert mime_type == "audio/mpeg"
 
@@ -819,3 +856,186 @@ class TestProcessGeminiResponse:
         # Should fallback to default gemtext for empty body
         assert result.charset == "utf-8"
         assert result.raw_content == ""
+
+
+class TestBinarySniffFalsePositives:
+    """Short ASCII-prefix signatures must not classify prose as binary."""
+
+    def test_text_beginning_with_bm_is_not_a_bitmap(self):
+        """'BM' alone matched any text starting with those two letters, and the
+        unparseable-meta fallback then withheld the content from the model."""
+        assert detect_binary_mime_type(b"BMW enthusiasts club") == (
+            "application/octet-stream"
+        )
+
+    def test_real_bitmap_still_detected(self):
+        bmp = b"BM" + b"\x8a\x00\x00\x00" + b"\x00\x00\x00\x00" + b"\x8a\x00\x00\x00"
+        assert detect_binary_mime_type(bmp) == "image/bmp"
+
+    def test_text_beginning_with_mz_is_not_an_executable(self):
+        assert detect_binary_mime_type(b"MZ is a jazz label" * 8) == (
+            "application/octet-stream"
+        )
+
+    def test_real_pe_executable_still_detected(self):
+        content = bytearray(b"MZ" + b"\x00" * 0x3E)
+        content[0x3C:0x40] = (0x40).to_bytes(4, "little")
+        content += b"PE\x00\x00"
+        assert detect_binary_mime_type(bytes(content)) == "application/x-msdownload"
+
+    def test_text_beginning_with_id3_is_not_mp3(self):
+        assert detect_binary_mime_type(b"ID3 tags explained") == (
+            "application/octet-stream"
+        )
+
+    def test_bm_prefixed_text_served_with_bad_mime_stays_gemtext(self):
+        """The success path's sniff fallback must not turn prose into binary."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="garbage-no-slash",
+            body=b"BMW enthusiasts club\n=> /next More",
+        )
+        result = process_gemini_response(response, "gemini://example.org/")
+
+        assert isinstance(result, GeminiGemtextResult)
+
+
+class TestBinarySniffCoverage:
+    """MP4/MP3 signatures must be wide enough to actually fire."""
+
+    @pytest.mark.parametrize("brand", [b"isom", b"M4V ", b"mp42"])
+    def test_common_mp4_brands_detected(self, brand):
+        content = b"\x00\x00\x00\x20ftyp" + brand + b"\x00" * 16
+        assert detect_binary_mime_type(content) == "video/mp4"
+
+    @pytest.mark.parametrize("sync", [b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"])
+    def test_mpeg_layer3_frame_syncs_detected(self, sync):
+        assert detect_binary_mime_type(sync + b"\x90\x00" * 8) == "audio/mpeg"
+
+
+class TestGeminiResponseSanitization:
+    """Server-controlled Gemini strings must not carry control characters."""
+
+    def test_input_prompt_sanitized(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.INPUT, meta="\x1b]0;pwned\x07Search", body=b""
+        )
+        result = process_gemini_response(response, "gemini://example.org/search")
+
+        assert isinstance(result, GeminiInputResult)
+        assert result.prompt == "]0;pwnedSearch"
+
+    def test_error_message_sanitized(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.NOT_FOUND, meta="gone\x1b[2J", body=b""
+        )
+        result = process_gemini_response(response, "gemini://example.org/x")
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["message"] == "gone[2J"
+
+    def test_certificate_message_sanitized(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.CERTIFICATE_REQUIRED,
+            meta="cert\x00needed",
+            body=b"",
+        )
+        result = process_gemini_response(response, "gemini://example.org/x")
+
+        assert isinstance(result, GeminiCertificateResult)
+        assert result.message == "certneeded"
+
+    def test_text_body_sanitized(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/plain",
+            body=b"line one\x1b[31m\nline two\x00",
+        )
+        result = process_gemini_response(response, "gemini://example.org/x")
+
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.content == "line one[31m\nline two"
+
+    def test_gemtext_body_sanitized_but_line_structure_kept(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini",
+            body=b"# Title\x07\nbody\x1b[2J text",
+        )
+        result = process_gemini_response(response, "gemini://example.org/x")
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.raw_content == "# Title\nbody[2J text"
+        assert len(result.document.lines) == 2
+
+    def test_latin1_fallback_c1_controls_stripped(self):
+        """The latin-1 fallback maps 0x80-0x9F to C1 controls (0x9B is a
+        single-byte CSI), so decoding alone is not enough."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/plain; charset=utf-8",
+            body=b"caf\xe9\x9b31m",
+        )
+        result = process_gemini_response(response, "gemini://example.org/x")
+
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.mime_type.charset == "latin-1"
+        assert result.content == "café31m"
+
+
+class TestGemtextLinkResolution:
+    """Gemtext links must be returned absolute so the caller can follow them."""
+
+    def test_relative_link_resolved_against_request_url(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini",
+            body=b"=> spec.gmi The spec",
+        )
+        result = process_gemini_response(response, "gemini://example.org/docs/")
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.document.links[0].url == "gemini://example.org/docs/spec.gmi"
+        assert result.document.links[0].text == "The spec"
+
+    def test_absolute_path_link_resolved(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini",
+            body=b"=> /index.gmi Home",
+        )
+        result = process_gemini_response(response, "gemini://example.org/docs/spec.gmi")
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.document.links[0].url == "gemini://example.org/index.gmi"
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "gemini://other.example/x",
+            "https://example.com/x",
+            "gopher://example.com/1/x",
+            "mailto:someone@example.org",
+        ],
+    )
+    def test_absolute_references_pass_through_unchanged(self, target):
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini",
+            body=f"=> {target} Elsewhere".encode(),
+        )
+        result = process_gemini_response(response, "gemini://example.org/docs/")
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.document.links[0].url == target
+
+    def test_link_label_sanitized(self):
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini",
+            body=b"=> /a Cli\x1b[31mck",
+        )
+        result = process_gemini_response(response, "gemini://example.org/")
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert result.document.links[0].text == "Cli[31mck"

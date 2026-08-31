@@ -8,10 +8,15 @@ modules.
 
 import contextlib
 from typing import Any, Union
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from .gemtext import parse_gemtext
-from .helpers import bracket_host, truncate_text
+from .helpers import (
+    bracket_host,
+    resolve_gemini_reference,
+    sanitize_display_text,
+    truncate_text,
+)
 from .mime import (
     detect_binary_mime_type,
     get_default_gemini_mime_type,
@@ -68,11 +73,11 @@ def parse_gemini_url(url: str) -> GeminiURL:
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
         raise ValueError("URL must not contain control characters")
 
-    # Check URL length limit. The spec's 1024-byte cap applies to the whole
-    # CRLF-terminated request line (``<url>\r\n``), so the URL itself must be
-    # <= 1022 bytes -- not 1024.
-    if len(url.encode("utf-8")) + len(b"\r\n") > 1024:
-        raise ValueError("URL must not exceed 1024 bytes (request line incl. CRLF)")
+    # Check URL length limit. The spec bounds the <URL> itself ("a UTF-8 encoded
+    # absolute URL, of maximum length 1024 bytes"); the CRLF terminator is on top
+    # of that, so a 1024-byte URL is valid.
+    if len(url.encode("utf-8")) > 1024:
+        raise ValueError("URL must not exceed 1024 bytes")
 
     # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
     # accessed, so the access must live inside the try block for the friendly
@@ -216,11 +221,11 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         status_line = raw_response[:crlf_pos].decode("utf-8")
         body = raw_response[crlf_pos + 2 :] if len(raw_response) > crlf_pos + 2 else b""
 
-        # Parse status line: "<STATUS><SPACE><META>"
-        if len(status_line) < 3:  # Minimum: "XX "
+        # Parse status line: "<STATUS>[<SPACE><META>]"
+        if len(status_line) < 2:  # Minimum: "XX"
             raise GeminiProtocolError("Status line too short")
 
-        if status_line[2] != " ":
+        if len(status_line) > 2 and status_line[2] != " ":
             raise GeminiProtocolError(
                 "Invalid status line format: missing space after status"
             )
@@ -245,6 +250,17 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         # Validate status code range
         if not (10 <= status_code <= 69):
             raise GeminiProtocolError(f"Status code out of range: {status_code}")
+
+        # The spec's ABNF makes the space + message optional for the failure
+        # families (``tempfail = "4" DIGIT [SP errormsg] CRLF``, likewise
+        # permfail and auth), so a bare two-digit 4x/5x/6x is well-formed and
+        # carries an empty meta -- rejecting it would tell the model the server
+        # misbehaved instead of surfacing the real failure. 1x/2x/3x require the
+        # SP and the field (prompt / MIME type / redirect target).
+        if len(status_line) == 2 and status_code < 40:
+            raise GeminiProtocolError(
+                f"Status {status_code} requires a meta field after the status"
+            )
 
         # Convert to enum
         try:
@@ -366,7 +382,7 @@ def _process_input_response(
     sensitive = status_code == GeminiStatusCode.SENSITIVE_INPUT.value
 
     return GeminiInputResult(
-        prompt=meta,
+        prompt=sanitize_display_text(meta, keep_whitespace=False),
         sensitive=sensitive,
         requestInfo=request_info,
     )
@@ -454,6 +470,10 @@ def _process_success_response(
     if mime_type.is_gemtext:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        # Strip control characters (ANSI escapes, C1 bytes the latin-1 fallback
+        # can introduce) before parsing, so the line structure is preserved and
+        # neither rawContent nor any parsed line carries them to the model.
+        content = sanitize_display_text(content)
         # Cap the gemtext handed to the LLM BEFORE parsing, so both rawContent
         # and the parsed document are bounded. text/gemini is the dominant
         # Gemini type, so without this the max_rendered_chars cap that protects
@@ -461,8 +481,10 @@ def _process_success_response(
         # under the byte limit) is ~250k tokens. `size` still reports the full
         # original byte length.
         content, truncated = truncate_text(content, max_rendered_chars)
-        # Parse gemtext into structured format
-        document = parse_gemtext(content)
+        # Parse gemtext into structured format, resolving each link against the
+        # request URL: relative references are the norm in gemtext, and an
+        # unresolved one is not fetchable by the caller.
+        document = parse_gemtext(content, str(request_info.get("url", "")) or None)
 
         return GeminiGemtextResult(
             document=document,
@@ -478,6 +500,7 @@ def _process_success_response(
     elif mime_type.is_text:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        content = sanitize_display_text(content)
         # Cap the text handed to the LLM; `size` still reports the full bytes.
         rendered, truncated = truncate_text(content, max_rendered_chars)
         return GeminiSuccessResult(
@@ -558,7 +581,7 @@ def _process_redirect_response(
         )
 
     base_url = str(request_info.get("url", ""))
-    resolved = _resolve_gemini_reference(base_url, target) if base_url else target
+    resolved = resolve_gemini_reference(base_url, target) if base_url else target
 
     # Guard against a redirect to the same URL (a one-hop loop) so a single
     # malformed response cannot drive an unbounded client re-fetch loop.
@@ -577,29 +600,6 @@ def _process_redirect_response(
         permanent=permanent,
         requestInfo=request_info,
     )
-
-
-def _resolve_gemini_reference(base_url: str, target: str) -> str:
-    """Resolve a (possibly relative) Gemini redirect target against ``base_url``.
-
-    ``urllib.parse.urljoin`` doesn't treat ``gemini`` as a hierarchical scheme,
-    so relative references would pass through unresolved. Resolve under an
-    ``https`` placeholder (which urljoin understands) and swap the scheme back.
-    An absolute reference that carries its own scheme (gemini://, https://, ...)
-    is returned unchanged so the caller/SSRF layer can inspect cross-scheme or
-    cross-host redirects.
-    """
-    if urlparse(target).scheme:  # already absolute
-        return target
-
-    if not base_url.startswith("gemini://"):
-        return urljoin(base_url, target)
-
-    placeholder_base = "https://" + base_url[len("gemini://") :]
-    joined = urljoin(placeholder_base, target)
-    if joined.startswith("https://"):
-        return "gemini://" + joined[len("https://") :]
-    return joined
 
 
 def _process_error_response(
@@ -622,7 +622,7 @@ def _process_error_response(
     return GeminiErrorResult(
         error={
             "code": error_type,
-            "message": meta,
+            "message": sanitize_display_text(meta, keep_whitespace=False),
             "status": status_code,
             "temporary": temporary,
         },
@@ -657,7 +657,7 @@ def _process_certificate_response(
     required = status_code == GeminiStatusCode.CERTIFICATE_REQUIRED.value
 
     return GeminiCertificateResult(
-        message=meta,
+        message=sanitize_display_text(meta, keep_whitespace=False),
         status=status_code,
         required=required,
         requestInfo=request_info,

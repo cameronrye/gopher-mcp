@@ -3,8 +3,41 @@
 import re
 from urllib.parse import quote, unquote, urlparse
 
-from .helpers import bracket_host
+from .helpers import bracket_host, sanitize_display_text
 from .models import GopherMenuItem, GopherURL
+
+# A single percent escape -- the form ``encode_item_type`` emits for an item
+# type character that cannot appear literally in a URL path.
+_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+# ASCII punctuation that is safe to leave literal in the item-type position:
+# unreserved per RFC 3986. Everything else in ASCII (notably '?', '#', '/', '%'
+# and the control characters) is percent-encoded.
+_UNRESERVED_PUNCTUATION = "+-._~"
+
+
+def _encode_item_type(item_type: str) -> str:
+    """Percent-encode a Gopher item type for the first character of a URL path.
+
+    The type character is fully server-controlled, so a '?', '#', '/' or control
+    byte would otherwise restructure the URL: ``?Click`` turns the selector into
+    a search query and ``#`` swallows it into a fragment. Non-ASCII characters
+    carry no URL syntax and are left literal so they survive the round trip.
+
+    Args:
+        item_type: Single-character Gopher item type.
+
+    Returns:
+        The item type, percent-encoded when it is unsafe ASCII.
+
+    """
+    if (
+        len(item_type) == 1
+        and item_type.isascii()
+        and not (item_type.isalnum() or item_type in _UNRESERVED_PUNCTUATION)
+    ):
+        return f"%{ord(item_type):02X}"
+    return item_type
 
 
 def parse_gopher_url(url: str) -> GopherURL:
@@ -51,9 +84,17 @@ def parse_gopher_url(url: str) -> GopherURL:
         gopher_type = "1"
         raw_selector = ""
     else:
-        # First character after "/" is the gopher type
-        gopher_type = path[1]
-        raw_selector = path[2:] if len(path) > 2 else ""
+        # First character after "/" is the gopher type, percent-encoded by
+        # ``_encode_item_type`` when it is unsafe ASCII. Decode that single
+        # escape back so the type survives the round trip; a non-ASCII byte is
+        # not something the encoder emits, so leave it read literally.
+        escape = _ESCAPE_RE.match(path, 1)
+        if escape and int(escape.group(1), 16) < 0x80:
+            gopher_type = chr(int(escape.group(1), 16))
+            raw_selector = path[escape.end() :]
+        else:
+            gopher_type = path[1]
+            raw_selector = path[2:] if len(path) > 2 else ""
 
     # Decode the selector to its on-wire form. Split any embedded %09 search
     # BEFORE decoding so a literal tab in the decoded text can't be confused
@@ -110,13 +151,36 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
     parts = line.split("\t")
 
     if len(parts) < 4:
-        return None
+        # A line with fewer than four fields is malformed. An explicit info line
+        # ("iSome banner text" with the trailing fields omitted) is common enough
+        # that lenient clients still render its text, so degrade it to an info
+        # item rather than dropping the content; it has no navigable target, so
+        # it carries no selector/host/nextUrl. Any other short line is genuine
+        # junk -- its first character is not reliably an item type, so reading it
+        # as one would mangle the text.
+        info_title = sanitize_display_text(parts[0][1:], keep_whitespace=False)
+        if not parts[0].startswith("i") or not info_title:
+            return None
+        return GopherMenuItem(
+            type="i",
+            title=info_title,
+            selector="",
+            host="",
+            port=0,
+            nextUrl="",
+        )
 
     try:
         item_type = parts[0][0] if parts[0] else "i"  # Default to info line
-        display = parts[0][1:] if len(parts[0]) > 1 else ""
-        selector = parts[1]
-        host = parts[2]
+        # Every field below is server-controlled and reaches the model verbatim,
+        # so strip ANSI escapes and other control characters before use --
+        # including from the selector, which the outbound path would reject
+        # anyway, so that nextUrl is built from the usable value.
+        display = sanitize_display_text(
+            parts[0][1:] if len(parts[0]) > 1 else "", keep_whitespace=False
+        )
+        selector = sanitize_display_text(parts[1], keep_whitespace=False)
+        host = sanitize_display_text(parts[2], keep_whitespace=False)
         # ``str.isdigit()`` accepts unicode digits (e.g. "²") that ``int()``
         # rejects; require ASCII so a bad port degrades to the default rather
         # than dropping the whole menu item. Also bound the value: a numeric
@@ -139,14 +203,15 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         if selector.startswith("URL:") and len(selector) > 4:
             next_url = selector[4:]
         else:
-            # Construct the next URL. Percent-encode the selector (keeping '/')
-            # so a selector containing spaces, '?', '#' or '%' round-trips back
-            # through parse_gopher_url instead of mis-splitting into a bogus
-            # query. Bracket an IPv6 literal host so its colons don't collide
-            # with the port separator and break the re-parse.
+            # Construct the next URL. Percent-encode the item type and the
+            # selector (keeping '/') so a server-chosen '?', '#' or '%' in either
+            # round-trips back through parse_gopher_url instead of mis-splitting
+            # into a bogus query, fragment or search. Bracket an IPv6 literal
+            # host so its colons don't collide with the port separator and break
+            # the re-parse.
             next_url = (
                 f"gopher://{bracket_host(host)}:{port}/"
-                f"{item_type}{quote(selector, safe='/')}"
+                f"{_encode_item_type(item_type)}{quote(selector, safe='/')}"
             )
 
         return GopherMenuItem(
@@ -257,10 +322,15 @@ def format_gopher_url(
     if port != 70:
         url += f":{port}"
 
-    url += f"/{gopher_type}{selector}"
+    # Percent-encode the type, selector and search (keeping '/') so the URL
+    # re-parses to the components it was built from. ``sanitize_selector`` only
+    # rejects a literal TAB/CR/LF, so an unencoded selector containing the
+    # characters "%09", '?' or '#' would otherwise be mis-split by
+    # ``parse_gopher_url`` into a different resource.
+    url += f"/{_encode_item_type(gopher_type)}{quote(selector, safe='/')}"
 
     if search and gopher_type == "7":
-        url += f"%09{search}"
+        url += f"%09{quote(search, safe='/')}"
 
     return url
 

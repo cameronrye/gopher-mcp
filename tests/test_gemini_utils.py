@@ -146,14 +146,16 @@ class TestGeminiURLParsing:
         with pytest.raises(ValueError, match="space"):
             parse_gemini_url("gemini://example.org/a b")
 
-    def test_url_wire_length_includes_crlf(self):
-        """The on-wire request is ``<url>\\r\\n``; the 1024-byte Gemini cap
-        covers the whole line, so the URL itself must be <= 1022 bytes."""
+    def test_url_length_cap_applies_to_the_url_itself(self):
+        """The spec bounds the <URL> at 1024 bytes and puts the CRLF terminator
+        on top of it, so 1023- and 1024-byte URLs are valid and only 1025 is
+        rejected."""
         base = "gemini://example.org/"  # 21 bytes
-        ok = base + "a" * (1022 - len(base))  # 1022-byte URL -> 1024 on wire
-        assert parse_gemini_url(ok).host == "example.org"
+        for size in (1023, 1024):
+            url = base + "a" * (size - len(base))
+            assert parse_gemini_url(url).host == "example.org"
 
-        too_long = base + "a" * (1023 - len(base))  # 1023-byte URL -> 1025 wire
+        too_long = base + "a" * (1025 - len(base))
         with pytest.raises(ValueError, match="1024 bytes"):
             parse_gemini_url(too_long)
 
@@ -483,7 +485,9 @@ class TestGeminiUtilityFunctions:
             search="test query",
         )
 
-        assert url == "gopher://example.com/7/search%09test query"
+        # The search is percent-encoded, so the URL re-parses to the components
+        # it was built from.
+        assert url == "gopher://example.com/7/search%09test%20query"
 
     def test_format_gopher_url_non_standard_port(self):
         """Test Gopher URL formatting with non-standard port."""
@@ -587,13 +591,48 @@ class TestGemtextParsingRobustness:
         assert line.type == "heading1"
         assert line.heading.text == "NoSpace"
 
-    def test_extra_hash_not_kept_in_heading_text(self):
+    def test_extra_hash_is_heading_content(self):
         from gopher_mcp.utils import parse_gemtext
 
-        # A 4th '#' is content, not a 4th level: cap at H3 and don't leak '#'.
+        # A 4th '#' is content, not a 4th level: cap the marker run at H3 and
+        # keep the remaining '#' as the first character of the heading text.
         line = parse_gemtext("#### four").lines[0]
         assert line.type == "heading3"
-        assert line.heading.text == "four"
+        assert line.heading.text == "# four"
+
+    def test_heading_content_hash_is_not_deleted(self):
+        """'####note' is an H3 whose text is '#note' -- the extra marker must not
+        be stripped along with the level markers."""
+        from gopher_mcp.utils import parse_gemtext
+
+        line = parse_gemtext("####note").lines[0]
+        assert line.type == "heading3"
+        assert line.heading.text == "#note"
+
+    def test_heading_content_hash_preserved_at_lower_levels(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        assert parse_gemtext("##note").lines[0].heading.text == "note"
+        assert parse_gemtext("###note").lines[0].heading.text == "note"
+        # Two markers then content: level 2 with a literal '#' kept is only
+        # possible from three markers, so check the H1 case explicitly.
+        line = parse_gemtext("#####x").lines[0]
+        assert line.heading.level == 3
+        assert line.heading.text == "##x"
+
+    def test_bare_cr_line_endings_are_normalized(self):
+        """A legacy CR-only page must still split into lines; otherwise every
+        heading and link collapses into a single text line."""
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("# Title\r=> /a A link\rbody")
+        assert [line.type for line in document.lines] == ["heading1", "link", "text"]
+
+    def test_stray_cr_does_not_survive_into_line_content(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("before\rafter")
+        assert [line.content for line in document.lines] == ["before", "after"]
 
     def test_quote_strips_only_one_leading_space(self):
         from gopher_mcp.utils import parse_gemtext
