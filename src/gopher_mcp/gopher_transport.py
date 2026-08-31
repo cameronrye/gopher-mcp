@@ -21,6 +21,12 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 READ_CHUNK = 65536
+# Short probe deadline used once the size cap is reached, mirroring the Gemini
+# transport. Waiting for EOF under the *overall* deadline instead meant a
+# complete, exactly-``max_bytes`` response from a server that delays its close
+# was thrown away as a generic timeout even though the whole body was already
+# buffered; only an EOF within this window proves the response is complete.
+PROBE_TIMEOUT_SECONDS = 1.0
 
 
 class GopherProtocolError(Exception):
@@ -47,6 +53,7 @@ async def fetch_gopher(
     max_bytes: int,
     timeout: float,
     connect_addresses: list[str] | None = None,
+    truncate_at_max: bool = False,
 ) -> bytes:
     """Fetch a raw Gopher response with a bounded size and an overall deadline.
 
@@ -62,6 +69,10 @@ async def fetch_gopher(
             the addresses the SSRF guard actually vetted, closing the
             DNS-rebinding window. Gopher carries no host header, so connecting
             by IP is fully equivalent.
+        truncate_at_max: Return the first ``max_bytes`` bytes instead of raising
+            when the server still has more to send. Used only by the robots.txt
+            lookup, where RFC 9309 section 2.5 prescribes parsing a truncated
+            prefix rather than rejecting the file.
 
     Returns:
         Raw response bytes (at most ``max_bytes``).
@@ -89,19 +100,35 @@ async def fetch_gopher(
 
             chunks: list[bytes] = []
             total = 0
-            while True:
-                # Read one byte past the cap so an over-limit response is
-                # detected rather than silently truncated.
-                want = min(READ_CHUNK, max_bytes - total + 1)
-                chunk = await reader.read(want)
+            while total < max_bytes:
+                chunk = await reader.read(min(READ_CHUNK, max_bytes - total))
                 if not chunk:
-                    break
+                    return b"".join(chunks)
                 chunks.append(chunk)
                 total += len(chunk)
-                if total > max_bytes:
-                    raise GopherProtocolError(
-                        f"Response exceeds maximum size of {max_bytes} bytes"
-                    )
+
+            if truncate_at_max:
+                return b"".join(chunks)
+
+            # Hit the cap without EOF: probe one more byte under a short
+            # deadline. A byte means the response is genuinely over the limit; a
+            # probe that times out means the server has neither finished nor
+            # closed, so the bytes in hand may be a mid-stream prefix -- report
+            # that rather than either returning it as complete or burning the
+            # whole request deadline waiting for a close that may never come.
+            try:
+                extra = await asyncio.wait_for(
+                    reader.read(1), timeout=PROBE_TIMEOUT_SECONDS
+                )
+            except TimeoutError:
+                raise GopherProtocolError(
+                    f"Response reached the maximum size of {max_bytes} bytes and "
+                    f"the server did not close the connection; it may be truncated"
+                ) from None
+            if extra:
+                raise GopherProtocolError(
+                    f"Response exceeds maximum size of {max_bytes} bytes"
+                )
             return b"".join(chunks)
         finally:
             writer.close()

@@ -147,9 +147,12 @@ class TestConnectErrorMapping:
     network (asyncio.open_connection is patched)."""
 
     @pytest.mark.asyncio
-    async def test_timeout(self):
+    async def test_timeout_is_reported_as_a_timeout(self):
+        """A connect/handshake timeout must NOT masquerade as a TLS fault: a
+        firewalled host that drops SYNs would otherwise steer the caller toward
+        certificate diagnostics instead of "host unreachable"."""
         with patch("asyncio.open_connection", AsyncMock(side_effect=TimeoutError())):
-            with pytest.raises(TLSConnectionError, match="Connection timeout"):
+            with pytest.raises(TimeoutError, match=r"timed out after 1\.0 seconds"):
                 await GeminiTLSClient().connect("example.org", 1965, timeout=1.0)
 
     @pytest.mark.asyncio
@@ -266,15 +269,27 @@ class TestSendReceiveClose:
         assert result == b"x" * 1024
 
     @pytest.mark.asyncio
-    async def test_receive_accepts_exactly_max_size_when_held_open(self, monkeypatch):
-        """A complete, exactly-max_size response whose server holds the
-        connection open (no EOF) is accepted once the short probe times out,
-        rather than spuriously erroring."""
+    async def test_receive_reports_max_size_reached_when_held_open(self, monkeypatch):
+        """At the cap with no EOF the bytes in hand are indistinguishable from a
+        mid-stream prefix, so they must NOT be returned as a complete response:
+        a server that paces its body could otherwise have a truncated document
+        cached as a success for the full TTL."""
         monkeypatch.setattr("gopher_mcp.gemini_tls.PROBE_TIMEOUT_SECONDS", 0.05)
         reader = asyncio.StreamReader()
         reader.feed_data(b"x" * 1024)  # no feed_eof: connection stays open
+        with pytest.raises(TLSConnectionError, match="may be truncated"):
+            await GeminiTLSClient().receive_data(_conn(reader=reader), max_size=1024)
+
+    @pytest.mark.asyncio
+    async def test_receive_truncates_at_max_when_asked(self, monkeypatch):
+        """The robots.txt lookup asks for truncate-and-parse (RFC 9309 s2.5), so
+        the prefix is returned instead of raising -- and without paying the
+        probe, since the caller has already accepted a partial read."""
+        monkeypatch.setattr("gopher_mcp.gemini_tls.PROBE_TIMEOUT_SECONDS", 30.0)
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"x" * 4096)  # no feed_eof: more is pending
         result = await GeminiTLSClient().receive_data(
-            _conn(reader=reader), max_size=1024
+            _conn(reader=reader), max_size=1024, truncate_at_max=True
         )
         assert result == b"x" * 1024
 

@@ -11,6 +11,7 @@ from gopher_mcp.models import TOFUEntry
 from gopher_mcp.tofu import (
     TOFUExpiredError,
     TOFUManager,
+    TOFUStorageError,
     TOFUValidationError,
 )
 
@@ -799,3 +800,196 @@ class TestTOFUHostKeyNormalization:
             # detected as a mismatch (same pin), not a fresh first-use.
             with pytest.raises(TOFUValidationError):
                 mgr.validate_certificate("example.com.", 1965, "sha256:" + "b" * 64)
+
+
+def _der_cert_info(not_after_days: int) -> dict:
+    """Build cert info exactly as ``gemini_tls._parse_peer_cert`` produces it.
+
+    Gemini runs under CERT_NONE, so the live path never sees the getpeercert()
+    ``notAfter`` string every other test here uses -- it parses the DER and hands
+    TOFU ``not_before_timestamp`` / ``not_after_timestamp`` floats instead.
+    """
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    from gopher_mcp.gemini_tls import GeminiTLSClient
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "example.com")])
+    now = datetime.datetime.now(datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=400))
+        .not_valid_after(now + datetime.timedelta(days=not_after_days))
+        .sign(key, hashes.SHA256())
+    )
+    der = cert.public_bytes(serialization.Encoding.DER)
+    return GeminiTLSClient._parse_peer_cert(der), cert.not_valid_after_utc.timestamp()
+
+
+class TestTOFUExpiryFromDerCertInfo:
+    """The DER-derived ``not_after_timestamp`` is the ONLY expiry format live
+    connections produce, so it must actually be read: a typo in that key would
+    make ``expires`` always None in production -- silently disabling
+    reject_expired and every expiry warning -- with the suite still green."""
+
+    def test_first_use_pins_expiry_from_not_after_timestamp(self):
+        cert_info, expected_expiry = _der_cert_info(not_after_days=30)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = TOFUManager(str(Path(temp_dir) / "tofu.json"))
+            is_valid, warning = manager.validate_certificate(
+                "example.com", 1965, "sha256:" + "a" * 64, cert_info
+            )
+
+        assert is_valid is True
+        assert warning is not None and "trusted on first use" in warning
+        entry = manager._entries["example.com:1965"]
+        assert entry.expires == pytest.approx(expected_expiry)
+
+    def test_reject_expired_uses_der_derived_expiry(self):
+        """The same wiring must drive the fail-closed path, not just the field."""
+        cert_info, _ = _der_cert_info(not_after_days=-1)  # already expired
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = TOFUManager(
+                str(Path(temp_dir) / "tofu.json"), reject_expired=True
+            )
+            with pytest.raises(TOFUExpiredError, match="already expired"):
+                manager.validate_certificate(
+                    "example.com", 1965, "sha256:" + "a" * 64, cert_info
+                )
+
+        assert "example.com:1965" not in manager._entries
+
+
+class TestTOFUFirstUseExpiredWithReject:
+    """reject_expired + FIRST contact + an already-expired cert."""
+
+    def test_first_use_expired_is_refused_and_not_pinned(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path, reject_expired=True)
+
+            cert_info = {"not_after_timestamp": 1000.0}
+            with patch("time.time", return_value=2000.0):
+                with pytest.raises(TOFUExpiredError, match="already expired"):
+                    manager.validate_certificate(
+                        "example.com", 1965, "abc123", cert_info
+                    )
+
+            # Refusing must not leave a pin behind: trusting the fingerprint
+            # here would silently grant the expired cert permanent acceptance.
+            assert "example.com:1965" not in manager._entries
+            assert not Path(storage_path).exists()
+
+
+def _call_bounded(fn, timeout: float = 5.0):
+    """Run ``fn`` on a worker thread and return its outcome, or fail on a hang.
+
+    The behaviour under test is that an unavailable store lock RETURNS (raising)
+    instead of blocking forever; asserting that inline would hang the whole suite
+    if it ever regressed, so bound it here.
+    """
+    import threading
+
+    outcome: list[object] = []
+
+    def _run() -> None:
+        try:
+            outcome.append(fn())
+        except BaseException as exc:  # returned to the caller, not swallowed
+            outcome.append(exc)
+
+    thread = threading.Thread(target=_run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), "store lock acquisition never returned"
+    return outcome[0]
+
+
+class TestTOFUStoreLocking:
+    """The cross-process store lock must be bounded and explicit."""
+
+    def test_wedged_lock_holder_raises_instead_of_hanging(self):
+        """flock(LOCK_EX) has no timeout, so a wedged holder used to block the
+        caller -- and, before the call moved off the loop, the whole event loop,
+        freezing every tool call in the process -- forever and without an error."""
+        import os
+
+        fcntl = pytest.importorskip("fcntl")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+
+            fd = os.open(storage_path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                with patch("gopher_mcp.tofu.LOCK_TIMEOUT_SECONDS", 0.1):
+                    outcome = _call_bounded(
+                        lambda: manager.validate_certificate(
+                            "example.com", 1965, "abc123"
+                        )
+                    )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+        assert isinstance(outcome, TOFUStorageError)
+        assert "Could not lock" in str(outcome)
+
+    def test_last_seen_flush_survives_a_locked_store(self):
+        """A refresh of the read-path last_seen is bookkeeping, not trust state:
+        an unlockable store must not fail an otherwise valid request."""
+        import os
+
+        fcntl = pytest.importorskip("fcntl")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+            manager.validate_certificate("example.com", 1965, "abc123")
+            manager._last_save_time = 0.0  # force the throttled flush
+
+            fd = os.open(storage_path + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                with patch("gopher_mcp.tofu.LOCK_TIMEOUT_SECONDS", 0.1):
+                    outcome = _call_bounded(
+                        lambda: manager.validate_certificate(
+                            "example.com", 1965, "abc123"
+                        )
+                    )
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+        assert outcome == (True, None)
+
+
+class TestTOFUMismatchRemediation:
+    """A legitimate certificate rotation must come with a way out."""
+
+    def test_mismatch_message_names_the_store_and_the_remedy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            storage_path = str(Path(temp_dir) / "tofu.json")
+            manager = TOFUManager(storage_path)
+            manager.validate_certificate("example.com", 1965, "sha256:" + "a" * 64)
+
+            with pytest.raises(TOFUValidationError) as exc_info:
+                manager.validate_certificate("example.com", 1965, "sha256:" + "b" * 64)
+
+        message = str(exc_info.value)
+        assert storage_path in message
+        assert "example.com:1965" in message
+        assert "force=True" in message
+        # Only fingerprint PREFIXES may appear -- never a full digest.
+        assert "a" * 64 not in message
+        assert "b" * 64 not in message

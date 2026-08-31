@@ -154,9 +154,15 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         self.allow_local_hosts = allow_local_hosts
         self.allowed_ports = allowed_ports
 
-        # Convert allowed hosts to a set for faster lookup
+        # Convert allowed hosts to a set for faster lookup. An explicitly EMPTY
+        # allowlist is an allowlist that admits nothing, not "no allowlist" --
+        # matching how allowed_ports already behaves in ssrf.validate_target.
+        # Normalized once here (case, trailing dot, IPv6 brackets) so the
+        # per-request check is a plain membership test.
         self.allowed_hosts: set[str] | None = (
-            set(allowed_hosts) if allowed_hosts else None
+            {normalize_host(h) for h in allowed_hosts}
+            if allowed_hosts is not None
+            else None
         )
 
         # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
@@ -195,11 +201,13 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             ValueError: If security validation fails
 
         """
-        # Check allowed hosts (normalized to close trailing-dot/case bypasses)
-        if self.allowed_hosts:
-            allowed = {normalize_host(h) for h in self.allowed_hosts}
-            if normalize_host(parsed_url.host) not in allowed:
-                raise ValueError(f"Host '{parsed_url.host}' not in allowed hosts list")
+        # Check allowed hosts (normalized at construction to close
+        # trailing-dot/case bypasses).
+        if (
+            self.allowed_hosts is not None
+            and normalize_host(parsed_url.host) not in self.allowed_hosts
+        ):
+            raise ValueError(f"Host '{parsed_url.host}' not in allowed hosts list")
 
         # Validate selector length
         if len(parsed_url.selector) > self.max_selector_length:
@@ -379,7 +387,12 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         an unavailable policy still allows the request through (Gopher cannot
         distinguish a missing selector from an unreachable server, and the real
         fetch would fail the same way) -- it just is not remembered.
+
+        An over-cap file is truncated and parsed rather than rejected (RFC 9309
+        section 2.5). Rejecting it made every request re-download the full cap
+        only to discard it, because an unavailable policy is never cached.
         """
+        cap = min(ROBOTS_MAX_BYTES, self.max_response_size)
         try:
             connect_addresses = await asyncio.wait_for(
                 validate_target(
@@ -396,9 +409,10 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
                 port,
                 "/robots.txt",
                 None,
-                max_bytes=ROBOTS_MAX_BYTES,
+                max_bytes=cap,
                 timeout=self.timeout_seconds,
                 connect_addresses=connect_addresses,
+                truncate_at_max=True,
             )
         except (
             SSRFError,
@@ -408,6 +422,16 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             ValueError,
         ) as e:
             raise RobotsUnavailable(f"could not reach {host}:{port}") from e
+        if len(raw) >= cap:
+            # Drop the trailing line: it was cut mid-way, and half a Disallow
+            # must not be applied as if it were a whole one.
+            logger.warning(
+                "robots.txt truncated at the size cap",
+                host=host,
+                port=port,
+                max_bytes=cap,
+            )
+            raw = raw[: raw.rfind(b"\n") + 1]
         text, _charset = decode_gopher_text(raw)
         return text
 
