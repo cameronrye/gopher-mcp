@@ -35,7 +35,12 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "mcp>=1.0.0",
+    # Capped at <2 deliberately: mcp 2.x renamed FastMCP to MCPServer and changed
+    # other APIs, so the server this package ships fails to import against it.
+    # CI never sees that -- `uv sync --locked` installs the locked 1.x -- but a
+    # plain `pip install gopher-mcp` resolves the newest mcp and would crash on
+    # startup. Lift the cap only together with the migration.
+    "mcp>=1.0.0,<2",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.0.0",
     "structlog>=23.2.0",
