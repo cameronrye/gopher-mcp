@@ -160,42 +160,6 @@ def format_gemini_url(
     return url
 
 
-def validate_gemini_url_components(
-    host: str,
-    port: int = 1965,
-    path: str = "/",
-    query: str | None = None,
-) -> None:
-    """Validate Gemini URL components.
-
-    Args:
-        host: Hostname
-        port: Port number
-        path: Resource path
-        query: Query string
-
-    Raises:
-        ValueError: If any component is invalid
-
-    """
-    # Validate host
-    if not host or not host.strip():
-        raise ValueError("Host cannot be empty")
-
-    # Validate port
-    if not 1 <= port <= 65535:
-        raise ValueError(f"Port must be between 1 and 65535, got {port}")
-
-    # Validate path
-    if not path.startswith("/"):
-        raise ValueError("Path must start with '/'")
-
-    # Check overall URL length
-    test_url = format_gemini_url(host, port, path, query)
-    if len(test_url.encode("utf-8")) > 1024:
-        raise ValueError("Resulting URL would exceed 1024 byte limit")
-
-
 def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
     """Parse raw Gemini response into status, meta, and body.
 

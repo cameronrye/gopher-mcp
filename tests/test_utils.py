@@ -9,12 +9,9 @@ import pytest
 from gopher_mcp.utils import (
     atomic_write_json,
     format_gemini_url,
-    format_gopher_url,
-    guess_mime_type,
     parse_gopher_menu,
     parse_gopher_url,
     parse_menu_line,
-    sanitize_selector,
     truncate_text,
 )
 
@@ -366,108 +363,6 @@ iThis is information\t\terror.host\t1
         assert result[0].title == "Before"
 
 
-class TestSanitizeSelector:
-    """Test sanitize_selector function."""
-
-    def test_valid_selector(self):
-        """Test sanitizing valid selector."""
-        selector = "/path/to/file.txt"
-        result = sanitize_selector(selector)
-        assert result == selector
-
-    def test_selector_with_tab(self):
-        """Test selector with forbidden tab character."""
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector("/path\t/file")
-        assert "forbidden character" in str(exc_info.value)
-
-    def test_selector_with_newline(self):
-        """Test selector with forbidden newline character."""
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector("/path\n/file")
-        assert "forbidden character" in str(exc_info.value)
-
-    def test_selector_with_carriage_return(self):
-        """Test selector with forbidden carriage return character."""
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector("/path\r/file")
-        assert "forbidden character" in str(exc_info.value)
-
-    def test_selector_too_long(self):
-        """Test selector that is too long."""
-        long_selector = "a" * 256
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector(long_selector)
-        assert "too long" in str(exc_info.value)
-
-    def test_selector_max_length(self):
-        """Test selector at maximum allowed length."""
-        max_selector = "a" * 255
-        result = sanitize_selector(max_selector)
-        assert result == max_selector
-
-
-class TestFormatGopherUrl:
-    """Test format_gopher_url function."""
-
-    def test_basic_url(self):
-        """Test formatting basic URL."""
-        result = format_gopher_url("example.com")
-        assert result == "gopher://example.com/1"
-
-    def test_url_with_custom_port(self):
-        """Test formatting URL with custom port."""
-        result = format_gopher_url("example.com", port=7070)
-        assert result == "gopher://example.com:7070/1"
-
-    def test_url_with_selector(self):
-        """Test formatting URL with selector."""
-        result = format_gopher_url("example.com", selector="/path/file.txt")
-        assert result == "gopher://example.com/1/path/file.txt"
-
-    def test_url_with_search(self):
-        """Test formatting URL with search."""
-        result = format_gopher_url("example.com", gopher_type="7", search="test query")
-        assert result == "gopher://example.com/7%09test%20query"
-
-    def test_selector_percent_is_encoded(self):
-        """A selector containing the characters '%09' must not be emitted raw:
-        parse_gopher_url would read it as the tab search separator and resolve a
-        different resource."""
-        result = format_gopher_url("example.com", 70, "1", "file%09name")
-        assert result == "gopher://example.com/1file%2509name"
-
-        parsed = parse_gopher_url(result)
-        assert parsed.selector == "file%09name"
-        assert parsed.search is None
-
-    def test_selector_url_syntax_is_encoded(self):
-        """'?' and '#' in a selector must not become a query or a fragment."""
-        result = format_gopher_url("example.com", 70, "1", "a?b#c")
-        parsed = parse_gopher_url(result)
-        assert parsed.selector == "a?b#c"
-        assert parsed.search is None
-
-    def test_url_search_ignored_for_non_search_type(self):
-        """Test that search is ignored for non-search types."""
-        result = format_gopher_url("example.com", gopher_type="1", search="test")
-        assert result == "gopher://example.com/1"
-
-    def test_ipv6_host_is_bracketed(self):
-        """An IPv6 literal host must be wrapped in brackets per RFC 3986.
-
-        Without brackets the colons in the address collide with the port
-        separator, producing a URL that re-parses incorrectly.
-        """
-        result = format_gopher_url("::1", port=70)
-        assert result == "gopher://[::1]/1"
-
-    def test_ipv6_host_with_port_is_bracketed(self):
-        """Brackets must separate an IPv6 host from an explicit port."""
-        result = format_gopher_url("2001:db8::1", port=7070)
-        assert result == "gopher://[2001:db8::1]:7070/1"
-
-
 class TestFormatGeminiUrl:
     """IPv6 bracketing for Gemini URL construction."""
 
@@ -564,66 +459,6 @@ class TestMenuItemSanitization:
 
         assert item is not None
         assert item.title == "Ban[2Jner"
-
-
-class TestGuessMimeType:
-    """Test guess_mime_type function."""
-
-    def test_text_type(self):
-        """Test MIME type for text."""
-        assert guess_mime_type("0") == "text/plain"
-
-    def test_menu_type(self):
-        """Test MIME type for menu."""
-        assert guess_mime_type("1") == "text/gopher-menu"
-
-    def test_search_type(self):
-        """Test MIME type for search."""
-        assert guess_mime_type("7") == "text/gopher-menu"
-
-    def test_image_types(self):
-        """Test MIME types for images."""
-        assert guess_mime_type("g") == "image/gif"
-        assert guess_mime_type("I") == "image/jpeg"
-
-    def test_unknown_type(self):
-        """Test MIME type for unknown type."""
-        assert guess_mime_type("X") == "application/octet-stream"
-
-    def test_extension_override(self):
-        """Test that file extension overrides type mapping."""
-        assert guess_mime_type("9", "file.jpg") == "image/jpeg"
-        assert guess_mime_type("9", "file.png") == "image/png"
-        assert guess_mime_type("9", "file.pdf") == "application/pdf"
-
-    def test_no_extension(self):
-        """Test selector without extension."""
-        assert guess_mime_type("9", "somefile") == "application/octet-stream"
-
-    def test_unknown_extension(self):
-        """Test selector with unknown extension."""
-        # This should use the gopher type mapping, not extension override
-        assert guess_mime_type("0", "file.unknown") == "text/plain"
-        assert guess_mime_type("9", "file.xyz") == "application/octet-stream"
-
-    def test_extension_case_insensitive(self):
-        """Test that extension matching is case insensitive."""
-        assert guess_mime_type("9", "file.JPG") == "image/jpeg"
-        assert guess_mime_type("9", "file.PNG") == "image/png"
-        assert guess_mime_type("9", "file.PDF") == "application/pdf"
-
-    def test_extension_does_not_override_authoritative_type(self):
-        """The Gopher item type is authoritative: a type-1 menu whose selector
-        ends in '.zip' is still a menu, and a type-0 text file named '.pdf' is
-        still text."""
-        assert guess_mime_type("1", "/pub/archive.zip") == "text/gopher-menu"
-        assert guess_mime_type("0", "/docs/notes.pdf") == "text/plain"
-        assert guess_mime_type("g", "/img/photo.png") == "image/gif"
-
-    def test_extension_still_refines_generic_types(self):
-        assert guess_mime_type("9", "/pub/archive.zip") == "application/zip"
-        assert guess_mime_type("I", "/img/photo.png") == "image/png"
-        assert guess_mime_type("X", "/docs/notes.pdf") == "application/pdf"
 
 
 class TestGopherUrlPortAndSelectorHandling:

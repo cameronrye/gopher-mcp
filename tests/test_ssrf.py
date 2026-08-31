@@ -119,14 +119,6 @@ class TestValidateTarget:
         await validate_target("localhost", 70, allow_local=True)
         await validate_target("127.0.0.1", 70, allow_local=True)
 
-    async def test_allowlist_rejects_other_hosts(self):
-        with pytest.raises(SSRFError, match="not allowed"):
-            await validate_target("example.com", 70, allowed_hosts=["other.com"])
-
-    async def test_allowlist_normalizes(self):
-        # Trailing dot / case must still match the allowlist entry.
-        await validate_target("Example.com.", 70, allowed_hosts=["example.com"])
-
     async def test_resolution_failure_raises(self, monkeypatch):
         async def boom(host, port):
             raise OSError("name resolution failed")

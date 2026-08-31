@@ -1,66 +1,10 @@
 """MIME-type helpers for the gopher and gemini protocols.
 
-``guess_mime_type`` maps a Gopher item type/extension to a MIME type;
 ``detect_binary_mime_type`` sniffs binary content by signature; the rest
 parse, default, validate and deny-list Gemini MIME types.
 """
 
 from .models import GeminiMimeType
-
-
-def guess_mime_type(gopher_type: str, selector: str = "") -> str:
-    """Guess MIME type from Gopher type and selector.
-
-    Args:
-        gopher_type: Gopher item type
-        selector: Selector string (for file extension hints)
-
-    Returns:
-        Guessed MIME type
-
-    """
-    # Standard Gopher type mappings
-    type_mappings = {
-        "0": "text/plain",
-        "1": "text/gopher-menu",
-        "4": "application/mac-binhex40",
-        "5": "application/zip",
-        "6": "application/x-uuencoded",
-        "7": "text/gopher-menu",  # Search results are menus
-        "9": "application/octet-stream",
-        "g": "image/gif",
-        "I": "image/jpeg",  # Generic image
-    }
-
-    mime_type = type_mappings.get(gopher_type, "application/octet-stream")
-
-    # The item type is authoritative in Gopher, so an extension hint may only
-    # refine a deliberately generic type ('9' binary, 'I' image, or a type the
-    # table doesn't know). Letting it win everywhere turned a type-1 menu named
-    # "archive.zip" into application/zip and a type-0 "notes.pdf" into a PDF.
-    refinable = gopher_type in {"9", "I"} or gopher_type not in type_mappings
-
-    # Refine based on file extension if available
-    if refinable and selector and "." in selector:
-        extension = selector.split(".")[-1].lower()
-        extension_mappings = {
-            "txt": "text/plain",
-            "html": "text/html",
-            "htm": "text/html",
-            "jpg": "image/jpeg",
-            "jpeg": "image/jpeg",
-            "png": "image/png",
-            "gif": "image/gif",
-            "pdf": "application/pdf",
-            "zip": "application/zip",
-            "tar": "application/x-tar",
-            "gz": "application/gzip",
-        }
-
-        if extension in extension_mappings:
-            mime_type = extension_mappings[extension]
-
-    return mime_type
 
 
 def parse_gemini_mime_type(mime_string: str) -> "GeminiMimeType":

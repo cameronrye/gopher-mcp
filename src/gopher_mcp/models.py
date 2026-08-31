@@ -1,7 +1,8 @@
 """Pydantic models for Gopher MCP data validation."""
 
+import time
 from enum import Enum, IntEnum
-from typing import Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -9,6 +10,70 @@ from pydantic import (
     field_validator,
     model_serializer,
 )
+
+# Cache provenance. Only the result kinds the clients actually cache carry these
+# fields -- Gopher menus/text/binaries and the Gemini success/gemtext bodies. An
+# error, redirect, input prompt or certificate prompt is never cached, so adding
+# three permanently-null keys to it would be noise. The descriptions are the
+# whole point of the feature: they are what the model reads when it has to
+# decide whether a response is fresh enough to answer with.
+_CachedFlag = Annotated[
+    bool,
+    Field(
+        description=(
+            "True when this result was replayed from the local response cache "
+            "instead of being fetched from the server during this call. Treat "
+            "the content as a snapshot taken at `cached_at`, not as the "
+            "current state of the resource."
+        )
+    ),
+]
+_CachedAt = Annotated[
+    float | None,
+    Field(
+        description=(
+            "UNIX timestamp (seconds) at which the cached copy was actually "
+            "fetched from the server. Null when `cached` is false."
+        )
+    ),
+]
+_CacheAgeSeconds = Annotated[
+    float | None,
+    Field(
+        description=(
+            "How old the cached copy was, in seconds, when this result was "
+            "returned. If the user is asking about something that may have "
+            "changed since then, fetch again with `refresh=true`. Null when "
+            "`cached` is false."
+        )
+    ),
+]
+
+_ResultT = TypeVar("_ResultT", bound=BaseModel)
+
+
+def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
+    """Return a copy of ``response`` tagged as served from the cache.
+
+    A copy, never the stored object: the cache hands back the very instance it
+    holds, so tagging in place would also mark the entry itself -- and with it
+    the response already returned by the fetch that populated the entry.
+
+    Args:
+        response: The cached result to tag.
+        cached_at: When the cached copy was fetched from the server.
+
+    Returns:
+        A copy of ``response`` carrying the cache-provenance fields.
+
+    """
+    return response.model_copy(
+        update={
+            "cached": True,
+            "cached_at": cached_at,
+            "cache_age_seconds": round(time.time() - cached_at, 1),
+        }
+    )
 
 
 class GopherFetchRequest(BaseModel):
@@ -58,6 +123,9 @@ class MenuResult(BaseModel):
         description="True if the menu had more items than the render limit and "
         "`items` was truncated",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -77,6 +145,9 @@ class TextResult(BaseModel):
         description="True if `text` was truncated to the render limit (`bytes` "
         "still reports the full original size)",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -96,6 +167,9 @@ class BinaryResult(BaseModel):
         default="Binary content not returned to preserve context",
         description="Note about binary handling",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -104,12 +178,18 @@ class BinaryResult(BaseModel):
 
 
 class ErrorResult(BaseModel):
-    """Result model for error responses."""
+    """Result model for error responses, shared by both protocols.
+
+    ``error`` is deliberately ``dict[str, Any]``: a Gemini failure carries the
+    numeric ``status`` (and the boolean ``temporary``) beside the message, and a
+    Gopher-only ``dict[str, str]`` twin meant that annotation was the only thing
+    keeping those fields out of a Gopher error.
+    """
 
     # 'kind' makes the result self-describing and a reliable discriminator
-    # across every Gopher result type (and matches GeminiErrorResult).
+    # across every result type.
     kind: Literal["error"] = "error"
-    error: dict[str, str] = Field(..., description="Error information")
+    error: dict[str, Any] = Field(..., description="Error information")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -330,6 +410,9 @@ class GeminiSuccessResult(BaseModel):
         description="True if `content` was truncated to the render limit "
         "(`size` still reports the full original size).",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
 
     request_info: dict[str, Any] = Field(
         default_factory=dict,
@@ -357,6 +440,9 @@ class GeminiBinaryResult(BaseModel):
         default="Binary content not returned to preserve context",
         description="Note about binary handling",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -390,16 +476,9 @@ class GeminiRedirectResult(BaseModel):
     )
 
 
-class GeminiErrorResult(BaseModel):
-    """Result model for error responses."""
-
-    kind: Literal["error"] = "error"
-    error: dict[str, Any] = Field(..., description="Error information")
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        alias="requestInfo",
-        description="Information about the original request",
-    )
+# The Gemini error result IS :class:`ErrorResult`; the alias keeps the
+# protocol-suffixed spelling used by the Gemini modules and their tests.
+GeminiErrorResult = ErrorResult
 
 
 class GeminiCertificateResult(BaseModel):
@@ -443,7 +522,13 @@ class GemtextLineType(str, Enum):
 class GemtextLink(BaseModel):
     """Model for gemtext link lines."""
 
-    url: str = Field(..., description="Link URL (absolute or relative)")
+    url: str = Field(
+        ...,
+        description=(
+            "Link URL, resolved against the request URL when the document was "
+            "fetched, so links returned by a fetch are absolute"
+        ),
+    )
     text: str | None = Field(None, description="Link text (optional)")
 
     @field_validator("url")
@@ -561,6 +646,9 @@ class GeminiGemtextResult(BaseModel):
         description="True if the gemtext was truncated to the render limit "
         "(`size` still reports the full original byte size)",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -607,6 +695,52 @@ class TOFUEntry(BaseModel):
     def is_expired(self, current_time: float) -> bool:
         """Check if certificate is expired."""
         return self.expires is not None and current_time > self.expires
+
+
+class TOFUTrustListResult(BaseModel):
+    """Result model for a read-only inspection of the TOFU trust store.
+
+    Only the entries the caller asked about are returned. The store's own
+    filesystem path is deliberately absent: it is operator configuration that
+    belongs in the server log, not in a payload handed to a model.
+    """
+
+    kind: Literal["trust_list"] = "trust_list"
+    entries: list[TOFUEntry] = Field(
+        ...,
+        description="Pinned certificates matching the request, ordered by host",
+    )
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
+
+
+class TOFUTrustUpdateResult(BaseModel):
+    """Result model for a change to the TOFU trust store.
+
+    Reports only the host the caller named, so a modification can never become
+    a way to enumerate the rest of the store.
+    """
+
+    kind: Literal["trust_update"] = "trust_update"
+    action: Literal["remove", "pin"] = Field(
+        ..., description="The change that was requested"
+    )
+    host: str = Field(..., description="Host whose pin was targeted")
+    port: int = Field(..., ge=1, le=65535, description="Port whose pin was targeted")
+    changed: bool = Field(
+        ...,
+        description="True if the trust store was actually modified. False means "
+        "there was nothing to change (e.g. the host had no pin to remove)",
+    )
+    message: str = Field(..., description="Human-readable summary of the outcome")
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
 
 
 class GeminiCacheEntry(_BaseCacheEntry[GeminiFetchResponse]):

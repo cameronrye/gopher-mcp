@@ -126,7 +126,7 @@ def _extract_preformat_metadata(alt_text: str | None, content: str) -> dict[str,
 
 def _parse_gemtext_link_line(
     line: str, base_url: str | None = None
-) -> dict[str, str | None] | None:
+) -> Optional["GemtextLink"]:
     """Parse a gemtext link line.
 
     Format: =>[whitespace]<URL>[whitespace]<link-text>
@@ -138,7 +138,7 @@ def _parse_gemtext_link_line(
             Relative references are the norm in gemtext.
 
     Returns:
-        Dict with 'url' and 'text' keys, or None if invalid
+        The parsed link, or None if the line carries no usable URL
 
     """
     if not line.startswith("=>"):
@@ -167,7 +167,7 @@ def _parse_gemtext_link_line(
         if not text:  # Empty text after whitespace
             text = None
 
-    return {"url": url, "text": text}
+    return GemtextLink(url=url, text=text)
 
 
 def _create_gemtext_line(
@@ -181,7 +181,12 @@ def _create_gemtext_line(
     level: int | None = None,
     alt_text: str | None = None,
 ) -> "GemtextLine":
-    """Create a GemtextLine object with the given parameters.
+    """Build a ``GemtextLine``, defaulting the fields this line type doesn't use.
+
+    ``GemtextLine`` declares its optional fields as ``Field(None, ...)``, whose
+    default mypy does not see through ``dataclass_transform`` -- it treats all
+    nine as required. This wrapper is the one place that spells them all out, so
+    a caller passes only the field its line type populates.
 
     Args:
         line_type: Type of the line
@@ -261,15 +266,13 @@ def _parse_link(
     if not line_content.startswith("=>"):
         return None
 
-    link_data = _parse_gemtext_link_line(line_content, base_url)
-    if link_data and link_data["url"]:
-        link_obj = GemtextLink(url=link_data["url"], text=link_data["text"])
-        line = _create_gemtext_line(GemtextLineType.LINK, line_content, link=link_obj)
-        return (line, link_obj)
-    else:
+    link_obj = _parse_gemtext_link_line(line_content, base_url)
+    if link_obj is None:
         # Invalid link line, treat as text
-        line = _create_gemtext_line(GemtextLineType.TEXT, line_content)
-        return (line, None)
+        return (_create_gemtext_line(GemtextLineType.TEXT, line_content), None)
+
+    line = _create_gemtext_line(GemtextLineType.LINK, line_content, link=link_obj)
+    return (line, link_obj)
 
 
 def _parse_list_item(line_content: str) -> Optional["GemtextLine"]:
@@ -312,19 +315,6 @@ def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
         )
 
     return None
-
-
-def _parse_text(line_content: str) -> "GemtextLine":
-    """Parse a text line.
-
-    Args:
-        line_content: Raw line content
-
-    Returns:
-        GemtextLine object for text
-    """
-
-    return _create_gemtext_line(GemtextLineType.TEXT, line_content)
 
 
 def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument":
@@ -370,50 +360,32 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
 
         # Handle preformat mode
         if in_preformat:
-            # Check for preformat toggle (end)
-            if line_content.startswith("```"):
-                # End preformat block
+            # A closing ``` and the verbatim content between the toggles differ
+            # only in ``is_toggle``. Block-level metadata (language and the
+            # code/data flags) belongs on the opening toggle line, not on every
+            # line inside: repeating a 6-key metadata dict per line was pure
+            # serialized bloat (its ``line_count`` was always 1 and
+            # ``char_count`` just re-stated ``len(content)``).
+            closes_block = line_content.startswith("```")
+            if closes_block:
                 in_preformat = False
                 current_alt_text = None
-                preformat_obj = GemtextPreformat(
-                    content=line_content,
-                    alt_text=None,
-                    is_toggle=True,
-                    language=None,
-                    metadata={},
+            preformat_obj = GemtextPreformat(
+                content=line_content,
+                alt_text=None,
+                is_toggle=closes_block,
+                language=None,
+                metadata={},
+            )
+            lines.append(
+                _create_gemtext_line(
+                    GemtextLineType.PREFORMAT,
+                    line_content,
+                    preformat=preformat_obj,
+                    alt_text=current_alt_text,
                 )
-                lines.append(
-                    _create_gemtext_line(
-                        GemtextLineType.PREFORMAT,
-                        line_content,
-                        preformat=preformat_obj,
-                        alt_text=current_alt_text,
-                    )
-                )
-                continue
-            else:
-                # Regular preformat content. Block-level metadata (language and
-                # the code/data flags) belongs on the opening toggle line, not
-                # on every content line: repeating a 6-key metadata dict per line
-                # was pure serialized bloat (its ``line_count`` was always 1 and
-                # ``char_count`` just re-stated ``len(content)``). A content line
-                # carries only its verbatim text.
-                preformat_obj = GemtextPreformat(
-                    content=line_content,
-                    alt_text=None,
-                    is_toggle=False,
-                    language=None,
-                    metadata={},
-                )
-                lines.append(
-                    _create_gemtext_line(
-                        GemtextLineType.PREFORMAT,
-                        line_content,
-                        preformat=preformat_obj,
-                        alt_text=current_alt_text,
-                    )
-                )
-                continue
+            )
+            continue
 
         # Normal mode - recognize line types
         if line_content.startswith("```"):
@@ -459,6 +431,6 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
 
         else:
             # Default: text line
-            lines.append(_parse_text(line_content))
+            lines.append(_create_gemtext_line(GemtextLineType.TEXT, line_content))
 
     return GemtextDocument(lines=lines, links=links)

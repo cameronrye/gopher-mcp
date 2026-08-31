@@ -1,6 +1,7 @@
 """Security and penetration tests for Gopher and Gemini protocols."""
 
 from unittest.mock import AsyncMock, Mock, patch
+from urllib.parse import quote
 
 import pytest
 
@@ -33,35 +34,51 @@ class TestInputSanitization:
         with pytest.raises(ValueError):
             GeminiFetchRequest(url=malicious_url)
 
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        "malicious_input",
+        "selector",
         [
-            "\r\n\r\nHTTP/1.1 200 OK\r\n\r\n<script>alert('xss')</script>",
-            "sel\tsmuggled-search",
-            "sel\rmore",
-            "sel\nmore",
+            "%0d%0a%0d%0aHTTP/1.1%20200%20OK",
+            "sel%09a%09b",
+            "sel%0dmore",
+            "sel%0amore",
         ],
     )
-    def test_request_smuggling_characters_are_rejected(self, malicious_input: str):
+    async def test_request_smuggling_characters_are_rejected(self, selector: str):
         """RFC 1436 frames a request as one CRLF-terminated, tab-delimited line.
 
-        A selector carrying TAB/CR/LF could therefore forge an extra field or a
-        second request on the wire, so the sanitizer must refuse it outright.
+        A selector carrying CR/LF could forge a second request on the wire, and a
+        TAB beyond the one that separates a type-7 search could forge an extra
+        field, so the client must refuse them before sending.
         """
-        from gopher_mcp.utils import sanitize_selector
+        from gopher_mcp.gopher_client import GopherClient
 
-        with pytest.raises(ValueError, match="forbidden character"):
-            sanitize_selector(malicious_input)
+        client = GopherClient(
+            cache_enabled=False, requests_per_minute=0, timeout_seconds=1
+        )
+        result = await client.fetch(f"gopher://example.com/0/{selector}")
+        await client.close()
 
-    def test_oversized_selector_is_rejected(self):
-        """The 255-char cap is a hard boundary, not an approximate one."""
-        from gopher_mcp.utils import sanitize_selector
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "INVALID_REQUEST"
 
-        assert sanitize_selector("A" * 255) == "A" * 255
-        with pytest.raises(ValueError, match="too long"):
-            sanitize_selector("A" * 256)
-        with pytest.raises(ValueError, match="too long"):
-            sanitize_selector("A" * 10000)
+    @pytest.mark.asyncio
+    async def test_oversized_selector_is_rejected(self):
+        """The configured selector cap is a hard boundary, not an approximate one."""
+        from gopher_mcp.gopher_client import GopherClient
+
+        client = GopherClient(
+            cache_enabled=False,
+            requests_per_minute=0,
+            timeout_seconds=1,
+            max_selector_length=255,
+        )
+        result = await client.fetch("gopher://example.com/0/" + "A" * 256)
+        await client.close()
+
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "INVALID_REQUEST"
+        assert "too long" in result.error["message"].lower()
 
     @pytest.mark.parametrize(
         "url",
@@ -101,9 +118,11 @@ class TestInputSanitization:
         a change to that policy has to be a deliberate one -- the robots gate,
         which *does* resolve dot segments, is tested in test_robots.py.
         """
-        from gopher_mcp.utils import sanitize_selector
+        from gopher_mcp.utils import parse_gopher_url
 
-        assert sanitize_selector(traversal) == traversal
+        parsed = parse_gopher_url(f"gopher://example.com/0/{quote(traversal)}")
+
+        assert parsed.selector == f"/{traversal}"
 
     def test_url_length_limits(self):
         """Test URL length validation."""

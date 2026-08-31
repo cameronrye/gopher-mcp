@@ -310,17 +310,16 @@ class TestConnectionInfo:
         ssl_obj.getpeercert.return_value = b"fake_cert_data"
         ssl_obj.cipher.return_value = ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
         ssl_obj.version.return_value = "TLSv1.3"
-        ssl_obj.server_hostname = "example.org"
 
         info = GeminiTLSClient()._get_connection_info(ssl_obj, 1.5)
 
         assert info["connection_time"] == 1.5
         assert info["tls_version"] == "TLSv1.3"
         assert info["cipher"] == "TLS_AES_256_GCM_SHA384"
-        assert info["cipher_strength"] == 256
-        assert info["sni_hostname"] == "example.org"
         expected = "sha256:" + hashlib.sha256(b"fake_cert_data").hexdigest()
         assert info["cert_fingerprint"] == expected
+        # Only what a caller reads is kept; the DER blob in particular is not.
+        assert "peer_cert_der" not in info
 
     def test_get_connection_info_error(self):
         ssl_obj = Mock()

@@ -618,26 +618,3 @@ class TOFUManager:
         """
         with self._lock:
             return list(self._entries.values())
-
-    def cleanup_expired(self) -> int:
-        """Remove expired certificates.
-
-        Returns:
-            Number of certificates removed
-        """
-        with self._lock:
-            current_time = time.time()
-            expired_keys = []
-
-            for key, entry in self._entries.items():
-                if entry.is_expired(current_time):
-                    expired_keys.append(key)
-
-            for key in expired_keys:
-                del self._entries[key]
-
-            if expired_keys:
-                self._save_entries(removed_keys=set(expired_keys))
-                logger.info("Expired certificates removed", count=len(expired_keys))
-
-            return len(expired_keys)

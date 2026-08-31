@@ -7,7 +7,6 @@ from gopher_mcp.models import GeminiFetchRequest, GeminiURL
 from gopher_mcp.utils import (
     format_gemini_url,
     parse_gemini_url,
-    validate_gemini_url_components,
 )
 
 
@@ -201,51 +200,6 @@ class TestGeminiURLFormatting:
         assert url == "gemini://example.org:7070/search?q=gemini"
 
 
-class TestGeminiURLValidation:
-    """Test Gemini URL component validation."""
-
-    def test_valid_components(self):
-        """Test validation of valid URL components."""
-        # Should not raise any exception
-        validate_gemini_url_components("example.org", 1965, "/path", "query=test")
-
-    def test_empty_host(self):
-        """Test that empty host is rejected."""
-        with pytest.raises(ValueError, match="Host cannot be empty"):
-            validate_gemini_url_components("", 1965, "/")
-
-    def test_whitespace_host(self):
-        """Test that whitespace-only host is rejected."""
-        with pytest.raises(ValueError, match="Host cannot be empty"):
-            validate_gemini_url_components("   ", 1965, "/")
-
-    def test_invalid_port_low(self):
-        """Test that port below 1 is rejected."""
-        with pytest.raises(ValueError, match="Port must be between 1 and 65535"):
-            validate_gemini_url_components("example.org", 0, "/")
-
-    def test_invalid_port_high(self):
-        """Test that port above 65535 is rejected."""
-        with pytest.raises(ValueError, match="Port must be between 1 and 65535"):
-            validate_gemini_url_components("example.org", 70000, "/")
-
-    def test_invalid_path(self):
-        """Test that path not starting with / is rejected."""
-        with pytest.raises(ValueError, match="Path must start with '/'"):
-            validate_gemini_url_components("example.org", 1965, "path")
-
-    def test_url_length_limit_validation(self):
-        """Test that resulting URL length is validated."""
-        # Create components that would result in a URL > 1024 bytes
-        # "gemini://example.org/" is 21 bytes, so path needs to be > 1003 bytes
-        long_path = "/" + "a" * 1010  # This will make the total URL > 1024 bytes
-
-        with pytest.raises(
-            ValueError, match="Resulting URL would exceed 1024 byte limit"
-        ):
-            validate_gemini_url_components("example.org", 1965, long_path)
-
-
 class TestGeminiURLModel:
     """Test GeminiURL Pydantic model."""
 
@@ -416,17 +370,6 @@ class TestGeminiUtilityFunctions:
                 assert home_dir is not None
                 assert home_dir == Path("/tmp")
 
-    def test_guess_mime_type(self):
-        """Test MIME type guessing functionality."""
-        from gopher_mcp.utils import guess_mime_type
-
-        # Test various gopher types
-        assert guess_mime_type("0") == "text/plain"
-        assert guess_mime_type("1") == "text/gopher-menu"
-        assert guess_mime_type("g") == "image/gif"
-        assert guess_mime_type("I") == "image/jpeg"
-        assert guess_mime_type("9") == "application/octet-stream"
-
     def test_detect_binary_mime_type(self):
         """Test binary MIME type detection."""
         from gopher_mcp.utils import detect_binary_mime_type
@@ -471,45 +414,6 @@ class TestGeminiUtilityFunctions:
         assert document.lines[0].type == "heading1"
         assert document.lines[1].type == "text"
         assert document.lines[2].type == "link"
-
-    def test_format_gopher_url_with_search(self):
-        """Test Gopher URL formatting with search parameter."""
-        from gopher_mcp.utils import format_gopher_url
-
-        # Test with search parameter for type 7 (search)
-        url = format_gopher_url(
-            host="example.com",
-            port=70,
-            gopher_type="7",
-            selector="/search",
-            search="test query",
-        )
-
-        # The search is percent-encoded, so the URL re-parses to the components
-        # it was built from.
-        assert url == "gopher://example.com/7/search%09test%20query"
-
-    def test_format_gopher_url_non_standard_port(self):
-        """Test Gopher URL formatting with non-standard port."""
-        from gopher_mcp.utils import format_gopher_url
-
-        url = format_gopher_url(
-            host="example.com", port=7070, gopher_type="1", selector="/menu"
-        )
-
-        assert url == "gopher://example.com:7070/1/menu"
-
-    def test_guess_mime_type_with_selector(self):
-        """Test MIME type guessing with selector hints."""
-        from gopher_mcp.utils import guess_mime_type
-
-        # Test with file extension hints in selector
-        mime_type = guess_mime_type("0", "/documents/readme.txt")
-        assert mime_type == "text/plain"
-
-        # Test with image extension
-        mime_type = guess_mime_type("9", "/images/photo.jpg")
-        assert mime_type == "image/jpeg"
 
 
 class TestGeminiUrlPortHandling:

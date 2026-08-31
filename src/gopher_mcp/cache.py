@@ -2,9 +2,10 @@
 
 The Gopher and Gemini clients previously carried a character-for-character
 identical cache implementation (only the entry class differed), so any fix had
-to be applied twice. This mixin holds the one implementation; each client mixes
-it in, exposes the required attributes, and sets ``_cache_entry_cls`` to its
-concrete :class:`~gopher_mcp.models._BaseCacheEntry` subclass.
+to be applied twice. This mixin holds the one implementation; the shared
+:class:`~gopher_mcp.client_base.FetchClientBase` mixes it in and supplies the
+required attributes, and each client sets ``_cache_entry_cls`` to its concrete
+:class:`~gopher_mcp.models._BaseCacheEntry` subclass.
 """
 
 import time
@@ -35,8 +36,13 @@ class TTLCacheMixin(Generic[V]):
     cache_ttl_seconds: int
     _cache_entry_cls: "type[_BaseCacheEntry[V]]"
 
-    def _get_cached_response(self, url: str) -> V | None:
-        """Return a cached, non-expired response for ``url`` (LRU touch)."""
+    def _get_cached_entry(self, url: str) -> "_BaseCacheEntry[V] | None":
+        """Return the cached, non-expired entry for ``url`` (LRU touch).
+
+        The entry rather than the bare value, because its ``timestamp`` is when
+        the copy was actually fetched -- the provenance a caller has to attach
+        to a cache hit before handing it to the model.
+        """
         if not self.cache_enabled or url not in self._cache:
             return None
 
@@ -47,7 +53,17 @@ class TTLCacheMixin(Generic[V]):
 
         # Move to end to mark as recently used (LRU)
         self._cache.move_to_end(url)
-        return entry.value
+        return entry
+
+    def _get_cached_response(self, url: str) -> V | None:
+        """Return a cached, non-expired response for ``url`` (LRU touch).
+
+        The stored value as-is, with no cache-provenance marking; use
+        :meth:`_get_cached_entry` where the caller has to tell the model that a
+        response is a replay and how old it is.
+        """
+        entry = self._get_cached_entry(url)
+        return None if entry is None else entry.value
 
     def _cache_response(self, url: str, response: V) -> None:
         """Cache ``response`` for ``url`` with LRU eviction when full."""

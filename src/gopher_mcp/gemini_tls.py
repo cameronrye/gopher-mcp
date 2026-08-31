@@ -39,6 +39,12 @@ PROBE_TIMEOUT_SECONDS = 1.0
 class TLSConfig:
     """Configuration for TLS connections."""
 
+    # ``min_version`` and ``verify_mode`` are intentionally fixed: no GEMINI_*
+    # environment variable reaches either, and the only production construction
+    # of this class takes the defaults. CERT_NONE in particular must stay a
+    # constant -- peer authentication in Gemini is TOFU fingerprint pinning, so
+    # exposing it as a knob would invite turning on CA validation and rejecting
+    # the self-signed certificates the protocol is built around.
     min_version: str = "TLSv1.2"
     verify_mode: ssl.VerifyMode = ssl.CERT_NONE
     client_cert_path: str | None = None
@@ -258,14 +264,15 @@ class GeminiTLSClient:
             peer_cert_info = self._parse_peer_cert(peer_cert)
             cipher = ssl_object.cipher()
 
+            # Only what a caller actually consumes: TOFU reads the fingerprint
+            # and cert info, and request_info reports the version and cipher.
+            # The DER in particular is deliberately not kept -- retaining the
+            # whole certificate per connection bought nothing.
             info: dict[str, Any] = {
                 "connection_time": connection_time,
                 "tls_version": ssl_object.version(),
                 "cipher": cipher[0] if cipher else None,
-                "cipher_strength": cipher[2] if cipher else None,
-                "peer_cert_der": peer_cert,
                 "peer_cert_info": peer_cert_info,
-                "sni_hostname": ssl_object.server_hostname,
             }
 
             # Add certificate fingerprint if available

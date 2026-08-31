@@ -17,12 +17,19 @@ from gopher_mcp import models
 
 # Expected serialized keys = declared fields + computed fields (what model_dump()
 # emits without ``by_alias=True``, which is how the tools serialize results).
+# Cache provenance, carried only by the result kinds the clients cache. Errors,
+# redirects and the input/certificate prompts are never cached, so they must NOT
+# grow these keys -- three permanently-null fields on every failure is noise the
+# model pays for on every call.
+CACHE_KEYS = {"cached", "cached_at", "cache_age_seconds"}
+
 EXPECTED_KEYS: dict[str, set[str]] = {
     # Gopher result models
     "GopherMenuItem": {"type", "title", "selector", "host", "port", "next_url"},
-    "MenuResult": {"kind", "items", "truncated", "request_info"},
-    "TextResult": {"kind", "charset", "bytes", "text", "truncated", "request_info"},
-    "BinaryResult": {"kind", "bytes", "mime_type", "note", "request_info"},
+    "MenuResult": {"kind", "items", "truncated", "request_info"} | CACHE_KEYS,
+    "TextResult": {"kind", "charset", "bytes", "text", "truncated", "request_info"}
+    | CACHE_KEYS,
+    "BinaryResult": {"kind", "bytes", "mime_type", "note", "request_info"} | CACHE_KEYS,
     "ErrorResult": {"kind", "error", "request_info"},
     # Gemini result models
     "GeminiSuccessResult": {
@@ -32,14 +39,16 @@ EXPECTED_KEYS: dict[str, set[str]] = {
         "size",
         "truncated",
         "request_info",
-    },
+    }
+    | CACHE_KEYS,
     "GeminiBinaryResult": {
         "kind",
         "mime_type",
         "size",
         "note",
         "request_info",
-    },
+    }
+    | CACHE_KEYS,
     "GeminiInputResult": {"kind", "prompt", "sensitive", "request_info"},
     "GeminiRedirectResult": {"kind", "new_url", "permanent", "request_info"},
     "GeminiErrorResult": {"kind", "error", "request_info"},
@@ -59,6 +68,26 @@ EXPECTED_KEYS: dict[str, set[str]] = {
         "size",
         "truncated",
         "request_info",
+    }
+    | CACHE_KEYS,
+    # Trust-store tool results
+    "TOFUTrustListResult": {"kind", "entries", "request_info"},
+    "TOFUTrustUpdateResult": {
+        "kind",
+        "action",
+        "host",
+        "port",
+        "changed",
+        "message",
+        "request_info",
+    },
+    "TOFUEntry": {
+        "host",
+        "port",
+        "fingerprint",
+        "first_seen",
+        "last_seen",
+        "expires",
     },
     # Gemtext content models
     "GemtextDocument": {"lines", "links"},

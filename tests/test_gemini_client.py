@@ -9,6 +9,7 @@ import pytest
 from gopher_mcp.gemini_client import GeminiClient, _safe_display_url
 from gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
 from gopher_mcp.models import (
+    GeminiCacheEntry,
     GeminiErrorResult,
     GeminiMimeType,
     GeminiRedirectResult,
@@ -332,12 +333,23 @@ class TestGeminiClientFetch:
             requestInfo={},
         )
 
-        with patch.object(client, "_get_cached_response") as mock_get_cache:
-            mock_get_cache.return_value = cached_response
+        entry = GeminiCacheEntry(
+            key="gemini://example.com/",
+            value=cached_response,
+            timestamp=time.time() - 30,
+            ttl=300,
+        )
+
+        with patch.object(client, "_get_cached_entry") as mock_get_cache:
+            mock_get_cache.return_value = entry
 
             result = await client.fetch("gemini://example.com/")
 
-            assert result == cached_response
+            # The content is the cached one, but the copy handed back is marked
+            # as a replay so the model can tell it is not the current state.
+            assert isinstance(result, GeminiSuccessResult)
+            assert result.content == cached_response.content
+            assert result.cached is True
             mock_get_cache.assert_called_once_with("gemini://example.com/")
 
     @pytest.mark.asyncio
@@ -643,6 +655,7 @@ class TestGeminiClientFetchContent:
         mock_parsed_url = Mock()
         mock_parsed_url.host = "example.com"
         mock_parsed_url.port = 1965
+        mock_parsed_url.path = "/"
 
         with patch.object(client.tls_client, "connect") as mock_connect:
             mock_connect.side_effect = TLSConnectionError("Connection failed")
@@ -711,6 +724,23 @@ class TestGeminiClientCaching:
 
         result = client._get_cached_response("gemini://example.com/")
         assert result is None
+
+    def test_zero_ttl_disables_the_cache(self):
+        """A zero TTL means every entry is expired the instant it is written, so
+        the client must treat it as caching off rather than keep the bookkeeping
+        for a cache that can never hit -- the same rule the config layer applies.
+        """
+        client = GeminiClient(cache_ttl_seconds=0)
+        assert client.cache_enabled is False
+
+        response = GeminiSuccessResult(
+            content="Cached",
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            size=6,
+            requestInfo={},
+        )
+        client._cache_response("gemini://example.com/", response)
+        assert len(client._cache) == 0
 
     def test_cache_response_eviction(self):
         """Test cache eviction when full."""

@@ -276,6 +276,17 @@ class TestCacheManagement:
         client._cache_response("gopher://example.com/1/", response)
         assert len(client._cache) == 0
 
+    def test_zero_ttl_disables_the_cache(self):
+        """A zero TTL means every entry is expired the instant it is written, so
+        the client must treat it as caching off rather than keep the bookkeeping
+        for a cache that can never hit -- the same rule the config layer applies.
+        """
+        client = GopherClient(cache_ttl_seconds=0)
+        assert client.cache_enabled is False
+
+        client._cache_response("gopher://example.com/1/", MenuResult(items=[]))
+        assert len(client._cache) == 0
+
     def test_cache_response_eviction(self):
         """Test cache eviction when max entries reached."""
         client = GopherClient(max_cache_entries=2)
@@ -349,7 +360,11 @@ class TestFetchMethod:
             )
 
             result = await client.fetch(url)
-            assert result == expected_result
+            # The cached items come back, marked as a replay rather than as the
+            # current state of the menu.
+            assert isinstance(result, MenuResult)
+            assert result.items == expected_result.items
+            assert result.cached is True
             # parse_gopher_url should still be called for validation even with cache hit
             mock_parse.assert_called_once_with(url)
 
@@ -448,8 +463,10 @@ class TestFetchMethod:
             second = await client.fetch("gopher://example.com/1/")
 
             assert first == expected_result
-            assert second == expected_result
+            assert isinstance(second, MenuResult)
+            assert second.items == expected_result.items
             # The second request is served from cache -- no second fetch.
+            assert second.cached is True
             assert mock_fetch.call_count == 1
 
     @pytest.mark.asyncio

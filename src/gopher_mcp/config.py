@@ -5,7 +5,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Self
 
 import structlog
 from pydantic import Field, field_validator, model_validator
@@ -116,8 +116,15 @@ def _parse_ports(v: str, env_var: str) -> list[int]:
     return ports
 
 
-class GopherConfig(BaseSettings):
-    """Configuration for Gopher protocol client."""
+class _ProtocolConfig(BaseSettings):
+    """Settings every protocol client shares.
+
+    The two protocol configs declared the same fourteen fields -- same defaults,
+    bounds and (mostly) descriptions -- plus byte-identical allowlist
+    validators, so a corrected bound or a fixed parse had to be applied twice.
+    They live here once; a subclass supplies its ``env_prefix``, its own fields,
+    and a replacement Field only where the *description* is protocol-specific.
+    """
 
     max_response_size: int = Field(
         default=1048576,  # 1MB
@@ -159,6 +166,69 @@ class GopherConfig(BaseSettings):
         description="Allow connections to loopback/private/internal addresses "
         "(disabled by default to prevent SSRF)",
     )
+    max_rendered_chars: int = Field(
+        default=50000,
+        description="LLM-facing cap on returned text characters (distinct from "
+        "the network byte cap); 0 = unlimited. Truncation is flagged on the "
+        "result.",
+        ge=0,
+        le=10485760,
+    )
+    max_concurrent_requests: int = Field(
+        default=5,  # matches the batch tools' own concurrency
+        description="Cap on simultaneous in-flight fetches (0 = unlimited); a "
+        "coarse bound on concurrent sockets/memory, complementary to the "
+        "per-host rate limit. Defaults to the batch tools' own concurrency so "
+        "parallel tool calls cannot multiply past it.",
+        ge=0,
+        le=1000,
+    )
+    robots_cache_ttl_seconds: int = Field(
+        default=86400,  # 24 hours; RFC 9309 s2.4 permits up to this
+        description="How long a fetched robots.txt policy stays valid, in "
+        "seconds. RFC 9309 s2.4 permits up to 24 hours.",
+        ge=0,
+        le=604800,  # at most one week
+    )
+
+    model_config = SettingsConfigDict(
+        # env_prefix is supplied per protocol; the rest is shared.
+        case_sensitive=False,
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
+    @classmethod
+    def _env_var(cls, field_name: str) -> str:
+        """Name the environment variable a field is read from, for messages."""
+        return f"{cls.model_config.get('env_prefix', '')}{field_name}".upper()
+
+    @field_validator("allowed_hosts", mode="before")
+    @classmethod
+    def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
+        """Parse comma-separated allowed hosts from environment variable."""
+        return _parse_host_allowlist(v, cls._env_var("allowed_hosts"))
+
+    # ``allowed_ports`` is declared per protocol (only its documented example
+    # port differs), so the field is absent from this class at decoration time.
+    @field_validator("allowed_ports", mode="before", check_fields=False)
+    @classmethod
+    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
+        """Parse a comma-separated port allowlist from an environment variable."""
+        return _parse_port_allowlist(v, cls._env_var("allowed_ports"))
+
+    @model_validator(mode="after")
+    def disable_cache_without_ttl(self) -> Self:
+        """Treat a zero TTL as caching disabled rather than a no-hit cache."""
+        if self.cache_ttl_seconds == 0:
+            self.cache_enabled = False
+        return self
+
+
+class GopherConfig(_ProtocolConfig):
+    """Configuration for Gopher protocol client."""
+
     allowed_ports: Annotated[list[int] | None, NoDecode] = Field(
         default=None,
         description="Optional positive port allowlist (comma-separated, e.g. "
@@ -177,14 +247,6 @@ class GopherConfig(BaseSettings):
         ge=1,
         le=4096,
     )
-    max_rendered_chars: int = Field(
-        default=50000,
-        description="LLM-facing cap on returned text characters (distinct from "
-        "the network byte cap); 0 = unlimited. Truncation is flagged on the "
-        "result.",
-        ge=0,
-        le=10485760,
-    )
     max_menu_items: int = Field(
         default=1000,
         description="LLM-facing cap on the number of Gopher menu items returned "
@@ -202,28 +264,12 @@ class GopherConfig(BaseSettings):
         ge=0,
         le=6000,
     )
-    max_concurrent_requests: int = Field(
-        default=5,  # matches the batch tools' own concurrency
-        description="Cap on simultaneous in-flight fetches (0 = unlimited); a "
-        "coarse bound on concurrent sockets/memory, complementary to the "
-        "per-host rate limit. Defaults to the batch tools' own concurrency so "
-        "parallel tool calls cannot multiply past it.",
-        ge=0,
-        le=1000,
-    )
     respect_robots_txt: bool = Field(
         default=False,
         description="Fetch and honour /robots.txt from the host root before "
         "retrieving a resource, following the convention Veronica-2 documents "
         "(User-agent 'gopher-mcp' and '*'). Off by default because it adds a "
         "round-trip per host; see docs for the fail-open caveat.",
-    )
-    robots_cache_ttl_seconds: int = Field(
-        default=86400,  # 24 hours; RFC 9309 s2.4 permits up to this
-        description="How long a fetched robots.txt policy stays valid, in "
-        "seconds. RFC 9309 s2.4 permits up to 24 hours.",
-        ge=0,
-        le=604800,  # at most one week
     )
     robots_honor_ai_tokens: bool = Field(
         default=True,
@@ -233,77 +279,12 @@ class GopherConfig(BaseSettings):
         "tooling'.",
     )
 
-    model_config = SettingsConfigDict(
-        env_prefix="GOPHER_",
-        case_sensitive=False,
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    @field_validator("allowed_hosts", mode="before")
-    @classmethod
-    def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
-        """Parse comma-separated allowed hosts from environment variable."""
-        return _parse_host_allowlist(v, "GOPHER_ALLOWED_HOSTS")
-
-    @field_validator("allowed_ports", mode="before")
-    @classmethod
-    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
-        """Parse a comma-separated port allowlist from an environment variable."""
-        return _parse_port_allowlist(v, "GOPHER_ALLOWED_PORTS")
-
-    @model_validator(mode="after")
-    def disable_cache_without_ttl(self) -> "GopherConfig":
-        """Treat a zero TTL as caching disabled rather than a no-hit cache."""
-        if self.cache_ttl_seconds == 0:
-            self.cache_enabled = False
-        return self
+    model_config = SettingsConfigDict(env_prefix="GOPHER_")
 
 
-class GeminiConfig(BaseSettings):
+class GeminiConfig(_ProtocolConfig):
     """Configuration for Gemini protocol client."""
 
-    max_response_size: int = Field(
-        default=1048576,  # 1MB
-        description="Maximum response size in bytes",
-        ge=1024,
-        le=104857600,
-    )
-    timeout_seconds: float = Field(
-        default=30.0,
-        description="Request timeout in seconds",
-        gt=0,
-        le=300,
-    )
-    cache_enabled: bool = Field(
-        default=True,
-        description="Whether to enable response caching",
-    )
-    cache_ttl_seconds: int = Field(
-        default=300,
-        description="Cache time-to-live in seconds; 0 disables caching (every "
-        "entry would expire the instant it is stored).",
-        ge=0,
-        le=86400,  # at most one day
-    )
-    max_cache_entries: int = Field(
-        default=1000,
-        description="Maximum number of cache entries",
-        ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
-        le=100000,
-    )
-    allowed_hosts: Annotated[list[str] | None, NoDecode] = Field(
-        default=None,
-        description="List of allowed hostnames, comma-separated (None = allow "
-        "all). An explicitly empty list is rejected rather than read as "
-        "allow-all.",
-    )
-    allow_local_hosts: bool = Field(
-        default=False,
-        description="Allow connections to loopback/private/internal addresses "
-        "(disabled by default to prevent SSRF)",
-    )
     allowed_ports: Annotated[list[int] | None, NoDecode] = Field(
         default=None,
         description="Optional positive port allowlist (comma-separated, e.g. "
@@ -333,14 +314,6 @@ class GeminiConfig(BaseSettings):
         default=None,
         description="Client certificates storage directory path",
     )
-    max_rendered_chars: int = Field(
-        default=50000,
-        description="LLM-facing cap on returned text characters (distinct from "
-        "the network byte cap); 0 = unlimited. Truncation is flagged on the "
-        "result.",
-        ge=0,
-        le=10485760,
-    )
     requests_per_minute: float = Field(
         default=60.0,  # one request per second, per host
         description="Per-host outbound request rate cap (politeness for small "
@@ -350,28 +323,12 @@ class GeminiConfig(BaseSettings):
         ge=0,
         le=6000,
     )
-    max_concurrent_requests: int = Field(
-        default=5,  # matches the batch tools' own concurrency
-        description="Cap on simultaneous in-flight fetches (0 = unlimited); a "
-        "coarse bound on concurrent sockets/memory, complementary to the "
-        "per-host rate limit. Defaults to the batch tools' own concurrency so "
-        "parallel tool calls cannot multiply past it.",
-        ge=0,
-        le=1000,
-    )
     respect_robots_txt: bool = Field(
         default=False,
         description="Fetch and honour /robots.txt from the capsule root before "
         "retrieving a resource, following the Gemini companion specification "
         "(virtual agents 'webproxy' and 'indexer', plus '*'). Off by default "
         "because it adds a round-trip per host.",
-    )
-    robots_cache_ttl_seconds: int = Field(
-        default=86400,  # 24 hours; RFC 9309 s2.4 permits up to this
-        description="How long a fetched robots.txt policy stays valid, in "
-        "seconds. RFC 9309 s2.4 permits up to 24 hours.",
-        ge=0,
-        le=604800,  # at most one week
     )
     robots_honor_ai_tokens: bool = Field(
         default=True,
@@ -385,25 +342,7 @@ class GeminiConfig(BaseSettings):
         "content, e.g. 'text/html,image/*'; empty = no content filtering.",
     )
 
-    model_config = SettingsConfigDict(
-        env_prefix="GEMINI_",
-        case_sensitive=False,
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
-
-    @field_validator("allowed_hosts", mode="before")
-    @classmethod
-    def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
-        """Parse comma-separated allowed hosts from environment variable."""
-        return _parse_host_allowlist(v, "GEMINI_ALLOWED_HOSTS")
-
-    @field_validator("allowed_ports", mode="before")
-    @classmethod
-    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
-        """Parse a comma-separated port allowlist from an environment variable."""
-        return _parse_port_allowlist(v, "GEMINI_ALLOWED_PORTS")
+    model_config = SettingsConfigDict(env_prefix="GEMINI_")
 
     @field_validator("denied_mime_types", mode="before")
     @classmethod
@@ -414,13 +353,6 @@ class GeminiConfig(BaseSettings):
         if isinstance(v, list):
             return v
         return [mime.lower() for mime in _split_list_value(v)]
-
-    @model_validator(mode="after")
-    def disable_cache_without_ttl(self) -> "GeminiConfig":
-        """Treat a zero TTL as caching disabled rather than a no-hit cache."""
-        if self.cache_ttl_seconds == 0:
-            self.cache_enabled = False
-        return self
 
 
 class ServerConfig(BaseSettings):

@@ -2,16 +2,15 @@
 
 import asyncio
 import time
-from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
 import structlog
 
-from .cache import TTLCacheMixin
+from .client_base import FetchClientBase
 from .client_certs import ClientCertificateManager
-from .gemini_parse import GeminiProtocolError
+from .gemini_parse import GeminiProtocolError, format_gemini_url
 from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnection, TLSConnectionError
 from .models import (
     GeminiCacheEntry,
@@ -20,16 +19,14 @@ from .models import (
     GeminiFetchResponse,
     GeminiURL,
     TOFUEntry,
+    mark_from_cache,
 )
-from .ratelimit import RateLimiter
 from .robots import (
-    AI_AGENT_TOKENS,
     GEMINI_TOKENS,
     ROBOTS_MAX_BYTES,
-    RobotsGate,
     RobotsUnavailable,
 )
-from .ssrf import SSRFError, normalize_host, validate_target
+from .ssrf import SSRFError, validate_target
 from .tofu import (
     TOFUExpiredError,
     TOFUManager,
@@ -38,7 +35,6 @@ from .tofu import (
     TOFUValidationError,
 )
 from .utils import (
-    bracket_host,
     normalize_cache_key,
     parse_gemini_response,
     parse_gemini_url,
@@ -101,14 +97,19 @@ def _safe_display_url(parsed_url: GeminiURL) -> str:
     reflected back to the caller. This mirrors the host/port/path-only logging
     used throughout this module.
     """
-    url = f"gemini://{bracket_host(parsed_url.host)}"
-    if parsed_url.port != 1965:
-        url = f"{url}:{parsed_url.port}"
-    return f"{url}{parsed_url.path}"
+    return format_gemini_url(parsed_url.host, parsed_url.port, parsed_url.path)
 
 
-class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
+class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
     """Async Gemini protocol client with TLS, caching and safety features."""
+
+    _log_label = "Gemini"
+    _cache_entry_cls = GeminiCacheEntry
+    _robots_tokens = GEMINI_TOKENS
+    # Unlike Gopher this fails *closed* on a temporary failure (RFC 9309
+    # s2.3.1.4), which Gemini can express because it has status codes -- see
+    # :meth:`_fetch_robots` for the 4x/5x mapping.
+    _robots_fail_closed = True
 
     def __init__(
         self,
@@ -157,32 +158,23 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             robots_honor_ai_tokens: Also honour rules naming AI crawler tokens
                 (ClaudeBot, GPTBot, ...)
         """
-        self.max_response_size = max_response_size
-        self.timeout_seconds = timeout_seconds
-        self.cache_enabled = cache_enabled
-        self.cache_ttl_seconds = cache_ttl_seconds
-        self.max_cache_entries = max_cache_entries
-        self.max_rendered_chars = max_rendered_chars
-        self._rate_limiter = RateLimiter(requests_per_minute)
-        self.max_concurrent_requests = max_concurrent_requests
-        # Coarse cap on simultaneous fetches; 0 disables it (None = unlimited).
-        self._fetch_semaphore = (
-            asyncio.Semaphore(max_concurrent_requests)
-            if max_concurrent_requests > 0
-            else None
+        super().__init__(
+            max_response_size=max_response_size,
+            timeout_seconds=timeout_seconds,
+            cache_enabled=cache_enabled,
+            cache_ttl_seconds=cache_ttl_seconds,
+            max_cache_entries=max_cache_entries,
+            allowed_hosts=allowed_hosts,
+            allow_local_hosts=allow_local_hosts,
+            allowed_ports=allowed_ports,
+            max_rendered_chars=max_rendered_chars,
+            requests_per_minute=requests_per_minute,
+            max_concurrent_requests=max_concurrent_requests,
+            respect_robots_txt=respect_robots_txt,
+            robots_cache_ttl_seconds=robots_cache_ttl_seconds,
+            robots_honor_ai_tokens=robots_honor_ai_tokens,
         )
         self.denied_mime_types = frozenset(denied_mime_types or ())
-        # An explicitly EMPTY allowlist is an allowlist that admits nothing, not
-        # "no allowlist" -- matching how allowed_ports already behaves in
-        # ssrf.validate_target. Normalized once here (case, trailing dot, IPv6
-        # brackets) so the per-request check is a plain membership test.
-        self.allowed_hosts: set[str] | None = (
-            {normalize_host(h) for h in allowed_hosts}
-            if allowed_hosts is not None
-            else None
-        )
-        self.allow_local_hosts = allow_local_hosts
-        self.allowed_ports = allowed_ports
         self.tofu_enabled = tofu_enabled
         self.client_certs_enabled = client_certs_enabled
 
@@ -220,30 +212,6 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         # instead of on every client-cert request (blocking work on the loop).
         self._client_cert_tls_clients: dict[tuple[str, str], GeminiTLSClient] = {}
 
-        # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
-        # is inherited from the mixin annotation; only the entry class differs.
-        self._cache = OrderedDict()
-        self._cache_entry_cls = GeminiCacheEntry
-
-        # Robot exclusion (opt-in), following the Gemini companion spec rather
-        # than RFC 9309. Unlike Gopher this fails *closed* on a temporary
-        # failure (RFC 9309 s2.3.1.4), which Gemini can express because it has
-        # status codes -- see :meth:`_fetch_robots` for the 4x/5x mapping.
-        self.respect_robots_txt = respect_robots_txt
-        self._robots_gate = (
-            RobotsGate(
-                # Resolved at call time rather than bound here, so the
-                # gate follows the method (and stays patchable in tests).
-                fetcher=lambda host, port: self._fetch_robots(host, port),
-                tokens=GEMINI_TOKENS,
-                extra_tokens=(AI_AGENT_TOKENS if robots_honor_ai_tokens else ()),
-                ttl_seconds=robots_cache_ttl_seconds,
-                fail_closed=True,
-            )
-            if respect_robots_txt
-            else None
-        )
-
     def _tls_client_for_cert(self, cert_path: str, key_path: str) -> GeminiTLSClient:
         """Return a TLS client bound to a client certificate, cached per pair.
 
@@ -277,23 +245,21 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         Raises:
             ValueError: If security constraints are violated
         """
-        # Check allowed hosts (normalized at construction to close
-        # trailing-dot/case bypasses).
-        if (
-            self.allowed_hosts is not None
-            and normalize_host(parsed_url.host) not in self.allowed_hosts
-        ):
+        if not self._host_is_allowed(parsed_url.host):
             raise ValueError(f"Host not allowed: {parsed_url.host}")
 
         # Validate port range
         if not 1 <= parsed_url.port <= 65535:
             raise ValueError(f"Invalid port number: {parsed_url.port}")
 
-    async def fetch(self, url: str) -> GeminiFetchResponse:
+    async def fetch(self, url: str, *, refresh: bool = False) -> GeminiFetchResponse:
         """Fetch content from a Gemini URL.
 
         Args:
             url: Gemini URL to fetch
+            refresh: Skip the cache lookup and go to the server. The fresh
+                response still replaces the cached one, so this bypasses the
+                cache for this read rather than disabling it.
 
         Returns:
             Structured response based on status code
@@ -323,10 +289,15 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             # only in host case share one entry instead of duplicating.
             cache_key = normalize_cache_key(url)
 
-            # Check cache first
-            if self.cache_enabled:
-                cached_response = self._get_cached_response(cache_key)
-                if cached_response:
+            # Check cache first, unless the caller asked for the current state.
+            if self.cache_enabled and not refresh:
+                cached_entry = self._get_cached_entry(cache_key)
+                if cached_entry is not None:
+                    # Tag the copy handed back so the model can see it is a
+                    # replay, and how stale, rather than reading it as current.
+                    cached_response = mark_from_cache(
+                        cached_entry.value, cached_entry.timestamp
+                    )
                     # Log without the query string: a status-10/11 answer (which
                     # the caller percent-encodes into the query) may be a secret.
                     logger.debug(
@@ -420,10 +391,12 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 "CERTIFICATE_CHANGED",
                 "Server certificate failed TOFU verification (it does not match "
                 "the previously trusted certificate). Self-signed Gemini "
-                "certificates are routinely reissued, so if this rotation is "
-                "expected, remove the host's pinned entry from the TOFU trust "
-                "store and retry; the server log for this request names the "
-                "store path and the entry.",
+                "certificates are routinely reissued, so this may be a "
+                "legitimate rotation -- or an intercepted connection; the two "
+                "are indistinguishable from here. Ask the user before "
+                "proceeding: gemini_trust_list reports what is pinned for this "
+                "host, and gemini_trust_update removes or replaces that pin "
+                "once they confirm the change is expected.",
                 e,
             )
         except TOFUStorageError as e:
@@ -465,24 +438,13 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         finally:
             _FETCH_BUDGET.reset(budget_token)
 
-    def _error_result(
-        self, url: str, code: str, message: str, exc: Exception
-    ) -> GeminiErrorResult:
-        """Build a sanitized error result, logging full detail server-side."""
-        # Drop any query string: for a status-10/11 follow-up the answer (a
-        # possible secret) is encoded there and must not be logged or returned.
-        safe_url = url.split("?", 1)[0]
-        logger.error(
-            "Gemini fetch failed",
-            url=safe_url,
-            code=code,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        return GeminiErrorResult(
-            error={"code": code, "message": message},
-            requestInfo={"url": safe_url, "timestamp": time.time()},
-        )
+    def _safe_error_url(self, url: str) -> str:
+        """Drop the query string before an error URL is logged or returned.
+
+        For a status-10/11 follow-up the answer (a possible secret) is
+        percent-encoded there, so it must reach neither the log nor the caller.
+        """
+        return url.split("?", 1)[0]
 
     def _maybe_honor_slow_down(self, host: str, response: GeminiFetchResponse) -> None:
         """If ``response`` is a status-44 SLOW_DOWN, back off this host.
@@ -601,21 +563,6 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         # these is a policy we can apply, so nothing is disallowed.
         return None
 
-    async def _bounded_fetch(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
-        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set.
-
-        The per-host spacing is waited out BEFORE a concurrency slot is
-        taken. Sleeping while holding the semaphore would let one
-        throttled host occupy every slot, starving unrelated hosts that
-        are not rate limited at all -- harmless when both settings were
-        off by default, but not now that they ship enabled.
-        """
-        await self._rate_limiter.acquire(parsed_url.host)
-        if self._fetch_semaphore is None:
-            return await self._fetch_content(parsed_url)
-        async with self._fetch_semaphore:
-            return await self._fetch_content(parsed_url)
-
     async def _fetch_content(
         self,
         parsed_url: GeminiURL,
@@ -670,7 +617,8 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 # validated IP so the TLS layer can't re-resolve to a rebinding
                 # answer. DNS is inside the deadline because getaddrinfo is
                 # otherwise unbounded (a tarpit nameserver could stall a worker
-                # -- and tie up an event-loop executor thread -- indefinitely).
+                # indefinitely); the stalled worker itself is confined to
+                # ssrf.py's own bounded DNS pool, never the loop's executor.
                 connect_addresses = await validate_target(
                     parsed_url.host,
                     parsed_url.port,
@@ -771,14 +719,14 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                             warning=warning,
                         )
 
-                # Format Gemini request: URL + CRLF (bracket an IPv6 literal host
-                # per RFC 3986 so its colons aren't read as a port separator).
-                request_url = f"gemini://{bracket_host(parsed_url.host)}"
-                if parsed_url.port != 1965:
-                    request_url += f":{parsed_url.port}"
-                request_url += parsed_url.path
-                if parsed_url.query:
-                    request_url += f"?{parsed_url.query}"
+                # Format Gemini request: URL + CRLF. Unlike the display/log form
+                # this one MUST carry the query -- it is the status-10/11 answer.
+                request_url = format_gemini_url(
+                    parsed_url.host,
+                    parsed_url.port,
+                    parsed_url.path,
+                    parsed_url.query,
+                )
 
                 request_data = f"{request_url}\r\n".encode()
 
@@ -849,7 +797,8 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             if connection is not None:
                 await tls_client.close(connection)
 
-    # _get_cached_response / _cache_response are provided by TTLCacheMixin.
+    # The cache accessors, _bounded_fetch, _error_result and close() are
+    # provided by FetchClientBase.
 
     def update_tofu_certificate(
         self, host: str, port: int, cert_fingerprint: str, force: bool = False
@@ -987,8 +936,3 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             raise ValueError("Client certificates are not enabled")
 
         return self.client_cert_manager.remove_certificate(host, port, path)
-
-    async def close(self) -> None:
-        """Close the client and cleanup resources."""
-        self._cache.clear()
-        logger.info("Gemini client closed")

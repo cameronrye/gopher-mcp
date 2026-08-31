@@ -130,7 +130,9 @@ class TestGopherFetch:
             assert result["bytes"] == 15
             assert result["charset"] == "utf-8"
 
-            mock_client.fetch.assert_called_once_with("gopher://example.com/0/test.txt")
+            mock_client.fetch.assert_called_once_with(
+                "gopher://example.com/0/test.txt", refresh=False
+            )
 
     @pytest.mark.asyncio
     async def test_gopher_fetch_invalid_url(self):
@@ -792,7 +794,9 @@ class TestGeminiFetch:
 
             assert result["kind"] == "gemtext"
             assert result["raw_content"] == "# Test"
-            mock_client.fetch.assert_called_once_with("gemini://example.org/")
+            mock_client.fetch.assert_called_once_with(
+                "gemini://example.org/", refresh=False
+            )
 
     @pytest.mark.asyncio
     async def test_gemini_fetch_invalid_url(self):

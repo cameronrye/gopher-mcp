@@ -417,35 +417,3 @@ class ClientCertificateManager:
             return True
 
         return False
-
-    def cleanup_expired(self) -> int:
-        """Remove expired certificates.
-
-        Returns:
-            Number of certificates removed
-        """
-        current_time = datetime.now(UTC)
-        expired_keys = []
-
-        for key, cert_info in self._certificates.items():
-            try:
-                not_after = datetime.fromisoformat(
-                    cert_info.not_after.replace("Z", "+00:00")
-                )
-                # Ensure timezone-aware comparison
-                if not_after.tzinfo is None:
-                    not_after = not_after.replace(tzinfo=UTC)
-                if not_after < current_time:
-                    expired_keys.append(key)
-            except ValueError:
-                # If we can't parse the date, consider it expired
-                expired_keys.append(key)
-
-        for key in expired_keys:
-            cert_info = self._certificates[key]
-            self.remove_certificate(cert_info.host, cert_info.port, cert_info.path)
-
-        if expired_keys:
-            logger.info("Expired client certificates removed", count=len(expired_keys))
-
-        return len(expired_keys)
