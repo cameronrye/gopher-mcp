@@ -42,6 +42,30 @@ cd gopher-mcp
 ./scripts/dev-setup.sh
 ```
 
+### Method 4: Docker
+
+The repository includes a `Dockerfile` that builds a wheel and installs it into
+a slim, non-root image. No image is published to a registry, so build it from a
+checkout:
+
+```bash
+git clone https://github.com/cameronrye/gopher-mcp.git
+cd gopher-mcp
+docker build -t gopher-mcp .
+
+# Default CMD: streamable-http on 0.0.0.0:8000
+docker run --rm -p 8000:8000 gopher-mcp
+
+# Or stdio, for an MCP client that spawns the process
+docker run --rm -i gopher-mcp --transport stdio
+```
+
+The image's `ENTRYPOINT` is `gopher-mcp`, so anything after the image name is
+passed straight to the CLI. See the transport warning under
+[MCP Client Integration](#mcp-client-integration) before exposing the HTTP
+transports. CI builds this image and smoke-tests `gopher-mcp --help` on every
+pull request, so it stays in step with the project's supported Python versions.
+
 ## Verification
 
 Verify your installation:

@@ -92,6 +92,26 @@ scripts\dev-setup.bat   # Windows
 uv run task serve
 ```
 
+#### Option 4: Docker
+
+The repository ships a `Dockerfile` that builds a wheel and installs it into a
+slim, non-root image. There is no published image — build it yourself:
+
+```bash
+docker build -t gopher-mcp .
+
+# The default CMD serves streamable-http on 0.0.0.0:8000
+docker run --rm -p 8000:8000 gopher-mcp
+
+# Or run over stdio, e.g. for an MCP client
+docker run --rm -i gopher-mcp --transport stdio
+```
+
+> **Note:** the default `CMD` binds `0.0.0.0` so the container is reachable out
+> of the box. The HTTP transports are unauthenticated and have no TLS — put the
+> container behind a trusted reverse proxy, or use `--transport stdio`, before
+> exposing it beyond your machine.
+
 ### Claude Desktop Integration
 
 Add to your `claude_desktop_config.json`. The recommended entry uses `uvx`, so

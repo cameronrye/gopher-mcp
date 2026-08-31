@@ -14,8 +14,8 @@ The canonical repository is
   features, PATCH for backward-compatible fixes.
 - **Tags trigger publishing** — pushing a Git tag matching `v*` (e.g. `v0.4.0`)
   runs [`.github/workflows/release.yml`](https://github.com/cameronrye/gopher-mcp/blob/main/.github/workflows/release.yml),
-  which validates, tests, builds, creates a GitHub Release, and publishes to
-  PyPI. Nothing publishes without a tag.
+  which validates, tests, builds, publishes to PyPI, and then creates the
+  GitHub Release. Nothing publishes without a tag.
 - **Trusted Publishing (OIDC)** — uploads to PyPI use GitHub's OpenID Connect
   identity, so there are **no API tokens** to manage. Packages are also signed
   and attested via Sigstore.
@@ -25,10 +25,14 @@ The canonical repository is
   default).
 
 !!! note "Approval gate"
-    The final PyPI publish step runs in the protected `pypi` GitHub environment
-    and pauses for a manual approval from a maintainer before uploading. The
-    rest of the workflow (validation, tests, build, GitHub Release) runs
-    automatically.
+    The PyPI publish step runs in the protected `pypi` GitHub environment and
+    pauses for a manual approval from a maintainer before uploading; everything
+    before it (validation, tests, build) runs automatically. The **GitHub
+    Release is created last, after the PyPI upload succeeds**, so a public
+    release never advertises a `pip install gopher-mcp==X` that PyPI cannot
+    serve. If approval is declined or the upload fails, no release is published;
+    if the release step itself fails after a successful upload, re-run that job
+    — the tag and the built artifacts are still there.
 
 ## One-time setup
 
@@ -78,17 +82,19 @@ The `pypi` environment should be restricted to protected branches.
 
 ### 1. Bump the version
 
-The version string lives in three places, but only one is the source of truth:
+The version string is written in three places, but only one is the source of
+truth:
 
 | Location                                  | What to do                                                                 |
 | ----------------------------------------- | -------------------------------------------------------------------------- |
 | `pyproject.toml` (`version = "X.Y.Z"`)    | **Source of truth.** Update this. The release workflow checks the tag against it. |
+| `server.json` (**two** fields: top-level `version` **and** `packages[0].version`) | Update **both**. The release workflow fails the tag run if either one differs from the tag. |
 | `uv.lock` (the `gopher-mcp` package entry)| Regenerate by running `uv lock` (or any `uv sync`) so the lockfile records the new version. |
 | `src/gopher_mcp/__init__.py`              | **No action needed** — `__version__` is derived at runtime from the installed package metadata, not hardcoded. |
 
-The helper script `scripts/prepare-release.py` automates the
-`pyproject.toml` bump and a CHANGELOG entry, but **does not** update `uv.lock`
-— run `uv lock` yourself after bumping:
+The helper script `scripts/prepare-release.py` automates the `pyproject.toml`
+and `server.json` bumps and a CHANGELOG entry, but **does not** update
+`uv.lock` — run `uv lock` yourself after bumping:
 
 ```bash
 # Update pyproject.toml + CHANGELOG, then run the full preparation checks.
@@ -104,8 +110,15 @@ uv lock
     Always run `uv lock` after a version bump and commit the result, or the
     package version in the lockfile will be stale.
 
-You can also bump everything manually: edit `version` in `pyproject.toml`, run
-`uv lock`, and add the CHANGELOG entry by hand.
+You can also bump everything manually: edit `version` in `pyproject.toml`, edit
+**both** version fields in `server.json`, run `uv lock`, and add the CHANGELOG
+entry by hand.
+
+!!! warning "`server.json` has two version fields"
+    The MCP registry manifest repeats the version at the top level and inside
+    `packages[0]`. The release workflow rejects a tag if either differs, so
+    missing one means deleting and re-pushing the tag. Check both with
+    `python -c "import json; d=json.load(open('server.json')); print(d['version'], d['packages'][0]['version'])"`.
 
 ### 2. Update the CHANGELOG
 
@@ -150,7 +163,7 @@ uv run python -m twine check dist/*
 ### 4. Commit, tag, and push
 
 ```bash
-git add pyproject.toml uv.lock CHANGELOG.md
+git add pyproject.toml server.json uv.lock CHANGELOG.md
 git commit -m "Prepare release v0.5.0"
 git push origin main
 ```
@@ -172,7 +185,7 @@ git push origin v0.5.0     # this starts the release
 
 1. Open the [Actions tab](https://github.com/cameronrye/gopher-mcp/actions) and
    follow the **Release** run. It proceeds through: validate → test & build →
-   create GitHub Release → publish to PyPI.
+   publish to PyPI → create GitHub Release.
 2. When the `Publish to PyPI` job pauses for the `pypi` environment, review the
    prior steps and **approve the deployment**.
 3. Verify the results:
@@ -198,11 +211,12 @@ checking locally avoids a failed release run.)
 - [ ] Lint and format pass: `uv run ruff check .` and `uv run ruff format --check .`.
 - [ ] Type checking passes: `uv run mypy src`.
 - [ ] Tests pass with coverage ≥85%: `uv run pytest`.
-- [ ] Security scans pass: `uv run bandit -r src/` and `uv run pip-audit`.
+- [ ] Security scans pass: `uv run bandit -r src/` and `uv run pip-audit`. `pip-audit` is advisory-only in CI and in the release workflow (the nightly audit tracks findings in a `security-audit` issue), so check it here rather than relying on the tag run to stop you.
 - [ ] Docs build cleanly: `uv run mkdocs build --strict`.
 - [ ] `README.md` and configuration examples reflect any new behavior.
 - [ ] `CHANGELOG.md` has a complete, dated `## [X.Y.Z]` section; breaking changes and any migration notes are called out.
 - [ ] `version` in `pyproject.toml` matches the tag you will create.
+- [ ] **Both** `server.json` version fields (top-level `version` and `packages[0].version`) match the tag.
 - [ ] `uv.lock` regenerated (`uv lock`) and committed.
 - [ ] Package builds and installs: `uv build && uv run python -m twine check dist/*`.
 - [ ] `scripts/validate-release.py` passes.
@@ -223,9 +237,9 @@ git tag -a v0.5.0-rc.1 -m "Release candidate 0.5.0-rc.1"
 git push origin v0.5.0-rc.1
 ```
 
-Remember to set the matching pre-release version in `pyproject.toml` and add a
-`## [0.5.0-rc.1]` CHANGELOG entry first, since the consistency and changelog
-checks still apply.
+Remember to set the matching pre-release version in `pyproject.toml` and
+`server.json`, and add a `## [0.5.0-rc.1]` CHANGELOG entry first, since the
+consistency and changelog checks still apply.
 
 ### TestPyPI
 

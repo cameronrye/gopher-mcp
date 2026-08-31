@@ -1,0 +1,122 @@
+name: Security Audit
+
+# Nightly dependency audit. pip-audit is advisory-only everywhere else (CI, the
+# release and the TestPyPI paths) so a newly published advisory cannot turn an
+# unrelated PR red or block a tag; this workflow is where that signal lands
+# instead, as a single tracking issue that stays open until the audit is clean.
+on:
+  schedule:
+    # 04:17 UTC daily, ahead of Dependabot's Monday 09:00 run.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  FORCE_COLOR: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  audit:
+    name: Audit locked dependencies
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --locked --all-extras
+
+      - name: Run pip-audit
+        id: audit
+        run: |
+          set +e
+          uv run pip-audit --format markdown --output pip-audit-report.md
+          STATUS=$?
+          set -e
+          # A non-zero exit means either findings or a tool/network failure.
+          # Both need a human, so both open the tracking issue.
+          if [[ $STATUS -eq 0 ]]; then
+            echo "clean=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "clean=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ ! -s pip-audit-report.md ]]; then
+            echo "pip-audit produced no report (exit ${STATUS}); see the workflow logs." > pip-audit-report.md
+          fi
+          cat pip-audit-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.md
+
+      - name: Open or update the tracking issue
+        if: steps.audit.outputs.clean == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: "Dependency advisories reported by pip-audit"
+          ISSUE_LABEL: security-audit
+        run: |
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          {
+            echo "The nightly \`pip-audit\` run found advisories against the locked dependencies."
+            echo
+            echo "pip-audit is advisory-only in CI and in the release workflow, so this issue is the"
+            echo "blocking signal: bump the affected dependency (or wait for Dependabot's Monday run,"
+            echo "then merge it) and this issue closes itself on the next clean audit."
+            echo
+            echo "Last checked: $(date -u +'%Y-%m-%d %H:%M UTC') ([run]($RUN_URL))"
+            echo
+            cat pip-audit-report.md
+          } > issue-body.md
+
+          # One issue, reused: matching on the exact title within the label
+          # keeps a nightly schedule from filing a duplicate every run.
+          gh label create "$ISSUE_LABEL" --color d93f0b --description "Dependency advisories found by the nightly audit" 2>/dev/null || true
+          EXISTING=$(gh issue list --state open --label "$ISSUE_LABEL" --json number,title \
+            --jq "map(select(.title == \"${ISSUE_TITLE}\")) | .[0].number // empty")
+
+          if [[ -n "$EXISTING" ]]; then
+            gh issue edit "$EXISTING" --body-file issue-body.md
+            echo "Updated issue #${EXISTING}"
+          else
+            gh issue create --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" --body-file issue-body.md
+          fi
+
+      - name: Close the tracking issue when clean
+        if: steps.audit.outputs.clean == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_TITLE: "Dependency advisories reported by pip-audit"
+          ISSUE_LABEL: security-audit
+        run: |
+          EXISTING=$(gh issue list --state open --label "$ISSUE_LABEL" --json number,title \
+            --jq "map(select(.title == \"${ISSUE_TITLE}\")) | .[0].number // empty")
+          if [[ -n "$EXISTING" ]]; then
+            gh issue close "$EXISTING" --comment "pip-audit is clean as of $(date -u +'%Y-%m-%d %H:%M UTC')."
+            echo "Closed issue #${EXISTING}"
+          else
+            echo "pip-audit is clean; no open tracking issue."
+          fi

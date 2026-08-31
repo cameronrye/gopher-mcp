@@ -210,9 +210,12 @@ export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se,kennedy.gemi.dev"
 | `GEMINI_TOFU_STORAGE_PATH` | TOFU storage file path | `~/.gemini/tofu.json` | `/custom/path/tofu.json` |
 | `GEMINI_CLIENT_CERTS_STORAGE_PATH` | Client certificate storage directory | `~/.gemini/certs/` | `/custom/path/certs/` |
 | `GEMINI_MAX_RENDERED_CHARS` | LLM-facing cap on returned text characters (0 = unlimited) | `50000` | `100000` |
-| `GEMINI_REQUESTS_PER_MINUTE` | Per-host request rate cap (0 = unlimited) | `0` | `60` |
-| `GEMINI_MAX_CONCURRENT_REQUESTS` | Cap on simultaneous in-flight fetches (0 = unlimited) | `0` | `20` |
-| `GEMINI_DENIED_MIME_TYPES` | Comma-separated MIME deny list (supports `type/*`) | `None` | `text/html,image/*` |
+| `GEMINI_REQUESTS_PER_MINUTE` | Per-host request rate cap (0 = unlimited) | `60` | `30` |
+| `GEMINI_MAX_CONCURRENT_REQUESTS` | Cap on simultaneous in-flight fetches (0 = unlimited) | `5` | `2` |
+| `GEMINI_DENIED_MIME_TYPES` | Comma-separated MIME deny list (supports `type/*`) | Empty | `text/html,image/*` |
+| `GEMINI_RESPECT_ROBOTS_TXT` | Honour `/robots.txt` from the capsule root | `false` | `true` |
+| `GEMINI_ROBOTS_CACHE_TTL_SECONDS` | Lifetime of a cached robots policy, in seconds | `86400` | `3600` |
+| `GEMINI_ROBOTS_HONOR_AI_TOKENS` | Also honour rules naming AI crawler tokens | `true` | `false` |
 
 ### Advanced Configuration
 

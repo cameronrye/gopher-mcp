@@ -51,9 +51,19 @@ jobs:
         run: uv run pytest --cov-report=xml
 
       - name: Run security checks
+        run: uv run bandit -r src/ -f json -o bandit-report.json
+
+      # Advisory only, matching ci.yml and release.yml: the nightly
+      # security-audit workflow is what turns a new advisory into an issue.
+      - name: Run pip-audit dependency scan
+        id: pip-audit
+        continue-on-error: true
+        run: uv run pip-audit --format json --output pip-audit-report.json
+
+      - name: Report pip-audit findings
+        if: steps.pip-audit.outcome == 'failure'
         run: |
-          uv run bandit -r src/ -f json -o bandit-report.json
-          uv run pip-audit --format json --output pip-audit-report.json
+          echo "::warning title=pip-audit::Dependency advisories found - see the nightly audit issue"
 
       - name: Build packages
         run: |

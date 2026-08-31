@@ -555,9 +555,11 @@ Both protocols implement rate limiting to prevent abuse:
 - **Request timeout**: Configurable per protocol (covers DNS, connect and read)
 - **Response size limit**: Configurable maximum response size, enforced
   incrementally during the read
-- **Concurrency cap**: Optional limit on simultaneous in-flight fetches
-  (`*_MAX_CONCURRENT_REQUESTS`, off by default). Each fetch opens a fresh
-  connection; there is no connection pooling/reuse.
+- **Per-host rate limit**: Outbound requests to one host are spaced out
+  (`*_REQUESTS_PER_MINUTE`, default `60` — one per second); `0` disables it.
+- **Concurrency cap**: Limit on simultaneous in-flight fetches
+  (`*_MAX_CONCURRENT_REQUESTS`, default `5`); `0` disables it. Each fetch opens
+  a fresh connection; there is no connection pooling/reuse.
 - **Cache TTL**: Configurable cache time-to-live
 
 ## Security Considerations

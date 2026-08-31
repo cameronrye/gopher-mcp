@@ -18,6 +18,7 @@ Configure the following settings for the `main` branch:
   - `test` (Test Python 3.13 on ubuntu-latest)
   - `lint` (Lint and type check)
   - `security` (Security checks)
+  - `docker` (Build Docker image)
   - `docs` (Build documentation)
 
 #### Pull Request Requirements
@@ -68,37 +69,23 @@ Configure the following settings for the `main` branch:
 
 #### Dependabot Configuration
 
-Create `.github/dependabot.yml`:
+`.github/dependabot.yml` is committed in the repository and covers three
+ecosystems on a weekly (Monday) schedule: `pip` (Python dependencies, with minor
+and patch updates grouped), `github-actions`, and `docker` (the `Dockerfile`
+base image). Edit that file rather than reproducing it here.
 
-```yaml
-version: 2
-updates:
-  - package-ecosystem: "pip"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 10
-    reviewers:
-      - "cameronrye"
-    assignees:
-      - "cameronrye"
-    commit-message:
-      prefix: "deps"
-      include: "scope"
+#### Dependency advisories
 
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-    open-pull-requests-limit: 5
-    reviewers:
-      - "cameronrye"
-    assignees:
-      - "cameronrye"
-    commit-message:
-      prefix: "ci"
-      include: "scope"
-```
+Dependabot only runs weekly, so an advisory published mid-week would otherwise
+go unnoticed until Monday. `pip-audit` therefore runs **advisory-only** in
+`ci.yml`, `release.yml` and `publish.yml` — it annotates the run but never
+fails it, so a new advisory against a pinned dependency cannot turn an
+unrelated PR red or block a tag. The nightly
+`.github/workflows/security-audit.yml` run is the blocking signal: it opens (or
+updates) a single issue labelled `security-audit`, and closes it once the audit
+is clean. Its `audit` job declares `issues: write` on the built-in
+`GITHUB_TOKEN`, which is all it needs — **Issues** must stay enabled on the
+repository for it to file anything.
 
 ### Access & Permissions
 

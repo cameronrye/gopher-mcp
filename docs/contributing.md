@@ -217,8 +217,11 @@ uv run task docs-build
 ### Security Testing
 
 - Include security-focused tests
-- Use `bandit` for security linting (runs automatically)
-- Use `pip-audit` for dependency vulnerability checking
+- Use `bandit` for security linting (runs automatically, and fails CI)
+- Use `pip-audit` for dependency vulnerability checking. It runs on every PR but
+  is **advisory only** — an advisory published against a pinned dependency is
+  not a defect in your PR, so it annotates the run instead of failing it. A
+  nightly audit workflow tracks findings in a `security-audit` issue.
 
 ## Bug Reports
 

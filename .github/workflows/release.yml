@@ -145,9 +145,26 @@ jobs:
         run: uv run pytest --cov-report=xml --cov-report=term
 
       - name: Run security checks
+        run: uv run bandit -r src/ -f json -o bandit-report.json
+
+      # Advisory only: an advisory published against a pinned dependency must
+      # not block shipping a tag that is otherwise ready. The nightly
+      # security-audit workflow files a tracking issue for these.
+      - name: Run pip-audit dependency scan
+        id: pip-audit
+        continue-on-error: true
+        run: uv run pip-audit --format json --output pip-audit-report.json
+
+      - name: Report pip-audit findings
+        if: steps.pip-audit.outcome == 'failure'
         run: |
-          uv run bandit -r src/ -f json -o bandit-report.json
-          uv run pip-audit --format json --output pip-audit-report.json
+          echo "::warning title=pip-audit::Dependency advisories found in this release - triage them before or immediately after publishing"
+          {
+            echo "### ⚠️ pip-audit found dependency advisories in this release"
+            echo
+            echo "The release was **not** blocked. Review the nightly"
+            echo "[security audit](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/security-audit.yml) issue and ship a follow-up if needed."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run linting and type checks
         run: |
@@ -190,9 +207,44 @@ jobs:
           path: dist/
           retention-days: 30
 
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [validate-release, test-and-build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/gopher-mcp
+    permissions:
+      id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
+      attestations: write # For artifact attestation
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: release-dist
+          path: dist/
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: "dist/*"
+
+      - name: Publish to PyPI
+        # Pinned to a commit SHA (was the moving release/v1 branch) for
+        # supply-chain safety on this id-token:write job; Dependabot bumps it.
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          verbose: true
+          attestations: true
+
   create-github-release:
     name: Create GitHub Release
-    needs: [validate-release, test-and-build]
+    # Runs after publish-pypi so the public release is never visible before the
+    # version it advertises is installable. If PyPI approval is refused or the
+    # upload fails, no release is created; if this job fails after a successful
+    # upload, re-running it is safe (the tag and artifacts still exist).
+    needs: [validate-release, test-and-build, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -261,34 +313,3 @@ jobs:
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  publish-pypi:
-    name: Publish to PyPI
-    needs: [validate-release, test-and-build, create-github-release]
-    runs-on: ubuntu-latest
-    environment:
-      name: pypi
-      url: https://pypi.org/p/gopher-mcp
-    permissions:
-      id-token: write # IMPORTANT: this permission is mandatory for trusted publishing
-      attestations: write # For artifact attestation
-
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v8
-        with:
-          name: release-dist
-          path: dist/
-
-      - name: Generate artifact attestation
-        uses: actions/attest-build-provenance@v4
-        with:
-          subject-path: "dist/*"
-
-      - name: Publish to PyPI
-        # Pinned to a commit SHA (was the moving release/v1 branch) for
-        # supply-chain safety on this id-token:write job; Dependabot bumps it.
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
-        with:
-          verbose: true
-          attestations: true

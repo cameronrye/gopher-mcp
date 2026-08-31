@@ -114,18 +114,18 @@ This document provides a comprehensive reference for all Gemini protocol configu
 #### `GEMINI_REQUESTS_PER_MINUTE`
 
 - **Type**: Float
-- **Default**: `0` (unlimited)
-- **Range**: `0` - `6000`
-- **Description**: Per-host outbound request rate cap, for politeness toward small Gemini servers. A status-44 `SLOW_DOWN` response is always honoured regardless of this setting.
-- **Example**: `GEMINI_REQUESTS_PER_MINUTE=60`
+- **Default**: `60` (one request per second, per host)
+- **Range**: `0` - `6000` (`0` = unlimited)
+- **Description**: Per-host outbound request rate cap, for politeness toward small Gemini servers. On by default. A status-44 `SLOW_DOWN` response is always honoured regardless of this setting.
+- **Example**: `GEMINI_REQUESTS_PER_MINUTE=30`
 
 #### `GEMINI_MAX_CONCURRENT_REQUESTS`
 
 - **Type**: Integer
-- **Default**: `0` (unlimited)
-- **Range**: `0` - `1000`
-- **Description**: Cap on simultaneous in-flight fetches; a coarse bound on concurrent sockets and memory, complementary to the per-host rate limit. Off by default.
-- **Example**: `GEMINI_MAX_CONCURRENT_REQUESTS=20`
+- **Default**: `5` (matches the batch tools' own concurrency)
+- **Range**: `0` - `1000` (`0` = unlimited)
+- **Description**: Cap on simultaneous in-flight fetches; a coarse bound on concurrent sockets and memory, complementary to the per-host rate limit. On by default.
+- **Example**: `GEMINI_MAX_CONCURRENT_REQUESTS=2`
 
 #### `GEMINI_DENIED_MIME_TYPES`
 
@@ -133,6 +133,30 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Default**: Empty (no content filtering)
 - **Description**: MIME types, or `type/*` wildcards, to reject as filtered content. Empty means no content filtering.
 - **Example**: `GEMINI_DENIED_MIME_TYPES=text/html,image/*`
+
+### Robot Exclusion
+
+#### `GEMINI_RESPECT_ROBOTS_TXT`
+
+- **Type**: Boolean
+- **Default**: `false`
+- **Description**: Fetch and honour `/robots.txt` from the capsule root before retrieving a resource, following the [Gemini companion specification](https://geminiprotocol.net/docs/companion/robots.gmi) (virtual agents `webproxy` and `indexer`, plus `*`, alongside `gopher-mcp`). Off by default because it adds a round-trip per host. **Fails closed** on a temporary (4x) robots fetch failure; `51 NOT FOUND` means "no policy".
+- **Example**: `GEMINI_RESPECT_ROBOTS_TXT=true`
+
+#### `GEMINI_ROBOTS_CACHE_TTL_SECONDS`
+
+- **Type**: Integer (seconds)
+- **Default**: `86400` (24 hours)
+- **Range**: `0` - `604800` (one week)
+- **Description**: How long a fetched robots policy stays valid, per host.
+- **Example**: `GEMINI_ROBOTS_CACHE_TTL_SECONDS=3600`
+
+#### `GEMINI_ROBOTS_HONOR_AI_TOKENS`
+
+- **Type**: Boolean
+- **Default**: `true`
+- **Description**: Also honour `Disallow` rules aimed at named AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). Not part of the companion specification, but a capsule naming them meant "no LLM tooling". Only applies when `GEMINI_RESPECT_ROBOTS_TXT` is enabled.
+- **Example**: `GEMINI_ROBOTS_HONOR_AI_TOKENS=false`
 
 !!! note "TLS version and hostname verification are not configurable"
     The minimum TLS version is fixed in code at **TLS 1.2** (TLS 1.2 and 1.3 are supported); there is no environment variable to change it. Server certificates are trusted via TOFU rather than CA-chain/hostname verification, so there is no hostname-verification toggle either. Client certificates are generated and managed automatically (see `GEMINI_CLIENT_CERTS_ENABLED` / `GEMINI_CLIENT_CERTS_STORAGE_PATH`) — you do not point the server at a manual cert/key file.
