@@ -99,10 +99,6 @@ class TestGeminiMimeType:
         assert mime.is_text is False
         assert mime.is_gemtext is False
         assert mime.is_binary is True
-        assert mime.is_image is True
-        assert mime.is_audio is False
-        assert mime.is_video is False
-        assert mime.is_application is False
 
     def test_audio_mime_type(self):
         """Test audio MIME type."""
@@ -111,61 +107,6 @@ class TestGeminiMimeType:
         assert mime.full_type == "audio/mpeg"
         assert mime.is_text is False
         assert mime.is_binary is True
-        assert mime.is_image is False
-        assert mime.is_audio is True
-        assert mime.is_video is False
-        assert mime.is_application is False
-
-    def test_video_mime_type(self):
-        """Test video MIME type."""
-        mime = GeminiMimeType(type="video", subtype="mp4")
-
-        assert mime.full_type == "video/mp4"
-        assert mime.is_text is False
-        assert mime.is_binary is True
-        assert mime.is_image is False
-        assert mime.is_audio is False
-        assert mime.is_video is True
-        assert mime.is_application is False
-
-    def test_application_mime_type(self):
-        """Test application MIME type."""
-        mime = GeminiMimeType(type="application", subtype="pdf")
-
-        assert mime.full_type == "application/pdf"
-        assert mime.is_text is False
-        assert mime.is_binary is True
-        assert mime.is_image is False
-        assert mime.is_audio is False
-        assert mime.is_video is False
-        assert mime.is_application is True
-
-    def test_charset_support(self):
-        """Test charset support detection."""
-        text_mime = GeminiMimeType(type="text", subtype="plain")
-        binary_mime = GeminiMimeType(type="image", subtype="png")
-
-        assert text_mime.supports_charset() is True
-        assert binary_mime.supports_charset() is False
-
-    def test_file_extensions(self):
-        """Test file extension detection."""
-        test_cases = [
-            ("text", "gemini", ".gmi"),
-            ("text", "plain", ".txt"),
-            ("text", "html", ".html"),
-            ("image", "jpeg", ".jpg"),
-            ("image", "png", ".png"),
-            ("audio", "mpeg", ".mp3"),
-            ("video", "mp4", ".mp4"),
-            ("application", "pdf", ".pdf"),
-            ("application", "zip", ".zip"),
-            ("unknown", "type", ""),  # Unknown type should return empty string
-        ]
-
-        for mime_type, subtype, expected_ext in test_cases:
-            mime = GeminiMimeType(type=mime_type, subtype=subtype)
-            assert mime.get_file_extension() == expected_ext
 
 
 class TestGeminiResponse:
@@ -313,20 +254,6 @@ class TestGemtextModels:
         with pytest.raises(ValidationError, match="Link URL cannot be empty"):
             GemtextLink(url="   ")
 
-    def test_relative_links_are_internal(self):
-        """Scheme-less/relative links are internal, not external."""
-        assert GemtextLink(url="foo.gmi").is_external is False
-        assert GemtextLink(url="./page.gmi").is_external is False
-        assert GemtextLink(url="../up.gmi").is_external is False
-        assert GemtextLink(url="/about").is_external is False
-
-    def test_scheme_links_are_external(self):
-        """Links carrying a scheme (or protocol-relative) are external."""
-        assert GemtextLink(url="gemini://other.example/").is_external is True
-        assert GemtextLink(url="https://example.com/").is_external is True
-        assert GemtextLink(url="mailto:user@example.com").is_external is True
-        assert GemtextLink(url="//example.com/x").is_external is True
-
     def test_gemtext_line_text(self):
         """Test text line."""
         line = GemtextLine(type=GemtextLineType.TEXT, content="This is a text line.")
@@ -405,19 +332,17 @@ class TestGemtextModels:
         doc = GemtextDocument(lines=lines, links=links)
 
         assert len(doc.lines) == 3
-        assert doc.link_count == 1
-        assert doc.has_headings is True
+        assert len(doc.links) == 1
 
-    def test_gemtext_document_no_headings(self):
-        """Test document without headings."""
+    def test_gemtext_document_defaults_to_no_links(self):
+        """Test document without extracted links."""
         lines = [
             GemtextLine(type=GemtextLineType.TEXT, content="Just text."),
         ]
 
         doc = GemtextDocument(lines=lines)
 
-        assert doc.has_headings is False
-        assert doc.link_count == 0
+        assert doc.links == []
 
     def test_gemini_gemtext_result(self):
         """Test GeminiGemtextResult model."""
@@ -497,172 +422,3 @@ class TestSecurityModels:
         assert entry.value == response
         assert not entry.is_expired(1640995300.0)  # Within TTL
         assert entry.is_expired(1640995600.0)  # After TTL
-
-
-class TestGemtextDocumentProperties:
-    """Test GemtextDocument property methods."""
-
-    def test_content_summary_property(self):
-        """Test content_summary property method."""
-        from gopher_mcp.models import (
-            GemtextHeading,
-            GemtextList,
-            GemtextPreformat,
-            GemtextQuote,
-        )
-
-        lines = [
-            GemtextLine(type=GemtextLineType.TEXT, content="Regular text"),
-            GemtextLine(
-                type=GemtextLineType.HEADING_1,
-                content="# Heading 1",
-                heading=GemtextHeading(
-                    level=1, text="Heading 1", raw_content="# Heading 1"
-                ),
-            ),
-            GemtextLine(
-                type=GemtextLineType.LINK,
-                content="=> /test Link text",
-                link=GemtextLink(url="/test", text="Link text"),
-            ),
-            GemtextLine(
-                type=GemtextLineType.LIST_ITEM,
-                content="* List item",
-                list_item=GemtextList(text="List item", raw_content="* List item"),
-            ),
-            GemtextLine(
-                type=GemtextLineType.QUOTE,
-                content="> Quote text",
-                quote=GemtextQuote(text="Quote text", raw_content="> Quote text"),
-            ),
-            GemtextLine(
-                type=GemtextLineType.PREFORMAT,
-                content="```",
-                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
-            ),
-            GemtextLine(
-                type=GemtextLineType.PREFORMAT,
-                content="code",
-                preformat=GemtextPreformat(
-                    content="code", is_toggle=False, alt_text=""
-                ),
-            ),
-            GemtextLine(
-                type=GemtextLineType.PREFORMAT,
-                content="```",
-                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
-            ),
-        ]
-
-        document = GemtextDocument(lines=lines)
-        summary = document.content_summary
-
-        assert summary["text_lines"] == 1
-        assert summary["headings"] == 1
-        assert summary["links"] == 1
-        assert summary["list_items"] == 1
-        assert summary["quotes"] == 1
-        assert summary["preformat_blocks"] == 1
-
-    def test_heading_hierarchy_property(self):
-        """Test heading_hierarchy property method."""
-        from gopher_mcp.models import GemtextHeading
-
-        lines = [
-            GemtextLine(type=GemtextLineType.TEXT, content="Text"),
-            GemtextLine(
-                type=GemtextLineType.HEADING_1,
-                content="# Main Heading",
-                heading=GemtextHeading(
-                    level=1, text="Main Heading", raw_content="# Main Heading"
-                ),
-            ),
-            GemtextLine(
-                type=GemtextLineType.HEADING_2,
-                content="## Sub Heading",
-                heading=GemtextHeading(
-                    level=2, text="Sub Heading", raw_content="## Sub Heading"
-                ),
-            ),
-        ]
-
-        document = GemtextDocument(lines=lines)
-        hierarchy = document.heading_hierarchy
-
-        assert len(hierarchy) == 2
-        assert hierarchy[0]["line_number"] == 2
-        assert hierarchy[0]["level"] == 1
-        assert hierarchy[0]["text"] == "Main Heading"
-        assert hierarchy[1]["line_number"] == 3
-        assert hierarchy[1]["level"] == 2
-        assert hierarchy[1]["text"] == "Sub Heading"
-
-    def test_text_content_property(self):
-        """Test text_content property method."""
-        from gopher_mcp.models import (
-            GemtextHeading,
-            GemtextList,
-            GemtextPreformat,
-            GemtextQuote,
-        )
-
-        lines = [
-            GemtextLine(type=GemtextLineType.TEXT, content="Regular text"),
-            GemtextLine(
-                type=GemtextLineType.HEADING_1,
-                content="# Heading",
-                heading=GemtextHeading(
-                    level=1, text="Heading", raw_content="# Heading"
-                ),
-            ),
-            GemtextLine(
-                type=GemtextLineType.LIST_ITEM,
-                content="* List item",
-                list_item=GemtextList(text="List item", raw_content="* List item"),
-            ),
-            GemtextLine(
-                type=GemtextLineType.QUOTE,
-                content="> Quote",
-                quote=GemtextQuote(text="Quote", raw_content="> Quote"),
-            ),
-            GemtextLine(
-                type=GemtextLineType.PREFORMAT,
-                content="```",
-                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
-            ),
-            GemtextLine(
-                type=GemtextLineType.PREFORMAT,
-                content="code content",
-                preformat=GemtextPreformat(
-                    content="code content", is_toggle=False, alt_text=""
-                ),
-            ),
-            GemtextLine(
-                type=GemtextLineType.PREFORMAT,
-                content="```",
-                preformat=GemtextPreformat(content="```", is_toggle=True, alt_text=""),
-            ),
-        ]
-
-        document = GemtextDocument(lines=lines)
-        text_content = document.text_content
-
-        expected_lines = [
-            "Regular text",
-            "Heading",
-            "List item",
-            "Quote",
-            "code content",
-        ]
-        assert text_content == "\n".join(expected_lines)
-
-    def test_line_count_property(self):
-        """Test line_count property method."""
-        lines = [
-            GemtextLine(type=GemtextLineType.TEXT, content="Line 1"),
-            GemtextLine(type=GemtextLineType.TEXT, content="Line 2"),
-            GemtextLine(type=GemtextLineType.TEXT, content="Line 3"),
-        ]
-
-        document = GemtextDocument(lines=lines)
-        assert document.line_count == 3

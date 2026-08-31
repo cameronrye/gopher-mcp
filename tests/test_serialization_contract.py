@@ -11,6 +11,7 @@ below and the corresponding documentation/examples.
 from __future__ import annotations
 
 import pytest
+from pydantic import BaseModel
 
 from gopher_mcp import models
 
@@ -79,6 +80,18 @@ EXPECTED_KEYS: dict[str, set[str]] = {
 }
 
 
+# Plain (non-computed) properties on the content models. These never appear in
+# model_dump(), so the LLM never sees them: each one only earns its place by
+# having a caller in ``src/``. Pinned here so an unused analysis helper cannot
+# quietly accumulate again.
+EXPECTED_PROPERTIES: dict[str, set[str]] = {
+    "GeminiMimeType": {"full_type", "is_text", "is_gemtext", "is_binary"},
+    "GemtextDocument": set(),
+    "GemtextLink": set(),
+    "GemtextLine": set(),
+}
+
+
 @pytest.mark.parametrize("model_name", sorted(EXPECTED_KEYS))
 def test_serialized_keys_match_contract(model_name: str) -> None:
     """The model's serialized key set matches the documented contract."""
@@ -89,4 +102,25 @@ def test_serialized_keys_match_contract(model_name: str) -> None:
         f"unexpected={serialized - EXPECTED_KEYS[model_name]}, "
         f"missing={EXPECTED_KEYS[model_name] - serialized}. "
         "Update EXPECTED_KEYS and the docs/examples that reference these fields."
+    )
+
+
+@pytest.mark.parametrize("model_name", sorted(EXPECTED_PROPERTIES))
+def test_non_serialized_properties_have_production_callers(model_name: str) -> None:
+    """The model's plain properties match the set production code actually uses."""
+    model = getattr(models, model_name)
+    properties = {
+        name
+        for name in dir(model)
+        if not name.startswith("_")
+        and isinstance(getattr(model, name, None), property)
+        # BaseModel's own properties (model_extra, model_fields_set) are not ours.
+        and not hasattr(BaseModel, name)
+    }
+    assert properties == EXPECTED_PROPERTIES[model_name], (
+        f"{model_name} properties changed: "
+        f"unexpected={properties - EXPECTED_PROPERTIES[model_name]}, "
+        f"missing={EXPECTED_PROPERTIES[model_name] - properties}. "
+        "A property is invisible to model_dump(), so add one only with a caller "
+        "in src/ (and list it here)."
     )

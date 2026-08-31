@@ -2,7 +2,6 @@
 
 from enum import Enum, IntEnum
 from typing import Any, Generic, Literal, TypeVar
-from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
@@ -295,56 +294,6 @@ class GeminiMimeType(BaseModel):
         """Check if this is a binary MIME type."""
         return not self.is_text
 
-    @property
-    def is_image(self) -> bool:
-        """Check if this is an image MIME type."""
-        return self.type == "image"
-
-    @property
-    def is_audio(self) -> bool:
-        """Check if this is an audio MIME type."""
-        return self.type == "audio"
-
-    @property
-    def is_video(self) -> bool:
-        """Check if this is a video MIME type."""
-        return self.type == "video"
-
-    @property
-    def is_application(self) -> bool:
-        """Check if this is an application MIME type."""
-        return self.type == "application"
-
-    def supports_charset(self) -> bool:
-        """Check if this MIME type supports charset parameter."""
-        return self.is_text
-
-    def get_file_extension(self) -> str:
-        """Get common file extension for this MIME type."""
-        # Common MIME type to extension mappings
-        extensions = {
-            "text/gemini": ".gmi",
-            "text/plain": ".txt",
-            "text/html": ".html",
-            "text/css": ".css",
-            "text/javascript": ".js",
-            "image/jpeg": ".jpg",
-            "image/png": ".png",
-            "image/gif": ".gif",
-            "image/webp": ".webp",
-            "image/bmp": ".bmp",
-            "audio/mpeg": ".mp3",
-            "audio/ogg": ".ogg",
-            "audio/wav": ".wav",
-            "video/mp4": ".mp4",
-            "video/webm": ".webm",
-            "application/pdf": ".pdf",
-            "application/zip": ".zip",
-            "application/json": ".json",
-            "application/xml": ".xml",
-        }
-        return extensions.get(self.full_type, "")
-
 
 class GeminiResponse(BaseModel):
     """Base model for Gemini protocol responses."""
@@ -505,16 +454,6 @@ class GemtextLink(BaseModel):
             raise ValueError("Link URL cannot be empty")
         return v.strip()
 
-    @property
-    def is_external(self) -> bool:
-        """Whether the link points outside the current capsule.
-
-        External links carry a URL scheme (``gemini://``, ``https://``,
-        ``mailto:`` ...) or are protocol-relative (``//host/...``). Scheme-less
-        relative links (``foo.gmi``, ``/abs``, ``./page``) are internal.
-        """
-        return bool(urlparse(self.url).scheme) or self.url.startswith("//")
-
 
 class GemtextHeading(BaseModel):
     """Model for gemtext heading lines."""
@@ -606,95 +545,6 @@ class GemtextDocument(BaseModel):
     links: list[GemtextLink] = Field(
         default_factory=list, description="Extracted links"
     )
-
-    @property
-    def link_count(self) -> int:
-        """Get number of links in document."""
-        return len(self.links)
-
-    @property
-    def has_headings(self) -> bool:
-        """Check if document has any headings."""
-        return any(line.type.startswith("heading") for line in self.lines)
-
-    @property
-    def line_count(self) -> int:
-        """Get total number of lines in document."""
-        return len(self.lines)
-
-    @property
-    def content_summary(self) -> dict[str, int]:
-        """Get summary of content types for LLM consumption."""
-        summary = {
-            "text_lines": 0,
-            "headings": 0,
-            "links": 0,
-            "list_items": 0,
-            "quotes": 0,
-            "preformat_blocks": 0,
-        }
-
-        in_preformat = False
-        for line in self.lines:
-            if line.type == GemtextLineType.TEXT:
-                summary["text_lines"] += 1
-            elif line.type.startswith("heading"):
-                summary["headings"] += 1
-            elif line.type == GemtextLineType.LINK:
-                summary["links"] += 1
-            elif line.type == GemtextLineType.LIST_ITEM:
-                summary["list_items"] += 1
-            elif line.type == GemtextLineType.QUOTE:
-                summary["quotes"] += 1
-            elif (
-                line.type == GemtextLineType.PREFORMAT
-                and line.preformat
-                and line.preformat.is_toggle
-            ):
-                if not in_preformat:
-                    summary["preformat_blocks"] += 1
-                    in_preformat = True
-                else:
-                    in_preformat = False
-
-        return summary
-
-    @property
-    def heading_hierarchy(self) -> list[dict[str, Any]]:
-        """Get document heading structure for navigation."""
-        headings = []
-        for i, line in enumerate(self.lines):
-            if line.heading:
-                headings.append(
-                    {
-                        "line_number": i + 1,
-                        "level": line.heading.level,
-                        "text": line.heading.text,
-                        "raw_content": line.heading.raw_content,
-                    }
-                )
-        return headings
-
-    @property
-    def text_content(self) -> str:
-        """Get plain text content (excluding markup) for search/analysis."""
-        text_parts = []
-        for line in self.lines:
-            if line.type == GemtextLineType.TEXT:
-                text_parts.append(line.content)
-            elif line.heading:
-                text_parts.append(line.heading.text)
-            elif line.list_item:
-                text_parts.append(line.list_item.text)
-            elif line.quote:
-                text_parts.append(line.quote.text)
-            elif (
-                line.type == GemtextLineType.PREFORMAT
-                and line.preformat
-                and not line.preformat.is_toggle
-            ):
-                text_parts.append(line.content)
-        return "\n".join(text_parts)
 
 
 class GeminiGemtextResult(BaseModel):
