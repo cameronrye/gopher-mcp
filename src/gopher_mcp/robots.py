@@ -58,7 +58,7 @@ ROBOTS_MAX_BYTES = 512_000
 # Advertised token for this project. The Gemini companion spec explicitly lets a
 # bot honour directives aimed at "their own individual User-agent which they
 # prominently advertise", so operators can name us specifically.
-PROJECT_TOKEN = "gopher-mcp"  # nosec B105 - a robots.txt agent name, not a secret
+PROJECT_TOKEN = "gopher-mcp"  # nosec B105 # a robots.txt agent name, not a secret
 
 # Gopher: Veronica-2's documented convention. `veronica` is deliberately NOT
 # claimed -- that token belongs to Floodgap's indexer, not to us.
