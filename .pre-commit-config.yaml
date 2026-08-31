@@ -45,7 +45,12 @@ repos:
           - types-requests
           - types-setuptools
           - pydantic>=2.5.0
-          - mcp>=1.0.0
+          # Without pydantic-settings the hook resolves BaseSettings to Any and
+          # reports every config class as "cannot subclass". Pin mcp to the
+          # version the project actually resolves: an unpinned floor let the
+          # hook install a different API shape than the code targets.
+          - pydantic-settings>=2.0.0
+          - mcp==1.27.2
           - structlog>=23.2.0
           - anyio>=4.0.0
         args: [--ignore-missing-imports, --explicit-package-bases]

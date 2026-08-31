@@ -19,6 +19,14 @@ from .models import (
     TextResult,
 )
 from .ratelimit import RateLimiter
+from .robots import (
+    AI_AGENT_TOKENS,
+    GOPHER_TOKENS,
+    ROBOTS_MAX_BYTES,
+    RobotsGate,
+    RobotsUnavailable,
+    gopher_candidate_paths,
+)
 from .ssrf import SSRFError, normalize_host, validate_target
 from .utils import (
     detect_binary_mime_type,
@@ -40,6 +48,12 @@ DEFAULT_MAX_SELECTOR_LENGTH = 1024
 DEFAULT_MAX_SEARCH_LENGTH = 256
 DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 DEFAULT_MAX_MENU_ITEMS = 1000  # LLM-facing menu item cap; 0 = unlimited
+# Politeness defaults. Gopher and Gemini are served largely by small
+# hobbyist hosts, and a model can call the fetch tools in a tight loop, so
+# both are on out of the box rather than opt-in.
+DEFAULT_REQUESTS_PER_MINUTE = 60.0  # one request per second, per host
+DEFAULT_MAX_CONCURRENT_REQUESTS = 5  # matches the batch tools' concurrency
+DEFAULT_ROBOTS_CACHE_TTL_SECONDS = 86400  # RFC 9309 s2.4 permits 24h
 
 
 def _strip_gopher_text_terminator(text: str) -> str:
@@ -93,8 +107,11 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         max_search_length: int = DEFAULT_MAX_SEARCH_LENGTH,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
         max_menu_items: int = DEFAULT_MAX_MENU_ITEMS,
-        requests_per_minute: float = 0.0,
-        max_concurrent_requests: int = 0,
+        requests_per_minute: float = DEFAULT_REQUESTS_PER_MINUTE,
+        max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
+        respect_robots_txt: bool = False,
+        robots_cache_ttl_seconds: int = DEFAULT_ROBOTS_CACHE_TTL_SECONDS,
+        robots_honor_ai_tokens: bool = True,
     ) -> None:
         """Initialize the Gopher client.
 
@@ -109,6 +126,11 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             max_search_length: Maximum search query length
             max_concurrent_requests: Cap on simultaneous in-flight fetches
                 (0 = unlimited); a coarse bound on concurrent sockets/memory.
+            respect_robots_txt: Consult /robots.txt at the host root before
+                fetching, per the convention Veronica-2 documents.
+            robots_cache_ttl_seconds: Lifetime of a cached robots policy.
+            robots_honor_ai_tokens: Also honour rules naming AI crawler
+                tokens (ClaudeBot, GPTBot, ...).
 
         """
         self.max_response_size = max_response_size
@@ -122,7 +144,7 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         self.max_menu_items = max_menu_items
         self._rate_limiter = RateLimiter(requests_per_minute)
         self.max_concurrent_requests = max_concurrent_requests
-        # Opt-in coarse cap on simultaneous fetches (None = unlimited).
+        # Coarse cap on simultaneous fetches; 0 disables it (None = unlimited).
         self._fetch_semaphore = (
             asyncio.Semaphore(max_concurrent_requests)
             if max_concurrent_requests > 0
@@ -141,6 +163,27 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         # is inherited from the mixin annotation; only the entry class differs.
         self._cache = OrderedDict()
         self._cache_entry_cls = CacheEntry
+
+        # Robot exclusion (opt-in). Gopher fails *open*: the protocol has no
+        # status codes, so a missing selector, an error document and an empty
+        # file are indistinguishable on the wire, and RFC 9309 s2.3.1.4's
+        # "treat unreachable as complete disallow" would deny most of
+        # Gopherspace. The lenient parser makes that safe -- an error page
+        # yields no User-agent group and so imposes no rules.
+        self.respect_robots_txt = respect_robots_txt
+        self._robots_gate = (
+            RobotsGate(
+                # Resolved at call time rather than bound here, so the
+                # gate follows the method (and stays patchable in tests).
+                fetcher=lambda host, port: self._fetch_robots(host, port),
+                tokens=GOPHER_TOKENS,
+                extra_tokens=(AI_AGENT_TOKENS if robots_honor_ai_tokens else ()),
+                ttl_seconds=robots_cache_ttl_seconds,
+                fail_closed=False,
+            )
+            if respect_robots_txt
+            else None
+        )
 
     def _validate_security(self, parsed_url: GopherURL) -> None:
         """Validate security constraints for a Gopher request.
@@ -203,6 +246,19 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
 
             # Validate security constraints
             self._validate_security(parsed_url)
+
+            # Robot exclusion, before the cache lookup below: a Disallow must
+            # also withhold content cached from an earlier, permitted run.
+            if self._robots_gate is not None:
+                decision = await self._robots_gate.allows(
+                    parsed_url.host,
+                    parsed_url.port,
+                    gopher_candidate_paths(parsed_url.gopher_type, parsed_url.selector),
+                )
+                if not decision.allowed:
+                    return self._robots_denied_result(
+                        url, parsed_url.host, decision.reason
+                    )
 
             # Canonical cache key (case-insensitive host) so requests differing
             # only in host case share one entry instead of duplicating.
@@ -291,8 +347,80 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             requestInfo={"url": url, "timestamp": time.time()},
         )
 
+    def _robots_denied_result(self, url: str, host: str, reason: str) -> ErrorResult:
+        """Build the result returned when the robots gate blocks a resource."""
+        logger.info("Blocked by robots.txt", url=url, host=host, reason=reason)
+        return ErrorResult(
+            error={
+                "code": "BLOCKED_BY_ROBOTS",
+                "message": (
+                    f"{host} disallows this resource in its robots.txt. "
+                    f"Set GOPHER_RESPECT_ROBOTS_TXT=false to disable robots "
+                    f"checking."
+                ),
+            },
+            requestInfo={"url": url, "timestamp": time.time()},
+        )
+
+    async def _fetch_robots(self, host: str, port: int) -> str | None:
+        """Fetch ``/robots.txt`` for the robots gate.
+
+        Deliberately bypasses :meth:`fetch` and :meth:`_bounded_fetch`: going
+        through the former would recurse into the gate, and the latter holds
+        ``_fetch_semaphore``, so a robots lookup issued from inside it would
+        deadlock whenever ``max_concurrent_requests`` is 1. The SSRF guard and
+        the per-host rate limiter still apply.
+
+        A failure raises :class:`RobotsUnavailable` rather than returning
+        ``None``. The two are not interchangeable: ``None`` means "the server
+        answered and has no policy", which the gate caches for the full TTL,
+        so reporting a timeout that way would disable robots checking for the
+        host for 24 hours. The gate is configured ``fail_closed=False`` here, so
+        an unavailable policy still allows the request through (Gopher cannot
+        distinguish a missing selector from an unreachable server, and the real
+        fetch would fail the same way) -- it just is not remembered.
+        """
+        try:
+            connect_addresses = await asyncio.wait_for(
+                validate_target(
+                    host,
+                    port,
+                    allow_local=self.allow_local_hosts,
+                    allowed_ports=self.allowed_ports,
+                ),
+                timeout=self.timeout_seconds,
+            )
+            await self._rate_limiter.acquire(host)
+            raw = await fetch_gopher(
+                host,
+                port,
+                "/robots.txt",
+                None,
+                max_bytes=ROBOTS_MAX_BYTES,
+                timeout=self.timeout_seconds,
+                connect_addresses=connect_addresses,
+            )
+        except (
+            SSRFError,
+            GopherProtocolError,
+            OSError,
+            TimeoutError,
+            ValueError,
+        ) as e:
+            raise RobotsUnavailable(f"could not reach {host}:{port}") from e
+        text, _charset = decode_gopher_text(raw)
+        return text
+
     async def _bounded_fetch(self, parsed_url: GopherURL) -> GopherFetchResponse:
-        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set."""
+        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set.
+
+        The per-host spacing is waited out BEFORE a concurrency slot is
+        taken. Sleeping while holding the semaphore would let one
+        throttled host occupy every slot, starving unrelated hosts that
+        are not rate limited at all -- harmless when both settings were
+        off by default, but not now that they ship enabled.
+        """
+        await self._rate_limiter.acquire(parsed_url.host)
         if self._fetch_semaphore is None:
             return await self._fetch_content(parsed_url)
         async with self._fetch_semaphore:
@@ -352,9 +480,6 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             raise GopherProtocolError(
                 f"Timed out resolving host '{parsed_url.host}'"
             ) from e
-
-        # Politeness: space out requests to the same (often small) host.
-        await self._rate_limiter.acquire(parsed_url.host)
 
         # RFC 1436 only defines the <TAB>query field for type-7 (Index-Search)
         # servers; never forward a stray search to a plain selector.

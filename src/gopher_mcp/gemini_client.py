@@ -19,6 +19,13 @@ from .models import (
     TOFUEntry,
 )
 from .ratelimit import RateLimiter
+from .robots import (
+    AI_AGENT_TOKENS,
+    GEMINI_TOKENS,
+    ROBOTS_MAX_BYTES,
+    RobotsGate,
+    RobotsUnavailable,
+)
 from .ssrf import SSRFError, normalize_host, validate_target
 from .tofu import (
     TOFUExpiredError,
@@ -42,6 +49,12 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 DEFAULT_CACHE_TTL_SECONDS = 300  # 5 minutes
 DEFAULT_MAX_CACHE_ENTRIES = 1000
 DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
+# Politeness defaults. Gopher and Gemini are served largely by small
+# hobbyist hosts, and a model can call the fetch tools in a tight loop, so
+# both are on out of the box rather than opt-in.
+DEFAULT_REQUESTS_PER_MINUTE = 60.0  # one request per second, per host
+DEFAULT_MAX_CONCURRENT_REQUESTS = 5  # matches the batch tools' concurrency
+DEFAULT_ROBOTS_CACHE_TTL_SECONDS = 86400  # RFC 9309 s2.4 permits 24h
 
 
 def _safe_display_url(parsed_url: GeminiURL) -> str:
@@ -79,9 +92,12 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         client_certs_enabled: bool = True,
         client_certs_storage_path: str | None = None,
         max_rendered_chars: int = DEFAULT_MAX_RENDERED_CHARS,
-        requests_per_minute: float = 0.0,
-        max_concurrent_requests: int = 0,
+        requests_per_minute: float = DEFAULT_REQUESTS_PER_MINUTE,
+        max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
         denied_mime_types: list[str] | None = None,
+        respect_robots_txt: bool = False,
+        robots_cache_ttl_seconds: int = DEFAULT_ROBOTS_CACHE_TTL_SECONDS,
+        robots_honor_ai_tokens: bool = True,
     ) -> None:
         """Initialize the Gemini client.
 
@@ -99,6 +115,11 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 validity window instead of accepting it with a warning
             client_certs_enabled: Whether to enable client certificate management
             client_certs_storage_path: Path to client certificate storage directory
+            respect_robots_txt: Consult /robots.txt at the capsule root before
+                fetching, per the Gemini companion specification
+            robots_cache_ttl_seconds: Lifetime of a cached robots policy
+            robots_honor_ai_tokens: Also honour rules naming AI crawler tokens
+                (ClaudeBot, GPTBot, ...)
         """
         self.max_response_size = max_response_size
         self.timeout_seconds = timeout_seconds
@@ -108,7 +129,7 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         self.max_rendered_chars = max_rendered_chars
         self._rate_limiter = RateLimiter(requests_per_minute)
         self.max_concurrent_requests = max_concurrent_requests
-        # Opt-in coarse cap on simultaneous fetches (None = unlimited).
+        # Coarse cap on simultaneous fetches; 0 disables it (None = unlimited).
         self._fetch_semaphore = (
             asyncio.Semaphore(max_concurrent_requests)
             if max_concurrent_requests > 0
@@ -159,6 +180,25 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
         # is inherited from the mixin annotation; only the entry class differs.
         self._cache = OrderedDict()
         self._cache_entry_cls = GeminiCacheEntry
+
+        # Robot exclusion (opt-in), following the Gemini companion spec rather
+        # than RFC 9309. Unlike Gopher this fails *closed* on a temporary
+        # failure (RFC 9309 s2.3.1.4), which Gemini can express because it has
+        # status codes -- see :meth:`_fetch_robots` for the 4x/5x mapping.
+        self.respect_robots_txt = respect_robots_txt
+        self._robots_gate = (
+            RobotsGate(
+                # Resolved at call time rather than bound here, so the
+                # gate follows the method (and stays patchable in tests).
+                fetcher=lambda host, port: self._fetch_robots(host, port),
+                tokens=GEMINI_TOKENS,
+                extra_tokens=(AI_AGENT_TOKENS if robots_honor_ai_tokens else ()),
+                ttl_seconds=robots_cache_ttl_seconds,
+                fail_closed=True,
+            )
+            if respect_robots_txt
+            else None
+        )
 
     def _tls_client_for_cert(self, cert_path: str, key_path: str) -> GeminiTLSClient:
         """Return a TLS client bound to a client certificate, cached per pair.
@@ -219,6 +259,15 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
 
             # Validate security constraints
             self._validate_security(parsed_url)
+
+            # Robot exclusion, before the cache lookup below: a Disallow must
+            # also withhold content cached from an earlier, permitted run.
+            if self._robots_gate is not None:
+                decision = await self._robots_gate.allows(
+                    parsed_url.host, parsed_url.port, [parsed_url.path]
+                )
+                if not decision.allowed:
+                    return self._robots_denied_result(parsed_url, decision.reason)
 
             # Canonical cache key (case-insensitive host) so requests differing
             # only in host case share one entry instead of duplicating.
@@ -384,18 +433,133 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             seconds = 60.0
         self._rate_limiter.penalize(host, seconds)
 
+    def _robots_denied_result(
+        self, parsed_url: GeminiURL, reason: str
+    ) -> GeminiErrorResult:
+        """Build the result returned when the robots gate blocks a resource."""
+        logger.info(
+            "Blocked by robots.txt",
+            host=parsed_url.host,
+            path=parsed_url.path,
+            reason=reason,
+        )
+        if reason == "unavailable":
+            message = (
+                f"Could not retrieve robots.txt from {parsed_url.host}, so access "
+                f"is denied (RFC 9309 section 2.3.1.4 treats a temporary failure "
+                f"as a complete disallow). Set GEMINI_RESPECT_ROBOTS_TXT=false to "
+                f"disable robots checking."
+            )
+        else:
+            message = (
+                f"{parsed_url.host} disallows this resource in its robots.txt. "
+                f"Set GEMINI_RESPECT_ROBOTS_TXT=false to disable robots checking."
+            )
+        return GeminiErrorResult(
+            error={"code": "BLOCKED_BY_ROBOTS", "message": message},
+            requestInfo={
+                "url": _safe_display_url(parsed_url),
+                "host": parsed_url.host,
+                "port": parsed_url.port,
+                "path": parsed_url.path,
+                "timestamp": time.time(),
+            },
+        )
+
+    async def _fetch_robots(self, host: str, port: int) -> str | None:
+        """Fetch ``/robots.txt`` for the robots gate.
+
+        Calls :meth:`_fetch_content` directly rather than :meth:`fetch`: the
+        former would recurse into the gate, and :meth:`_bounded_fetch` holds
+        ``_fetch_semaphore``, so a lookup issued from inside it would deadlock
+        whenever ``max_concurrent_requests`` is 1.
+
+        Status mapping is deliberately *not* the HTTP one. Gemini inverts the
+        numbering: 5x is the permanent class, and ``51 NOT FOUND`` is the normal
+        answer from a capsule that simply has no robots.txt, so 5x means "no
+        policy, allow everything" (RFC 9309 s2.3.1.3). 4x is the temporary class
+        and maps to s2.3.1.4's complete disallow. A capsule that demands a client
+        certificate (6x) cannot serve us a policy at all, so it is allowed
+        through -- the resource itself is gated by the certificate anyway.
+        """
+        robots_url = GeminiURL(host=host, port=port, path="/robots.txt", query=None)
+        # This bypasses _bounded_fetch (see above), which is where the per-host
+        # spacing is now applied, so throttle here instead.
+        await self._rate_limiter.acquire(host)
+        try:
+            result = await self._fetch_content(
+                robots_url,
+                # Never read more than the operator allows for a normal body.
+                max_bytes=min(ROBOTS_MAX_BYTES, self.max_response_size),
+                apply_content_policy=False,
+            )
+        except (
+            GeminiProtocolError,
+            TLSConnectionError,
+            SSRFError,
+            OSError,
+            TimeoutError,
+        ) as e:
+            raise RobotsUnavailable(f"could not reach {host}:{port}") from e
+
+        # A 44 SLOW_DOWN here is still the server asking us to back off, and the
+        # backoff must be recorded even though this response is discarded.
+        self._maybe_honor_slow_down(host, result)
+
+        kind = getattr(result, "kind", None)
+        if kind in ("success", "gemtext"):
+            # text/gemini is the Gemini default MIME -- it is what an absent,
+            # empty or unparseable meta falls back to -- so a policy served that
+            # way arrives as GeminiGemtextResult, which carries its text in
+            # `raw_content` rather than `content`. Reading only `content` would
+            # silently discard the policy and cache allow-all for the full TTL.
+            body = getattr(result, "content", None)
+            if body is None:
+                body = getattr(result, "raw_content", None)
+            return body if isinstance(body, str) else None
+        if kind == "error":
+            status = getattr(result, "error", {}).get("status")
+            if isinstance(status, int) and 40 <= status <= 49:
+                raise RobotsUnavailable(f"status {status} fetching robots.txt")
+            # 5x (including 51 NOT FOUND) and anything unclassifiable: no policy.
+            return None
+        # Redirect, input prompt, certificate request or a binary body: none of
+        # these is a policy we can apply, so nothing is disallowed.
+        return None
+
     async def _bounded_fetch(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
-        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set."""
+        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set.
+
+        The per-host spacing is waited out BEFORE a concurrency slot is
+        taken. Sleeping while holding the semaphore would let one
+        throttled host occupy every slot, starving unrelated hosts that
+        are not rate limited at all -- harmless when both settings were
+        off by default, but not now that they ship enabled.
+        """
+        await self._rate_limiter.acquire(parsed_url.host)
         if self._fetch_semaphore is None:
             return await self._fetch_content(parsed_url)
         async with self._fetch_semaphore:
             return await self._fetch_content(parsed_url)
 
-    async def _fetch_content(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
+    async def _fetch_content(
+        self,
+        parsed_url: GeminiURL,
+        *,
+        max_bytes: int | None = None,
+        apply_content_policy: bool = True,
+    ) -> GeminiFetchResponse:
         """Fetch content from parsed Gemini URL using TLS.
 
         Args:
             parsed_url: Parsed Gemini URL
+            max_bytes: Optional response-size cap for this request only,
+                used by the robots.txt lookup so a capsule cannot make the
+                gate download a full-sized body.
+            apply_content_policy: When False, skip the LLM-facing render cap
+                and the MIME deny list. Both exist to shape what reaches the
+                model; applying them to a robots.txt would silently truncate
+                a policy mid-file or discard it entirely.
 
         Returns:
             Appropriate response based on status code
@@ -424,10 +588,6 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             connect_ip = next(
                 (a for a in connect_addresses if ":" not in a), connect_addresses[0]
             )
-
-            # Politeness: space out requests to the same host (and honour any
-            # outstanding status-44 backoff for it).
-            await self._rate_limiter.acquire(parsed_url.host)
 
             # Check for client certificate
             client_cert_path = None
@@ -529,7 +689,9 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
             # dripping bytes is actually cut off at the deadline (no thread is
             # left parked on a blocking recv).
             raw_response = await asyncio.wait_for(
-                self.tls_client.receive_data(connection, self.max_response_size),
+                self.tls_client.receive_data(
+                    connection, max_bytes or self.max_response_size
+                ),
                 timeout=self.timeout_seconds,
             )
 
@@ -541,8 +703,12 @@ class GeminiClient(TTLCacheMixin[GeminiFetchResponse]):
                 parsed_response,
                 request_url,
                 time.time(),
-                max_rendered_chars=self.max_rendered_chars,
-                denied_mime_types=self.denied_mime_types,
+                max_rendered_chars=(
+                    self.max_rendered_chars if apply_content_policy else 0
+                ),
+                denied_mime_types=(
+                    self.denied_mime_types if apply_content_policy else None
+                ),
             )
 
             # Add connection info to request info

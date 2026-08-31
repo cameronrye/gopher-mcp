@@ -146,12 +146,16 @@ class ClientManager:
                     max_menu_items=gopher_config.max_menu_items,
                     requests_per_minute=gopher_config.requests_per_minute,
                     max_concurrent_requests=gopher_config.max_concurrent_requests,
+                    respect_robots_txt=gopher_config.respect_robots_txt,
+                    robots_cache_ttl_seconds=gopher_config.robots_cache_ttl_seconds,
+                    robots_honor_ai_tokens=gopher_config.robots_honor_ai_tokens,
                 )
                 logger.info(
                     "Gopher client initialized",
                     allowed_hosts=gopher_config.allowed_hosts,
                     cache_enabled=self._gopher_client.cache_enabled,
                     timeout_seconds=self._gopher_client.timeout_seconds,
+                    respect_robots_txt=self._gopher_client.respect_robots_txt,
                 )
             return self._gopher_client
 
@@ -192,6 +196,9 @@ class ClientManager:
                     requests_per_minute=gemini_config.requests_per_minute,
                     max_concurrent_requests=gemini_config.max_concurrent_requests,
                     denied_mime_types=gemini_config.denied_mime_types,
+                    respect_robots_txt=gemini_config.respect_robots_txt,
+                    robots_cache_ttl_seconds=gemini_config.robots_cache_ttl_seconds,
+                    robots_honor_ai_tokens=gemini_config.robots_honor_ai_tokens,
                 )
                 logger.info(
                     "Gemini client initialized",
@@ -200,6 +207,7 @@ class ClientManager:
                     timeout_seconds=self._gemini_client.timeout_seconds,
                     tofu_enabled=self._gemini_client.tofu_enabled,
                     client_certs_enabled=self._gemini_client.client_certs_enabled,
+                    respect_robots_txt=self._gemini_client.respect_robots_txt,
                 )
             return self._gemini_client
 
@@ -368,11 +376,13 @@ async def _batch_fetch(
 
 @mcp.tool(annotations=_FETCH_ANNOTATIONS, title="Fetch multiple Gopher resources")
 async def gopher_batch_fetch(urls: list[str]) -> list[dict[str, Any]]:
-    """Fetch multiple Gopher URLs in parallel for improved performance.
+    """Fetch multiple Gopher URLs concurrently.
 
-    Uses asyncio.gather() to fetch all URLs concurrently, which is much
-    faster than fetching them sequentially. Useful for fetching multiple
-    menu items or related resources at once.
+    Useful for fetching several menu items or related resources at once.
+    Concurrency is bounded, and requests to the SAME host are spaced out by
+    the per-host rate limit (one per second by default), so a batch aimed at
+    one server is paced rather than parallel. Batching several different hosts
+    is where the real speedup is.
 
     Args:
         urls: List of Gopher URLs to fetch (at most 50 per call)

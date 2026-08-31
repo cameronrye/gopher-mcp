@@ -836,8 +836,13 @@ class TestFetchContentMethod:
         assert isinstance(result, BinaryResult)
 
     @pytest.mark.asyncio
-    async def test_fetch_content_acquires_rate_limiter(self):
-        """Each network fetch passes through the per-host rate limiter."""
+    async def test_fetch_acquires_rate_limiter(self):
+        """Each network fetch passes through the per-host rate limiter.
+
+        The limiter is acquired in ``_bounded_fetch``, deliberately *outside*
+        the concurrency semaphore; see
+        ``test_rate_limiter_waits_outside_the_concurrency_cap``.
+        """
         client = GopherClient()
         client._rate_limiter.acquire = AsyncMock()  # type: ignore[method-assign]
         parsed_url = GopherURL(
@@ -847,8 +852,43 @@ class TestFetchContentMethod:
             "gopher_mcp.gopher_client.fetch_gopher",
             new=AsyncMock(return_value=b"hi"),
         ):
-            await client._fetch_content(parsed_url)
+            await client._bounded_fetch(parsed_url)
         client._rate_limiter.acquire.assert_awaited_once_with("example.com")
+
+    @pytest.mark.asyncio
+    async def test_rate_limiter_waits_outside_the_concurrency_cap(self):
+        """A throttled host must not occupy concurrency slots while sleeping.
+
+        Both settings now ship enabled, so sleeping inside the semaphore would
+        let one slow host starve unrelated hosts that are not throttled at all.
+        """
+
+        from gopher_mcp.models import TextResult
+
+        client = GopherClient(
+            cache_enabled=False, max_concurrent_requests=1, requests_per_minute=60
+        )
+        held = []
+
+        async def fake(_parsed_url):
+            held.append(client._fetch_semaphore._value)
+            return TextResult(bytes=2, text="hi")
+
+        client._fetch_content = fake  # type: ignore[method-assign]
+        sleeps = []
+
+        async def fake_sleep(seconds):
+            # The semaphore must be free while the limiter is waiting.
+            sleeps.append(client._fetch_semaphore._value)
+
+        client._rate_limiter._sleep = fake_sleep  # type: ignore[method-assign]
+        await client.fetch("gopher://example.com/0/a")
+        await client.fetch("gopher://example.com/0/b")
+
+        assert sleeps, "expected the limiter to throttle the second request"
+        # 1 == the whole cap is still available while we wait.
+        assert all(v == 1 for v in sleeps)
+        await client.close()
 
     @pytest.mark.asyncio
     async def test_fetch_internal_host_is_blocked(self):
@@ -896,7 +936,11 @@ class TestFetchContentMethod:
 
         from gopher_mcp.models import TextResult
 
-        client = GopherClient(max_concurrent_requests=2, cache_enabled=False)
+        # Rate limiting is on by default and would serialize same-host
+        # requests to one per second, hiding the concurrency behaviour.
+        client = GopherClient(
+            max_concurrent_requests=2, cache_enabled=False, requests_per_minute=0
+        )
         inflight = 0
         peak = 0
 
@@ -916,13 +960,44 @@ class TestFetchContentMethod:
         await client.close()
 
     @pytest.mark.asyncio
-    async def test_unlimited_concurrency_by_default(self):
-        """The cap is opt-in: default (0) leaves concurrency unbounded."""
+    async def test_concurrency_capped_by_default(self):
+        """The cap ships on: a default client bounds in-flight fetches."""
+        import asyncio
+
+        from gopher_mcp.gopher_client import DEFAULT_MAX_CONCURRENT_REQUESTS
+        from gopher_mcp.models import TextResult
+
+        # Rate limiting is also on by default and would serialize these to one
+        # per second, hiding what this test measures; disable just that.
+        client = GopherClient(cache_enabled=False, requests_per_minute=0)
+        inflight = 0
+        peak = 0
+
+        async def fake(_parsed_url):
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0.02)
+            inflight -= 1
+            return TextResult(bytes=2, text="hi")
+
+        client._fetch_content = fake  # type: ignore[method-assign]
+        await asyncio.gather(
+            *[client.fetch(f"gopher://example.com/0/{i}") for i in range(10)]
+        )
+        assert peak == DEFAULT_MAX_CONCURRENT_REQUESTS
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_unlimited_concurrency_when_explicitly_disabled(self):
+        """Setting the cap to 0 still means unbounded."""
         import asyncio
 
         from gopher_mcp.models import TextResult
 
-        client = GopherClient(cache_enabled=False)  # default: no cap
+        client = GopherClient(
+            cache_enabled=False, max_concurrent_requests=0, requests_per_minute=0
+        )
         inflight = 0
         peak = 0
 

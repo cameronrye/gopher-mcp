@@ -6,8 +6,9 @@ so both clients route each outbound request through a :class:`RateLimiter` that
 enforces a minimum spacing between requests *to the same host* and honours a
 server's request to slow down (Gemini status 44).
 
-The limiter is disabled by default (``requests_per_minute=0``); operators opt in
-via ``GOPHER_REQUESTS_PER_MINUTE`` / ``GEMINI_REQUESTS_PER_MINUTE``.
+The limiter is ENABLED by default at 60 requests per minute per host (one per
+second). Set ``GOPHER_REQUESTS_PER_MINUTE`` / ``GEMINI_REQUESTS_PER_MINUTE`` to
+0 to disable it, or to another value to retune it.
 """
 
 import asyncio

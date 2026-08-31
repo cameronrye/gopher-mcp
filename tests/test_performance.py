@@ -265,7 +265,9 @@ class TestScalability:
     @pytest.mark.asyncio
     async def test_connection_pool_efficiency(self):
         """Test connection pooling efficiency."""
-        client = GeminiClient()
+        # Politeness throttling is on by default and would dominate the timing
+        # here; this test is about per-request overhead, so disable it.
+        client = GeminiClient(requests_per_minute=0)
 
         # Test reusing connections to same host
         same_host_urls = [f"gemini://example.com/page{i}" for i in range(5)]
@@ -408,7 +410,8 @@ class TestLoadTesting:
     @pytest.mark.asyncio
     async def test_sustained_load(self):
         """Test sustained load over time."""
-        client = GeminiClient()
+        # Throughput test: measure the client, not the per-host rate limiter.
+        client = GeminiClient(requests_per_minute=0)
         mock_response = b"20 text/plain\r\nTest content"
 
         # Run sustained load for a period
