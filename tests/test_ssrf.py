@@ -5,14 +5,26 @@ The ``_stub_dns`` autouse fixture in conftest resolves hostnames offline:
 to the cloud-metadata IP, and everything else to a public address.
 """
 
+import asyncio
+import socket
+import threading
+import time
+
 import pytest
 
+from gopher_mcp import ssrf
 from gopher_mcp.ssrf import (
     SSRFError,
     classify_blocked_ip,
     normalize_host,
+    resolve_host,
     validate_target,
 )
+
+# ``_stub_dns`` rebinds ``gopher_mcp.ssrf.resolve_host``; this module-level name
+# was bound at import time and so still refers to the real implementation, which
+# is what TestResolveHost needs to exercise.
+_real_resolve_host = resolve_host
 
 
 class TestNormalizeHost:
@@ -42,6 +54,12 @@ class TestClassifyBlockedIp:
             ("100.64.0.1", "non-global"),  # CGNAT / RFC 6598
             ("100.127.255.255", "non-global"),  # CGNAT upper bound
             ("fec0::1", "site-local"),  # deprecated IPv6 site-local
+            ("240.0.0.1", "private"),  # class E; CPython files 240/4 as private
+            # IPv6 ranges IANA has never allocated. CPython reports these as
+            # is_global=True, so only the explicit is_reserved check stops them.
+            ("200::1", "reserved"),
+            ("4000::1", "reserved"),
+            ("fe00::1", "reserved"),
         ],
     )
     def test_blocked_ips(self, ip, reason):
@@ -116,6 +134,134 @@ class TestValidateTarget:
         monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", boom)
         with pytest.raises(SSRFError, match="Could not resolve"):
             await validate_target("nope.example", 70)
+
+    async def test_empty_resolution_raises(self, monkeypatch):
+        """A resolver that answers with no addresses must not be treated as a
+        successful lookup: returning an empty list would hand the caller nothing
+        to connect to, and every address check below would vacuously pass."""
+
+        async def nothing(host, port):
+            return []
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", nothing)
+        with pytest.raises(SSRFError, match="Could not resolve"):
+            await validate_target("nope.example", 70)
+
+    async def test_reserved_address_from_dns_is_blocked(self, monkeypatch):
+        """An unallocated IPv6 range reports is_global=True, so it reaches the
+        connect path unless the reserved check catches it."""
+
+        async def reserved(host, port):
+            return ["4000::1"]
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", reserved)
+        with pytest.raises(SSRFError, match="Blocked reserved address"):
+            await validate_target("sneaky.example", 1965)
+
+
+@pytest.mark.asyncio
+class TestResolveHost:
+    """The real ``resolve_host``, which the autouse ``_stub_dns`` fixture
+    replaces everywhere else -- so its call shape and result handling would
+    otherwise run in no test at all."""
+
+    async def test_shapes_getaddrinfo_results(self, monkeypatch):
+        """Only stream sockets are asked for, and the address is element 0 of
+        each sockaddr (a 2-tuple for IPv4, a 4-tuple for IPv6)."""
+        seen: dict[str, object] = {}
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            seen["host"] = host
+            seen["port"] = port
+            seen["type"] = kwargs.get("type")
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port)),
+                (
+                    socket.AF_INET6,
+                    socket.SOCK_STREAM,
+                    6,
+                    "",
+                    ("2606:2800::1", port, 0, 0),
+                ),
+            ]
+
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", fake_getaddrinfo)
+        addresses = await _real_resolve_host("example.com", 1965)
+
+        assert addresses == ["93.184.216.34", "2606:2800::1"]
+        assert seen == {"host": "example.com", "port": 1965, "type": socket.SOCK_STREAM}
+
+    async def test_resolver_error_propagates_as_oserror(self, monkeypatch):
+        """validate_target maps OSError to SSRFError, so it must reach it."""
+
+        def boom(host, port, *args, **kwargs):
+            raise socket.gaierror("nodename nor servname provided")
+
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", boom)
+        with pytest.raises(OSError):
+            await _real_resolve_host("nope.example", 70)
+
+
+@pytest.mark.asyncio
+class TestDNSExecutorIsolation:
+    """DNS must not run on the event loop's default executor.
+
+    ``asyncio.wait_for`` cancels only the awaiting coroutine; the worker thread
+    stays parked inside the OS resolver. A batch naming hosts whose nameservers
+    tarpit queries would therefore occupy every default-executor thread, and
+    every later request over either protocol would queue behind them long past
+    its own deadline.
+    """
+
+    async def test_lookup_runs_on_the_dedicated_pool(self, monkeypatch):
+        threads: list[str] = []
+
+        def fake_getaddrinfo(host, port, *args, **kwargs):
+            threads.append(threading.current_thread().name)
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+            ]
+
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", fake_getaddrinfo)
+        await _real_resolve_host("example.com", 70)
+
+        assert threads
+        assert all(name.startswith(ssrf._DNS_THREAD_PREFIX) for name in threads)
+
+    async def test_concurrent_lookups_are_capped(self, monkeypatch):
+        """Past the cap, lookups queue instead of claiming another thread."""
+        release = threading.Event()
+        lock = threading.Lock()
+        inflight = 0
+        peak = 0
+
+        def stalling_getaddrinfo(host, port, *args, **kwargs):
+            nonlocal inflight, peak
+            with lock:
+                inflight += 1
+                peak = max(peak, inflight)
+            release.wait(10.0)
+            with lock:
+                inflight -= 1
+            return [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", port))
+            ]
+
+        monkeypatch.setattr(ssrf.socket, "getaddrinfo", stalling_getaddrinfo)
+        tasks = [
+            asyncio.create_task(_real_resolve_host(f"h{i}.example", 70))
+            for i in range(ssrf._DNS_MAX_WORKERS * 3)
+        ]
+        try:
+            deadline = time.monotonic() + 10.0
+            while peak < ssrf._DNS_MAX_WORKERS and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
+            # Give any thread the pool should not have started time to appear.
+            await asyncio.sleep(0.25)
+            assert peak == ssrf._DNS_MAX_WORKERS
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(*tasks), timeout=10.0)
 
 
 @pytest.mark.asyncio

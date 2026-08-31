@@ -374,6 +374,14 @@ class RobotsGate:
         # One lock per host so a batch of concurrent fetches to the same server
         # triggers a single robots.txt request rather than one per URL.
         self._locks: dict[str, asyncio.Lock] = {}
+        # How many coroutines are currently holding or queued on each host lock.
+        # ``asyncio.Lock.locked()`` cannot answer that: ``release()`` clears the
+        # flag and only *schedules* the first waiter, so for one loop iteration
+        # a contended lock reports ``locked() == False``. Sweeping on that flag
+        # would drop a lock waiters still reference, and the next caller would
+        # create a second lock for the same host -- two concurrent robots.txt
+        # fetches at the very server the gate exists to spare.
+        self._lock_users: dict[str, int] = {}
         # An open-world fetcher sees an unbounded number of distinct hosts, so
         # neither map may grow without limit (the rate limiter has the same
         # constraint and solves it the same way). Past this many entries, sweep
@@ -406,43 +414,55 @@ class RobotsGate:
         ):
             self._sweep()
 
-        lock = self._locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            # Re-check: another waiter may have populated the entry while we
-            # queued on the lock.
-            cached = self._cache.get(key)
-            if cached is not None and cached.expires_at > self._clock():
-                return cached.policy
+        # Registering before touching the lock is what keeps _sweep safe; see
+        # the note on ``_lock_users``.
+        self._lock_users[key] = self._lock_users.get(key, 0) + 1
+        try:
+            lock = self._locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                # Re-check: another waiter may have populated the entry while we
+                # queued on the lock.
+                cached = self._cache.get(key)
+                if cached is not None and cached.expires_at > self._clock():
+                    return cached.policy
 
-            try:
-                text = await self._fetcher(host, port)
-            except RobotsUnavailable as e:
-                logger.debug(
-                    "robots.txt unavailable", host=host, port=port, reason=str(e)
-                )
-                # Deliberately not cached: a temporary failure should be retried,
-                # not pinned for the whole TTL. Fall back to the stale policy if
-                # we have one rather than throwing away a known-good answer.
-                stale = self._cache.get(key)
-                return stale.policy if stale is not None else None
+                try:
+                    text = await self._fetcher(host, port)
+                except RobotsUnavailable as e:
+                    logger.debug(
+                        "robots.txt unavailable", host=host, port=port, reason=str(e)
+                    )
+                    # Deliberately not cached: a temporary failure should be
+                    # retried, not pinned for the whole TTL. Fall back to the
+                    # stale policy if we have one rather than throwing away a
+                    # known-good answer.
+                    stale = self._cache.get(key)
+                    return stale.policy if stale is not None else None
 
-            policy = parse_robots(text) if text is not None else RobotsPolicy()
-            self._cache[key] = _CachedPolicy(
-                policy=policy, expires_at=self._clock() + self._ttl_seconds
-            )
-            if policy.groups:
-                logger.debug(
-                    "robots.txt policy loaded",
-                    host=host,
-                    port=port,
-                    agents=sorted(policy.groups),
+                policy = parse_robots(text) if text is not None else RobotsPolicy()
+                self._cache[key] = _CachedPolicy(
+                    policy=policy, expires_at=self._clock() + self._ttl_seconds
                 )
-            return policy
+                if policy.groups:
+                    logger.debug(
+                        "robots.txt policy loaded",
+                        host=host,
+                        port=port,
+                        agents=sorted(policy.groups),
+                    )
+                return policy
+        finally:
+            remaining = self._lock_users[key] - 1
+            if remaining:
+                self._lock_users[key] = remaining
+            else:
+                del self._lock_users[key]
 
     def _sweep(self) -> None:
-        """Drop expired policies and locks nobody is waiting on."""
+        """Drop expired policies and locks nobody is holding or waiting on."""
         now = self._clock()
         self._cache = {k: v for k, v in self._cache.items() if v.expires_at > now}
         # A held or contended lock must survive: dropping it would let a second
-        # waiter start a duplicate fetch. An idle lock is safe to recreate.
-        self._locks = {k: v for k, v in self._locks.items() if v.locked()}
+        # caller create a fresh lock and start a duplicate fetch. An unused lock
+        # is safe to recreate.
+        self._locks = {k: v for k, v in self._locks.items() if k in self._lock_users}

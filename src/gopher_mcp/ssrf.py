@@ -13,13 +13,20 @@ Gopher server on localhost) can opt in per protocol with
 """
 
 import asyncio
+import concurrent.futures
+import functools
 import ipaddress
+import queue
 import socket
-from collections.abc import Iterable
+import threading
+from collections.abc import Callable, Iterable
+from typing import Any, TypeVar
 
 import structlog
 
 logger = structlog.get_logger(__name__)
+
+_T = TypeVar("_T")
 
 
 class SSRFError(ValueError):
@@ -118,14 +125,108 @@ def classify_blocked_ip(value: str) -> str | None:
     return None
 
 
+# Name resolution runs in this module's own pool rather than the event loop's
+# default executor. The ``asyncio.wait_for`` deadlines the clients wrap around
+# validate_target cancel only the awaiting coroutine: the worker thread stays
+# parked inside the OS resolver until it gives up by itself, which for a
+# tarpitting nameserver is far longer than any configured timeout. A batch
+# naming enough such hosts would occupy every default-executor thread, and every
+# later request over either protocol would then queue behind them. Confining
+# DNS to a pool of its own makes the worst case "resolution for this batch
+# queues" instead of "the server stalls".
+_DNS_MAX_WORKERS = 8
+_DNS_THREAD_PREFIX = "gopher-mcp-dns"
+
+
+class _DNSExecutor(concurrent.futures.Executor):
+    """A bounded pool of daemon threads for blocking name resolution.
+
+    ``ThreadPoolExecutor`` joins its workers at interpreter exit, so a single
+    worker parked in ``getaddrinfo`` would hold the whole process open until the
+    resolver gave up. Daemon workers are abandoned at exit instead.
+    """
+
+    def __init__(self, max_workers: int) -> None:
+        """Initialize the pool.
+
+        Args:
+            max_workers: Upper bound on threads, and so on concurrently running
+                lookups; further submissions queue until a worker frees up.
+        """
+        self._max_workers = max_workers
+        self._work: queue.SimpleQueue[
+            tuple[concurrent.futures.Future[Any], Callable[[], Any]]
+        ] = queue.SimpleQueue()
+        self._threads: list[threading.Thread] = []
+        self._idle = threading.Semaphore(0)
+        self._grow_lock = threading.Lock()
+
+    def submit(
+        self, fn: Callable[..., _T], /, *args: Any, **kwargs: Any
+    ) -> concurrent.futures.Future[_T]:
+        """Schedule ``fn(*args, **kwargs)`` on a worker and return its future."""
+        future: concurrent.futures.Future[_T] = concurrent.futures.Future()
+        self._work.put((future, functools.partial(fn, *args, **kwargs)))
+        self._grow()
+        return future
+
+    def _grow(self) -> None:
+        """Start another worker unless one is idle or the pool is at capacity."""
+        if self._idle.acquire(blocking=False):
+            return
+        with self._grow_lock:
+            if len(self._threads) >= self._max_workers:
+                return
+            thread = threading.Thread(
+                target=self._run,
+                name=f"{_DNS_THREAD_PREFIX}-{len(self._threads)}",
+                daemon=True,
+            )
+            self._threads.append(thread)
+            thread.start()
+
+    def _run(self) -> None:
+        """Worker loop: drain the queue forever, relaying results and errors."""
+        while True:
+            future, call = self._work.get()
+            if future.set_running_or_notify_cancel():
+                try:
+                    future.set_result(call())
+                except BaseException as exc:
+                    # A worker that died on an exception would leave its caller
+                    # awaiting a future nobody will ever complete.
+                    future.set_exception(exc)
+            self._idle.release()
+
+
+_dns_executor: _DNSExecutor | None = None
+_dns_executor_lock = threading.Lock()
+
+
+def _get_dns_executor() -> _DNSExecutor:
+    """Return the process-wide DNS pool, starting it on first use."""
+    global _dns_executor
+    with _dns_executor_lock:
+        if _dns_executor is None:
+            _dns_executor = _DNSExecutor(_DNS_MAX_WORKERS)
+        return _dns_executor
+
+
 async def resolve_host(host: str, port: int) -> list[str]:
     """Resolve ``host`` to a list of IP address strings.
 
-    Isolated in its own function so tests can stub DNS deterministically.
+    Runs on the dedicated DNS pool (see :class:`_DNSExecutor`) rather than the
+    event loop's default executor. Isolated in its own function so tests can
+    stub DNS deterministically.
     """
     loop = asyncio.get_running_loop()
-    infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    return [info[4][0] for info in infos]
+    infos = await loop.run_in_executor(
+        _get_dns_executor(),
+        functools.partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM),
+    )
+    # sockaddr is (address, port) for IPv4 and (address, port, flowinfo,
+    # scope_id) for IPv6; the address is element 0 of either.
+    return [str(info[4][0]) for info in infos]
 
 
 async def validate_target(
