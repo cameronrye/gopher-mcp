@@ -1,14 +1,119 @@
 """Centralized configuration management using Pydantic Settings."""
 
 import contextlib
+import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# List fields are annotated ``NoDecode`` so pydantic-settings hands the raw
+# environment string to the validators below instead of JSON-decoding it first
+# (a non-union complex type such as ``list[str]`` otherwise fails startup with a
+# SettingsError on the documented comma-separated form). That also disables JSON
+# list input, so the helpers accept both spellings.
+
+
+def _split_list_value(value: str) -> list[str]:
+    """Split a raw environment value into entries.
+
+    Args:
+        value: Either a JSON array (``["a", "b"]``) or the documented
+            comma-separated form (``a,b``).
+
+    Returns:
+        The non-empty, whitespace-stripped entries.
+
+    Raises:
+        ValueError: If the value opens like a JSON array but is not one.
+    """
+    stripped = value.strip()
+    if stripped.startswith("["):
+        try:
+            decoded = json.loads(stripped)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON list: {value!r}") from exc
+        return [str(item).strip() for item in decoded if str(item).strip()]
+    return [entry.strip() for entry in stripped.split(",") if entry.strip()]
+
+
+def _parse_host_allowlist(v: None | str | list[str], env_var: str) -> list[str] | None:
+    """Parse a host allowlist from an environment variable.
+
+    Args:
+        v: Raw value: unset, an empty string, a JSON array, a comma-separated
+            list, or an already-built list.
+        env_var: Name of the environment variable, used in error messages.
+
+    Returns:
+        The parsed hosts, or None when no allowlist is configured.
+
+    Raises:
+        ValueError: If a non-empty value yields no hosts. Downstream an empty
+            allowlist is indistinguishable from "unset" and would silently drop
+            the restriction, so fail closed at startup instead.
+    """
+    if v is None or v == "":
+        return None
+    if isinstance(v, list):
+        return v
+    hosts = _split_list_value(v)
+    if not hosts:
+        raise ValueError(
+            f"{env_var} is set to {v!r} but names no hosts; unset it to allow "
+            "all hosts."
+        )
+    return hosts
+
+
+def _parse_port_allowlist(v: None | str | list[int], env_var: str) -> list[int] | None:
+    """Parse a port allowlist from an environment variable.
+
+    Args:
+        v: Raw value: unset, an empty string, a JSON array, a comma-separated
+            list, or an already-built list.
+        env_var: Name of the environment variable, used in error messages.
+
+    Returns:
+        The parsed ports, or None when no allowlist is configured.
+
+    Raises:
+        ValueError: If a non-empty value yields no ports, or any port falls
+            outside 1-65535 and so could never match a request.
+    """
+    if v is None or v == "":
+        return None
+    ports = [int(p) for p in v] if isinstance(v, list) else _parse_ports(v, env_var)
+    for port in ports:
+        if not 1 <= port <= 65535:
+            raise ValueError(f"{env_var} port must be between 1 and 65535: {port}")
+    return ports
+
+
+def _parse_ports(v: str, env_var: str) -> list[int]:
+    """Parse the entries of a port allowlist string.
+
+    Args:
+        v: A JSON array or comma-separated port list.
+        env_var: Name of the environment variable, used in error messages.
+
+    Returns:
+        The parsed ports.
+
+    Raises:
+        ValueError: If the value names no ports.
+    """
+    ports = [int(entry) for entry in _split_list_value(v)]
+    if not ports:
+        raise ValueError(
+            f"{env_var} is set to {v!r} but names no ports; unset it to allow "
+            "any non-dangerous port."
+        )
+    return ports
 
 
 class GopherConfig(BaseSettings):
@@ -32,7 +137,8 @@ class GopherConfig(BaseSettings):
     )
     cache_ttl_seconds: int = Field(
         default=300,  # 5 minutes
-        description="Cache time-to-live in seconds",
+        description="Cache time-to-live in seconds; 0 disables caching (every "
+        "entry would expire the instant it is stored).",
         ge=0,
         le=86400,  # at most one day
     )
@@ -42,16 +148,18 @@ class GopherConfig(BaseSettings):
         ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
-    allowed_hosts: list[str] | None = Field(
+    allowed_hosts: Annotated[list[str] | None, NoDecode] = Field(
         default=None,
-        description="List of allowed hostnames (None = allow all)",
+        description="List of allowed hostnames, comma-separated (None = allow "
+        "all). An explicitly empty list is rejected rather than read as "
+        "allow-all.",
     )
     allow_local_hosts: bool = Field(
         default=False,
         description="Allow connections to loopback/private/internal addresses "
         "(disabled by default to prevent SSRF)",
     )
-    allowed_ports: list[int] | None = Field(
+    allowed_ports: Annotated[list[int] | None, NoDecode] = Field(
         default=None,
         description="Optional positive port allowlist (comma-separated, e.g. "
         "70). When set, only these ports may be connected to, closing the "
@@ -135,23 +243,22 @@ class GopherConfig(BaseSettings):
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod
-    def parse_allowed_hosts(cls, v: str | None) -> list[str] | None:
+    def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
         """Parse comma-separated allowed hosts from environment variable."""
-        if v is None or v == "":
-            return None
-        if isinstance(v, list):  # type: ignore[unreachable]
-            return v  # type: ignore[unreachable]
-        return [host.strip() for host in v.split(",") if host.strip()]
+        return _parse_host_allowlist(v, "GOPHER_ALLOWED_HOSTS")
 
     @field_validator("allowed_ports", mode="before")
     @classmethod
     def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
         """Parse a comma-separated port allowlist from an environment variable."""
-        if v is None or v == "":
-            return None
-        if isinstance(v, list):
-            return [int(p) for p in v]
-        return [int(p.strip()) for p in str(v).split(",") if p.strip()]
+        return _parse_port_allowlist(v, "GOPHER_ALLOWED_PORTS")
+
+    @model_validator(mode="after")
+    def disable_cache_without_ttl(self) -> "GopherConfig":
+        """Treat a zero TTL as caching disabled rather than a no-hit cache."""
+        if self.cache_ttl_seconds == 0:
+            self.cache_enabled = False
+        return self
 
 
 class GeminiConfig(BaseSettings):
@@ -175,7 +282,8 @@ class GeminiConfig(BaseSettings):
     )
     cache_ttl_seconds: int = Field(
         default=300,
-        description="Cache time-to-live in seconds",
+        description="Cache time-to-live in seconds; 0 disables caching (every "
+        "entry would expire the instant it is stored).",
         ge=0,
         le=86400,  # at most one day
     )
@@ -185,16 +293,18 @@ class GeminiConfig(BaseSettings):
         ge=1,  # 0 would break LRU eviction (popitem on an empty cache)
         le=100000,
     )
-    allowed_hosts: list[str] | None = Field(
+    allowed_hosts: Annotated[list[str] | None, NoDecode] = Field(
         default=None,
-        description="List of allowed hostnames (None = allow all)",
+        description="List of allowed hostnames, comma-separated (None = allow "
+        "all). An explicitly empty list is rejected rather than read as "
+        "allow-all.",
     )
     allow_local_hosts: bool = Field(
         default=False,
         description="Allow connections to loopback/private/internal addresses "
         "(disabled by default to prevent SSRF)",
     )
-    allowed_ports: list[int] | None = Field(
+    allowed_ports: Annotated[list[int] | None, NoDecode] = Field(
         default=None,
         description="Optional positive port allowlist (comma-separated, e.g. "
         "1965). When set, only these ports may be connected to, closing the "
@@ -269,7 +379,7 @@ class GeminiConfig(BaseSettings):
         "tokens (ClaudeBot, GPTBot, CCBot, ...). Not part of the companion "
         "spec, but capsules that name them mean 'no LLM tooling'.",
     )
-    denied_mime_types: list[str] = Field(
+    denied_mime_types: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description="MIME types (or `type/*` wildcards) to reject as filtered "
         "content, e.g. 'text/html,image/*'; empty = no content filtering.",
@@ -287,21 +397,13 @@ class GeminiConfig(BaseSettings):
     @classmethod
     def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
         """Parse comma-separated allowed hosts from environment variable."""
-        if v is None or v == "":
-            return None
-        if isinstance(v, list):
-            return v
-        return [host.strip() for host in v.split(",") if host.strip()]
+        return _parse_host_allowlist(v, "GEMINI_ALLOWED_HOSTS")
 
     @field_validator("allowed_ports", mode="before")
     @classmethod
     def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
         """Parse a comma-separated port allowlist from an environment variable."""
-        if v is None or v == "":
-            return None
-        if isinstance(v, list):
-            return [int(p) for p in v]
-        return [int(p.strip()) for p in str(v).split(",") if p.strip()]
+        return _parse_port_allowlist(v, "GEMINI_ALLOWED_PORTS")
 
     @field_validator("denied_mime_types", mode="before")
     @classmethod
@@ -311,7 +413,14 @@ class GeminiConfig(BaseSettings):
             return []
         if isinstance(v, list):
             return v
-        return [m.strip().lower() for m in v.split(",") if m.strip()]
+        return [mime.lower() for mime in _split_list_value(v)]
+
+    @model_validator(mode="after")
+    def disable_cache_without_ttl(self) -> "GeminiConfig":
+        """Treat a zero TTL as caching disabled rather than a no-hit cache."""
+        if self.cache_ttl_seconds == 0:
+            self.cache_enabled = False
+        return self
 
 
 class ServerConfig(BaseSettings):
