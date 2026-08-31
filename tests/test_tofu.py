@@ -919,7 +919,9 @@ class TestTOFUMismatchRemediation:
         message = str(exc_info.value)
         assert storage_path in message
         assert "example.com:1965" in message
-        assert "force=True" in message
+        # The supported remedy is the tool, with hand-editing as the fallback.
+        assert "gemini_trust_update" in message
+        assert "gemini_trust_list" in message
         # Only fingerprint PREFIXES may appear -- never a full digest.
         assert "a" * 64 not in message
         assert "b" * 64 not in message

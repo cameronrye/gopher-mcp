@@ -42,7 +42,7 @@ LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_INTERVAL_SECONDS = 0.05
 
 
-def _canon_fingerprint(fingerprint: str) -> str:
+def canonicalize_fingerprint(fingerprint: str) -> str:
     """Canonicalize a SHA-256 certificate fingerprint to one comparable form.
 
     The wire path always produces ``hashlib.sha256(...).hexdigest()`` (lowercase,
@@ -226,7 +226,7 @@ class TOFUManager:
             # written before normalization (or edited by a human in colon form)
             # still matches the wire digest.
             for entry in entries.values():
-                entry.fingerprint = _canon_fingerprint(entry.fingerprint)
+                entry.fingerprint = canonicalize_fingerprint(entry.fingerprint)
         except Exception as e:
             logger.error("TOFU storage is corrupt or unreadable", error=str(e))
             raise TOFUValidationError(
@@ -303,7 +303,7 @@ class TOFUManager:
             logger.warning("Ignoring unreadable TOFU store during merge", error=str(e))
             return {}
         for entry in entries.values():
-            entry.fingerprint = _canon_fingerprint(entry.fingerprint)
+            entry.fingerprint = canonicalize_fingerprint(entry.fingerprint)
         return entries
 
     def _save_entries(self, *, removed_keys: set[str] | None = None) -> None:
@@ -374,7 +374,7 @@ class TOFUManager:
 
         # Normalize to one canonical form so a colon/uppercase representation
         # can never cause a spurious mismatch against the wire digest.
-        cert_fingerprint = _canon_fingerprint(cert_fingerprint)
+        cert_fingerprint = canonicalize_fingerprint(cert_fingerprint)
 
         existing_entry = self._entries.get(key)
 
@@ -468,10 +468,11 @@ class TOFUManager:
                     f"Current:  {cert_fingerprint[:16]}...\n"
                     f"First seen: {datetime.fromtimestamp(existing_entry.first_seen, tz=UTC)}\n"
                     f"This could indicate a security issue.\n"
-                    f'If the rotation is expected, delete the "{key}" entry '
-                    f"from the trust store at {self.storage_path} (or call "
-                    f"TOFUManager.update_certificate with force=True) and "
-                    f"reconnect to pin the new certificate."
+                    f"If the rotation is expected, drop the pin with the "
+                    f"gemini_trust_update tool (action='remove', host='{host}', "
+                    f"port={port}, and the fingerprint gemini_trust_list "
+                    f'reports) and reconnect; the "{key}" entry in the trust '
+                    f"store at {self.storage_path} can also be removed by hand."
                 )
 
                 logger.warning(
@@ -548,8 +549,8 @@ class TOFUManager:
             key = self._get_key(host, port)
             current_time = time.time()
 
-            # Normalize to one canonical form (see _canon_fingerprint).
-            cert_fingerprint = _canon_fingerprint(cert_fingerprint)
+            # Normalize to one canonical form (see canonicalize_fingerprint).
+            cert_fingerprint = canonicalize_fingerprint(cert_fingerprint)
 
             existing_entry = self._entries.get(key)
 

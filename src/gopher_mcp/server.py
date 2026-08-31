@@ -29,7 +29,7 @@ from .ssrf import normalize_host
 # The trust store's own canonicalization, imported rather than reimplemented: a
 # fingerprint the tools normalize even slightly differently would fail to match
 # the stored pin, turning the safety interlock below into a dead end.
-from .tofu import TOFUStorageError, _canon_fingerprint
+from .tofu import TOFUStorageError, canonicalize_fingerprint
 
 logger = structlog.get_logger(__name__)
 
@@ -790,7 +790,7 @@ async def gemini_trust_update(
     # digest: a truncated or mistyped value must be rejected rather than
     # silently failing to match (on "remove") or pinning a digest no server can
     # ever present (on "pin").
-    canonical = _canon_fingerprint(fingerprint)
+    canonical = canonicalize_fingerprint(fingerprint)
     if not _SHA256_HEX.fullmatch(canonical):
         return _error(
             "INVALID_REQUEST",
