@@ -3,6 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
+from gopher_mcp.gemini_parse import normalize_gemini_path
 from gopher_mcp.models import GeminiFetchRequest, GeminiURL
 from gopher_mcp.utils import (
     format_gemini_url,
@@ -157,6 +158,61 @@ class TestGeminiURLParsing:
         too_long = base + "a" * (1025 - len(base))
         with pytest.raises(ValueError, match="1024 bytes"):
             parse_gemini_url(too_long)
+
+
+class TestGeminiPathNormalization:
+    """Dot segments are resolved before anything reads the path.
+
+    RFC 3986 section 5.2.4 says this belongs on the wire, and here it is also
+    what every path-scoped decision depends on -- the client certificate a
+    request carries most of all, since the path in a link is chosen by the
+    capsule serving it.
+    """
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("gemini://example.org/app/../secret", "/secret"),
+            ("gemini://example.org/app/./page.gmi", "/app/page.gmi"),
+            ("gemini://example.org/app/sub/../../secret", "/secret"),
+            # `.` is unreserved, so %2e is the same character to the capsule.
+            ("gemini://example.org/app/%2e%2e/secret", "/secret"),
+            ("gemini://example.org/app/%2E%2E/secret", "/secret"),
+            # Climbing above the root resolves to the root, never past it.
+            ("gemini://example.org/../../secret", "/secret"),
+            ("gemini://example.org/..", "/"),
+            ("gemini://example.org/app/..", "/"),
+            ("gemini://example.org/app/.", "/app/"),
+            # Empty segments are not dot segments and are left alone.
+            ("gemini://example.org/app//x", "/app//x"),
+            ("gemini://example.org/app/page.gmi", "/app/page.gmi"),
+        ],
+    )
+    def test_dot_segments_are_resolved(self, url, expected):
+        assert parse_gemini_url(url).path == expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("../secret", "secret"),
+            ("./page.gmi", "page.gmi"),
+            (".", ""),
+            ("..", ""),
+        ],
+    )
+    def test_a_relative_path_resolves_the_same_way(self, path, expected):
+        """RFC 3986's algorithm is implemented whole rather than clipped to the
+        absolute paths a Gemini URL happens to produce, so it stays correct for
+        any caller that reaches for it."""
+        assert normalize_gemini_path(path) == expected
+
+    def test_a_query_string_is_left_untouched(self):
+        """The query is the user's answer to a status-10/11 prompt, not a
+        hierarchy, so nothing in it is a path segment."""
+        parsed = parse_gemini_url("gemini://example.org/app/?a/../b")
+
+        assert parsed.path == "/app/"
+        assert parsed.query == "a/../b"
 
 
 class TestGeminiURLFormatting:

@@ -64,10 +64,39 @@ alongside `code` and `message`. Code that assumed `dict[str, str]` should read
 
 - Two tools were added: `gemini_trust_list` and `gemini_trust_update`, with the
   result models `TOFUTrustListResult` and `TOFUTrustUpdateResult`.
+- Two more were added for client identities: `gemini_client_cert_list` and
+  `gemini_client_cert_update`, with the result models
+  `GeminiClientCertListResult` and `GeminiClientCertUpdateResult`. They make a
+  status-60 (certificate required) capsule reachable, which it previously was
+  not — deliberately, only on an explicit call, never automatically on a
+  status-60 response.
 - Cacheable result models grew `cached`, `cached_at` and `cache_age_seconds`;
   `gopher_fetch` and `gemini_fetch` grew an optional `refresh` argument, and
   `GopherClient.fetch` / `GeminiClient.fetch` grew a keyword-only `refresh`.
   Both are additive.
+- `GeminiCertificateResult` grew `next_step`: this server's own instruction for
+  that status (60, 61 and 62 need different answers), beside the capsule's
+  untrusted `message`.
+
+### Client-certificate store changes
+
+Embedders driving `ClientCertificateManager` directly should know three things:
+
+- Certificate and key files are now named after a random per-certificate
+  `key_id`, recorded in `registry.json`, instead of the certificate's common
+  name — two identities on one host could share that name and so share one key
+  pair. Existing entries have no `key_id` and keep resolving to their
+  common-name filenames, so no store needs migrating.
+- `generate_certificate` and `remove_certificate` roll back their in-memory
+  change if the registry cannot be persisted, so a raised error now always
+  means the store is unchanged.
+- `remove_certificate` raises `ClientCertificateKeyRetainedError` (a
+  `ClientCertificateError`) when the registry entry was removed but the private
+  key file survived its unlink, rather than returning True as though the key
+  had been destroyed.
+- `ClientCertificateManager.get_certificate_info_for_scope` is new: the same
+  resolution `get_certificate_for_scope` performs, returning the registry entry
+  instead of file paths.
 
 ## Migration Steps
 
@@ -168,7 +197,7 @@ python scripts/validate-config.py
 | Host Allowlists | ✅ | ✅ | Independent configuration |
 | Timeout Configuration | ✅ | ✅ | Independent settings |
 | Certificate Validation | N/A | ✅ TOFU | Gemini-specific security; inspect and recover with `gemini_trust_list` / `gemini_trust_update` |
-| Client Certificates | N/A | ✅ Scoped storage | Attached automatically when one exists; no MCP tool creates one |
+| Client Certificates | N/A | ✅ Scoped storage | Attached automatically when one exists; create or remove one deliberately with `gemini_client_cert_update` |
 
 ## Common Migration Scenarios
 

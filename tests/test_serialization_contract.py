@@ -57,6 +57,7 @@ EXPECTED_KEYS: dict[str, set[str]] = {
         "message",
         "status",
         "required",
+        "next_step",
         "request_info",
     },
     "GeminiGemtextResult": {
@@ -88,6 +89,33 @@ EXPECTED_KEYS: dict[str, set[str]] = {
         "first_seen",
         "last_seen",
         "expires",
+    },
+    # Client-certificate tool results
+    "GeminiClientCertListResult": {"kind", "entries", "request_info"},
+    "GeminiClientCertUpdateResult": {
+        "kind",
+        "action",
+        "host",
+        "port",
+        "path",
+        "fingerprint",
+        "expires",
+        "changed",
+        "message",
+        "request_info",
+    },
+    # A projection of GeminiCertificateInfo, not the whole of it: the stored
+    # entry also carries the certificate's subject (which names its key pair on
+    # disk) and its issuer, and neither may reach a model.
+    "GeminiClientCertificateEntry": {
+        "url",
+        "host",
+        "port",
+        "path",
+        "fingerprint",
+        "not_before",
+        "not_after",
+        "expired",
     },
     # Gemtext content models
     "GemtextDocument": {"lines", "links"},

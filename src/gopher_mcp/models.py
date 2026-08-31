@@ -1,6 +1,7 @@
 """Pydantic models for Gopher MCP data validation."""
 
 import time
+from datetime import UTC, datetime
 from enum import Enum, IntEnum
 from typing import Annotated, Any, Generic, Literal, TypeVar
 
@@ -482,7 +483,11 @@ GeminiErrorResult = ErrorResult
 
 
 class GeminiCertificateResult(BaseModel):
-    """Result model for certificate request responses (status 60-62)."""
+    """Result model for certificate request responses (status 60-62).
+
+    ``message`` is the capsule's own text and is untrusted; ``next_step`` is
+    written by this server and is the only instruction in the payload.
+    """
 
     kind: Literal["certificate"] = "certificate"
     message: str = Field(..., description="Certificate-related message")
@@ -497,6 +502,12 @@ class GeminiCertificateResult(BaseModel):
         default=True,
         description="Whether the server is prompting for a certificate (status "
         "60). False for 61/62, which are rejections of a presented identity.",
+    )
+    next_step: str = Field(
+        default="",
+        description="What to do about this response, written by this server "
+        "rather than by the capsule. The three sub-codes need different "
+        "answers, and only one of them is fixed by creating a certificate.",
     )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
@@ -670,7 +681,13 @@ GeminiFetchResponse = (
 
 # Certificate and security models
 class GeminiCertificateInfo(BaseModel):
-    """Model for client certificate information."""
+    """Model for client certificate information.
+
+    Records what a stored client certificate *is* and where it applies. It
+    deliberately holds no key material and no filesystem path: the private key
+    is the identity itself, and its location is operator state that must not
+    reach a model through any tool result.
+    """
 
     fingerprint: str = Field(..., description="Certificate SHA-256 fingerprint")
     subject: str = Field(..., description="Certificate subject")
@@ -680,6 +697,76 @@ class GeminiCertificateInfo(BaseModel):
     host: str = Field(..., description="Associated hostname")
     port: int = Field(default=1965, description="Associated port")
     path: str = Field(default="/", description="Associated path scope")
+    key_id: str | None = Field(
+        default=None,
+        description="Opaque per-certificate identifier naming this entry's key "
+        "pair within the certificate store. Not a path, and not part of any "
+        "tool result. Absent on entries written before it existed, whose files "
+        "are named after the certificate's own common name",
+    )
+
+    def is_expired(self, current_time: float | None = None) -> bool:
+        """Check if the certificate's validity window has ended.
+
+        An unparseable ``not_after`` reports False rather than True: reporting a
+        certificate expired is what prompts a user to destroy an unrecoverable
+        private key, so an unreadable timestamp must not be the reason for it.
+        A genuinely unusable certificate is rejected by the capsule anyway
+        (status 62).
+
+        Args:
+            current_time: UNIX timestamp to compare against (default: now).
+
+        Returns:
+            True if the certificate is no longer valid.
+
+        """
+        try:
+            expires = datetime.fromisoformat(self.not_after)
+        except ValueError:
+            return False
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        now = time.time() if current_time is None else current_time
+        return expires.timestamp() <= now
+
+
+class GeminiClientCertificateEntry(BaseModel):
+    """A stored client certificate as reported by ``gemini_client_cert_list``.
+
+    A deliberate projection of :class:`GeminiCertificateInfo` rather than a
+    subclass of it: only what a model needs to act on an identity is reported.
+    The certificate's own subject and issuer are left out because for a
+    self-signed identity this server minted they say nothing about the capsule,
+    and the subject doubles as the local name of the key pair on disk -- which
+    the parent's rule keeps out of every tool result. The scope URL is carried
+    ready-made so acting on an entry never means reassembling one.
+    """
+
+    url: str = Field(
+        ...,
+        description="The scope URL this identity covers. Pass it verbatim as "
+        "gemini_client_cert_update's `url` to act on this entry",
+    )
+    host: str = Field(..., description="Host of the scope this identity covers")
+    port: int = Field(default=1965, description="Port of the scope")
+    path: str = Field(
+        default="/",
+        description="Path scope. The identity is sent for this path and every "
+        "path below it",
+    )
+    fingerprint: str = Field(
+        ...,
+        description="SHA-256 fingerprint of the certificate. This is the value "
+        "gemini_client_cert_update requires before it will destroy it",
+    )
+    not_before: str = Field(..., description="Start of the validity window")
+    not_after: str = Field(..., description="End of the validity window")
+    expired: bool = Field(
+        ...,
+        description="True if the certificate's validity window has ended, in "
+        "which case the capsule will reject it (status 62)",
+    )
 
 
 class TOFUEntry(BaseModel):
@@ -734,6 +821,69 @@ class TOFUTrustUpdateResult(BaseModel):
         ...,
         description="True if the trust store was actually modified. False means "
         "there was nothing to change (e.g. the host had no pin to remove)",
+    )
+    message: str = Field(..., description="Human-readable summary of the outcome")
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
+
+
+class GeminiClientCertListResult(BaseModel):
+    """Result model for a read-only inspection of the client certificate store.
+
+    Only the certificates the caller asked about are returned, and each is
+    reported through :class:`GeminiClientCertificateEntry`, which carries no
+    private key and no path to one.
+    """
+
+    kind: Literal["client_cert_list"] = "client_cert_list"
+    entries: list[GeminiClientCertificateEntry] = Field(
+        ...,
+        description="Stored client certificates matching the request, ordered "
+        "by host, port and path scope",
+    )
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
+
+
+class GeminiClientCertUpdateResult(BaseModel):
+    """Result model for a change to the client certificate store.
+
+    Reports only the scope the caller named, so creating or removing an
+    identity can never become a way to enumerate the others.
+    """
+
+    kind: Literal["client_cert_update"] = "client_cert_update"
+    action: Literal["create", "remove"] = Field(
+        ..., description="The change that was requested"
+    )
+    host: str = Field(..., description="Host of the scope acted on")
+    port: int = Field(..., ge=1, le=65535, description="Port of the scope acted on")
+    path: str = Field(
+        ...,
+        description="Path scope acted on. The certificate applies to this path "
+        "and every path below it",
+    )
+    fingerprint: str | None = Field(
+        None,
+        description="SHA-256 fingerprint of the certificate created or removed. "
+        "Null when nothing changed",
+    )
+    expires: str | None = Field(
+        None,
+        description="End of the created certificate's validity window. Null on "
+        "removal and when nothing changed",
+    )
+    changed: bool = Field(
+        ...,
+        description="True if the certificate store was actually modified. False "
+        "means there was nothing to change (e.g. no certificate covered the "
+        "scope named for removal)",
     )
     message: str = Field(..., description="Human-readable summary of the outcome")
     request_info: dict[str, Any] = Field(

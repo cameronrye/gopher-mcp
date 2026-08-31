@@ -122,7 +122,7 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GEMINI_TOFU_ENABLED` | Boolean | `true` | Enable Trust-on-First-Use certificate validation. It is the only peer authentication Gemini has here, so turning it off leaves connections unauthenticated — and leaves the `gemini_trust_list` / `gemini_trust_update` tools with no store to act on (`TOFU_DISABLED`). |
 | `GEMINI_TOFU_STORAGE_PATH` | File path | `~/.gemini/tofu.json` | TOFU trust-store location. |
 | `GEMINI_TOFU_REJECT_EXPIRED` | Boolean | `false` | Fail closed on a certificate outside its validity window. |
-| `GEMINI_CLIENT_CERTS_ENABLED` | Boolean | `true` | Enable automatic per-host client certificates. |
+| `GEMINI_CLIENT_CERTS_ENABLED` | Boolean | `true` | Store scoped client certificates and attach an in-scope one automatically. It never creates one on demand: answering a status-60 prompt takes an explicit `gemini_client_cert_update` call, because the certificate is a persistent identity for the user. Turning it off leaves the `gemini_client_cert_list` / `gemini_client_cert_update` tools with no store to act on (`CLIENT_CERTS_DISABLED`). |
 | `GEMINI_CLIENT_CERTS_STORAGE_PATH` | Directory path | `~/.gemini/certs/` | Client-certificate storage directory. |
 | `GEMINI_MAX_RENDERED_CHARS` | Integer | `50000` | Maximum characters of rendered text returned to the model (longer output is truncated and flagged). |
 | `GEMINI_REQUESTS_PER_MINUTE` | Float | `60` | Per-host outbound rate limit; `0` disables it. Gemini status 44 SLOW_DOWN is always honoured. |

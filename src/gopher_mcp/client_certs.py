@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import os
+import secrets
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,6 +42,15 @@ class ClientCertificateError(Exception):
     """Exception raised for client certificate errors."""
 
     pass
+
+
+class ClientCertificateKeyRetainedError(ClientCertificateError):
+    """Raised when a removal completed but the private key file survived.
+
+    The registry entry is gone -- the identity is no longer attached to any
+    request -- yet the key itself is still at rest in the store, so a caller
+    must not report the identity as destroyed.
+    """
 
 
 class ClientCertificateManager:
@@ -225,14 +235,19 @@ class ClientCertificateManager:
                 .sign(private_key, hashes.SHA256())
             )
 
-            # Generate file names
-            cert_filename = f"{common_name}.crt"
-            key_filename = f"{common_name}.key"
-            cert_path = self.storage_path / cert_filename
-            key_path = self.storage_path / key_filename
+            # Name the files after a fresh random token rather than after the
+            # subject. A subject-derived name is not unique -- two identities
+            # for one host share it whenever their common names agree -- and
+            # the second write would then destroy the first key while both
+            # registry entries still pointed at the surviving file. O_EXCL
+            # makes any residual collision a failure rather than a silent
+            # overwrite of key material.
+            key_id = secrets.token_hex(16)
+            cert_path = self.storage_path / f"{key_id}.crt"
+            key_path = self.storage_path / f"{key_id}.key"
 
             # Write certificate
-            with cert_path.open("wb") as f:
+            with cert_path.open("xb") as f:
                 f.write(cert.public_bytes(serialization.Encoding.PEM))
 
             # Write the private key with owner-only permissions from creation.
@@ -243,7 +258,7 @@ class ClientCertificateManager:
                 format=serialization.PrivateFormat.PKCS8,
                 encryption_algorithm=serialization.NoEncryption(),
             )
-            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "wb") as f:
                 f.write(key_bytes)
 
@@ -262,12 +277,27 @@ class ClientCertificateManager:
                 host=host,
                 port=port,
                 path=path,
+                key_id=key_id,
             )
 
-            # Store in registry
+            # Store in registry, and leave nothing behind if persisting fails:
+            # an entry that survives only in memory is an identity the caller
+            # was told did not exist, still attached to every in-scope request
+            # until the process restarts.
             key = self._get_cert_key(host, port, path)
+            replaced = self._certificates.get(key)
             self._certificates[key] = cert_info
-            self._save_registry()
+            try:
+                self._save_registry()
+            except Exception:
+                if replaced is None:
+                    self._certificates.pop(key, None)
+                else:
+                    self._certificates[key] = replaced
+                for orphan in (cert_path, key_path):
+                    with contextlib.suppress(OSError):
+                        orphan.unlink()
+                raise
 
             logger.info(
                 "Client certificate generated",
@@ -285,10 +315,30 @@ class ClientCertificateManager:
             logger.error("Failed to generate client certificate", error=str(e))
             raise ClientCertificateError(f"Certificate generation failed: {e}") from e
 
-    def get_certificate_for_scope(
+    def _certificate_paths(self, cert_info: GeminiCertificateInfo) -> tuple[Path, Path]:
+        """Locate the stored key pair for a registry entry.
+
+        Entries carry their own opaque ``key_id``. Those written before that
+        field existed are named after the certificate's common name, so the
+        subject stays the fallback locator for them -- and only for them.
+        """
+        stem = cert_info.key_id or self._extract_common_name(cert_info.subject)
+        return self.storage_path / f"{stem}.crt", self.storage_path / f"{stem}.key"
+
+    def _files_present(self, cert_info: GeminiCertificateInfo) -> bool:
+        """Report whether both halves of a registry entry are on disk."""
+        cert_path, key_path = self._certificate_paths(cert_info)
+        return cert_path.exists() and key_path.exists()
+
+    def get_certificate_info_for_scope(
         self, host: str, port: int = 1965, path: str = "/"
-    ) -> tuple[str, str] | None:
-        """Get certificate paths for a specific scope.
+    ) -> GeminiCertificateInfo | None:
+        """Get the certificate a request for this scope would actually present.
+
+        The exact scope wins, then the longest in-scope parent, and only an
+        entry whose certificate and key are both still on disk qualifies: an
+        entry whose files are gone authenticates nothing, so reporting it as
+        the identity in play would describe a request that cannot happen.
 
         Args:
             host: Hostname
@@ -296,24 +346,14 @@ class ClientCertificateManager:
             path: Path scope
 
         Returns:
-            Tuple of (cert_path, key_path) or None if not found
+            The registry entry in play for that request, or None
         """
         # Try exact match first
         key = self._get_cert_key(host, port, path)
         cert_info = self._certificates.get(key)
 
-        if cert_info:
-            cert_path = (
-                self.storage_path
-                / f"{self._extract_common_name(cert_info.subject)}.crt"
-            )
-            key_path = (
-                self.storage_path
-                / f"{self._extract_common_name(cert_info.subject)}.key"
-            )
-
-            if cert_path.exists() and key_path.exists():
-                return str(cert_path), str(key_path)
+        if cert_info and self._files_present(cert_info):
+            return cert_info
 
         # Try to find a certificate for a parent path
         from .ssrf import normalize_host
@@ -332,20 +372,30 @@ class ClientCertificateManager:
                 best_match = stored_cert
                 best_path_len = len(stored_cert.path)
 
-        if best_match:
-            cert_path = (
-                self.storage_path
-                / f"{self._extract_common_name(best_match.subject)}.crt"
-            )
-            key_path = (
-                self.storage_path
-                / f"{self._extract_common_name(best_match.subject)}.key"
-            )
-
-            if cert_path.exists() and key_path.exists():
-                return str(cert_path), str(key_path)
+        if best_match and self._files_present(best_match):
+            return best_match
 
         return None
+
+    def get_certificate_for_scope(
+        self, host: str, port: int = 1965, path: str = "/"
+    ) -> tuple[str, str] | None:
+        """Get certificate paths for a specific scope.
+
+        Args:
+            host: Hostname
+            port: Port number
+            path: Path scope
+
+        Returns:
+            Tuple of (cert_path, key_path) or None if not found
+        """
+        cert_info = self.get_certificate_info_for_scope(host, port, path)
+        if cert_info is None:
+            return None
+
+        cert_path, key_path = self._certificate_paths(cert_info)
+        return str(cert_path), str(key_path)
 
     def _extract_common_name(self, subject: str) -> str:
         """Extract the common name from an RFC 4514 certificate subject.
@@ -384,6 +434,13 @@ class ClientCertificateManager:
     def remove_certificate(self, host: str, port: int = 1965, path: str = "/") -> bool:
         """Remove certificate for a scope.
 
+        The registry is persisted before the files are unlinked, and the entry
+        is put back if persisting fails, so a reported failure always means the
+        identity is still held both in memory and on disk. A private key that
+        survives its unlink is reported rather than swallowed: the entry is
+        gone and nothing attaches the identity any more, but the key is still
+        at rest and callers must not claim it was destroyed.
+
         Args:
             host: Hostname
             port: Port number
@@ -391,16 +448,26 @@ class ClientCertificateManager:
 
         Returns:
             True if certificate was removed, False if not found
+
+        Raises:
+            ClientCertificateKeyRetainedError: If the registry entry was
+                removed but its private key file could not be deleted.
         """
         key = self._get_cert_key(host, port, path)
         cert_info = self._certificates.get(key)
 
         if cert_info:
-            # Remove files
-            common_name = self._extract_common_name(cert_info.subject)
-            cert_path = self.storage_path / f"{common_name}.crt"
-            key_path = self.storage_path / f"{common_name}.key"
+            cert_path, key_path = self._certificate_paths(cert_info)
 
+            # Remove from registry
+            del self._certificates[key]
+            try:
+                self._save_registry()
+            except Exception:
+                self._certificates[key] = cert_info
+                raise
+
+            # Remove files
             try:
                 if cert_path.exists():
                     cert_path.unlink()
@@ -409,11 +476,25 @@ class ClientCertificateManager:
             except Exception as e:
                 logger.warning("Failed to remove certificate files", error=str(e))
 
-            # Remove from registry
-            del self._certificates[key]
-            self._save_registry()
-
-            logger.info("Client certificate removed", host=host, port=port, path=path)
+            key_retained = key_path.exists()
+            logger.info(
+                "Client certificate removed",
+                host=host,
+                port=port,
+                path=path,
+                key_retained=key_retained,
+            )
+            if key_retained:
+                logger.error(
+                    "Client certificate private key survived removal",
+                    host=host,
+                    port=port,
+                    path=path,
+                )
+                raise ClientCertificateKeyRetainedError(
+                    "The registry entry was removed, but its private key file "
+                    "could not be deleted from the certificate store"
+                )
             return True
 
         return False

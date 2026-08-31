@@ -902,6 +902,31 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
 
         return self.client_cert_manager.get_certificate_for_scope(host, port, path)
 
+    def get_client_certificate_info_for_scope(
+        self, host: str, port: int = 1965, path: str = "/"
+    ) -> GeminiCertificateInfo | None:
+        """Get the stored certificate a request for this scope would present.
+
+        The same resolution the fetch path uses, reported as the registry entry
+        rather than as file paths, so a caller can name the identity in play
+        without learning where it is kept.
+
+        Args:
+            host: Hostname
+            port: Port number
+            path: Path scope
+
+        Returns:
+            The certificate in play for that scope, or None
+
+        Raises:
+            ValueError: If client certificates are not enabled
+        """
+        if not self.client_cert_manager:
+            raise ValueError("Client certificates are not enabled")
+
+        return self.client_cert_manager.get_certificate_info_for_scope(host, port, path)
+
     def list_client_certificates(self) -> list[GeminiCertificateInfo]:
         """List all client certificates.
 

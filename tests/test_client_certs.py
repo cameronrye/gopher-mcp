@@ -1,5 +1,6 @@
 """Tests for client_certs module."""
 
+import hashlib
 import json
 import os
 import tempfile
@@ -7,9 +8,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 
 from gopher_mcp.client_certs import (
     ClientCertificateError,
+    ClientCertificateKeyRetainedError,
     ClientCertificateManager,
 )
 from gopher_mcp.models import GeminiCertificateInfo
@@ -246,7 +250,13 @@ class TestClientCertificateManager:
             assert cert_info.fingerprint.startswith("sha256:")
 
     def test_generate_certificate_custom_common_name(self):
-        """Test certificate generation with custom common name."""
+        """A custom common name names the certificate, never its files.
+
+        Filenames are deliberately independent of the subject: two identities
+        can share a common name, and a shared filename means the second write
+        destroys the first private key while both registry entries still point
+        at the survivor.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = ClientCertificateManager(temp_dir)
 
@@ -254,9 +264,10 @@ class TestClientCertificateManager:
                 "example.com", common_name="custom-cert-name"
             )
 
-            # Check that files use the custom name
-            assert "custom-cert-name.crt" in cert_path
-            assert "custom-cert-name.key" in key_path
+            key = manager._get_cert_key("example.com", 1965, "/")
+            assert "CN=custom-cert-name" in manager._certificates[key].subject
+            assert "custom-cert-name" not in Path(cert_path).name
+            assert "custom-cert-name" not in Path(key_path).name
 
     def test_extract_common_name(self):
         """Test common name extraction from subject."""
@@ -516,6 +527,198 @@ class TestCertificateFilePermissions:
 
             dir_mode = manager.storage_path.stat().st_mode & 0o777
             assert dir_mode == 0o700, f"storage dir mode is {oct(dir_mode)}, want 0o700"
+
+
+class TestCertificateFilesAreUniquePerIdentity:
+    """Two identities must never resolve to one key pair on disk."""
+
+    def test_two_certificates_minted_in_one_second_keep_separate_keys(self):
+        """The generated common name carries a whole-second timestamp, so two
+        certificates for one host inside a second share it. While the filenames
+        were derived from that name the second write destroyed the first
+        private key, both registry entries resolved to the survivor, and the
+        fingerprint reported for one scope was never the one the capsule saw."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+
+            with patch("time.time", return_value=1234567890):
+                alpha = manager.generate_certificate("example.com", 1965, "/alpha/")
+                beta = manager.generate_certificate("example.com", 1965, "/beta/")
+
+            assert len(set(alpha) | set(beta)) == 4
+            for path in (*alpha, *beta):
+                assert Path(path).exists()
+
+            assert manager.get_certificate_for_scope(
+                "example.com", 1965, "/alpha/"
+            ) == (alpha)
+            assert manager.get_certificate_for_scope("example.com", 1965, "/beta/") == (
+                beta
+            )
+
+            # Each scope's stored fingerprint is the one in its own file, which
+            # is what the capsule will actually be shown.
+            for scope, (cert_path, _key_path) in (("/alpha/", alpha), ("/beta/", beta)):
+                stored = manager._certificates[
+                    manager._get_cert_key("example.com", 1965, scope)
+                ]
+                on_disk = x509.load_pem_x509_certificate(Path(cert_path).read_bytes())
+                digest = hashlib.sha256(
+                    on_disk.public_bytes(serialization.Encoding.DER)
+                ).hexdigest()
+                assert stored.fingerprint == f"sha256:{digest}"
+
+    def test_a_pre_existing_key_file_is_never_overwritten(self):
+        """Whatever the name collides with, key material is never truncated."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+
+            with patch(
+                "gopher_mcp.client_certs.secrets.token_hex", return_value="fixed"
+            ):
+                manager.generate_certificate("example.com", 1965, "/first/")
+                original = (Path(temp_dir) / "fixed.key").read_bytes()
+
+                with pytest.raises(ClientCertificateError):
+                    manager.generate_certificate("example.com", 1965, "/second/")
+
+            assert (Path(temp_dir) / "fixed.key").read_bytes() == original
+
+
+class TestStoreChangesAreTransactional:
+    """A reported outcome and the state on disk must never disagree."""
+
+    def test_a_failed_registry_save_leaves_no_created_identity(self):
+        """An entry that survives only in memory is an identity the caller was
+        told did not exist, still attached to every in-scope request."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+
+            with (
+                patch(
+                    "gopher_mcp.client_certs.atomic_write_json",
+                    side_effect=OSError("No space left on device"),
+                ),
+                pytest.raises(ClientCertificateError),
+            ):
+                manager.generate_certificate("example.com", 1965, "/app/")
+
+            assert manager.list_certificates() == []
+            assert list(Path(temp_dir).glob("*.key")) == []
+            assert list(Path(temp_dir).glob("*.crt")) == []
+
+            # And the scope is not poisoned: the retry that the caller was told
+            # to make succeeds.
+            _cert_path, key_path = manager.generate_certificate(
+                "example.com", 1965, "/app/"
+            )
+            assert Path(key_path).exists()
+
+    def test_a_failed_registry_save_restores_the_entry_it_replaced(self):
+        """Re-creating over a scope whose files are gone is allowed, so the
+        rollback has to put the old entry back rather than drop it: losing it
+        would delete the record of an identity the failure did not touch."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+            manager.generate_certificate("example.com", 1965, "/app/")
+            key = manager._get_cert_key("example.com", 1965, "/app/")
+            original = manager._certificates[key]
+            for path in Path(temp_dir).glob("*.[ck][er][yt]"):
+                path.unlink()
+
+            with (
+                patch(
+                    "gopher_mcp.client_certs.atomic_write_json",
+                    side_effect=OSError("No space left on device"),
+                ),
+                pytest.raises(ClientCertificateError),
+            ):
+                manager.generate_certificate("example.com", 1965, "/app/")
+
+            assert manager._certificates[key] is original
+
+    def test_a_failed_registry_save_keeps_the_removed_identity(self):
+        """Reporting a failed removal while the running process has already
+        stopped attaching the identity would hide it until a restart."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+            cert_path, key_path = manager.generate_certificate(
+                "example.com", 1965, "/app/"
+            )
+
+            with (
+                patch(
+                    "gopher_mcp.client_certs.atomic_write_json",
+                    side_effect=OSError("Read-only file system"),
+                ),
+                pytest.raises(OSError),
+            ):
+                manager.remove_certificate("example.com", 1965, "/app/")
+
+            assert len(manager.list_certificates()) == 1
+            assert Path(cert_path).exists()
+            assert Path(key_path).exists()
+            assert manager.get_certificate_for_scope("example.com", 1965, "/app/")
+
+    def test_a_private_key_surviving_its_unlink_is_reported(self):
+        """Removal is only "destroyed for good" if the key really went. An
+        immutable or root-owned key file survives, and the caller must be able
+        to say so rather than assert a deletion that did not happen."""
+        real_unlink = Path.unlink
+
+        def refuse_keys(self, *args, **kwargs):
+            if self.suffix == ".key":
+                raise PermissionError("Operation not permitted")
+            return real_unlink(self, *args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+            _cert_path, key_path = manager.generate_certificate(
+                "example.com", 1965, "/app/"
+            )
+
+            with (
+                patch.object(Path, "unlink", refuse_keys),
+                pytest.raises(ClientCertificateKeyRetainedError),
+            ):
+                manager.remove_certificate("example.com", 1965, "/app/")
+
+            # The identity is no longer attached to anything...
+            assert manager.list_certificates() == []
+            # ...but the key it was told to destroy is still at rest.
+            assert Path(key_path).exists()
+
+
+class TestScopeResolutionRequiresTheFilesOnDisk:
+    """A registry entry with no key pair authenticates nothing."""
+
+    def test_an_entry_whose_files_are_gone_is_not_the_identity_in_play(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+            cert_path, key_path = manager.generate_certificate(
+                "example.com", 1965, "/app/"
+            )
+            Path(cert_path).unlink()
+            Path(key_path).unlink()
+
+            assert (
+                manager.get_certificate_info_for_scope("example.com", 1965, "/app/x")
+                is None
+            )
+            # It is still stored, so it can still be named and cleared.
+            assert len(manager.list_certificates()) == 1
+
+    def test_the_identity_in_play_is_the_longest_matching_scope(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = ClientCertificateManager(temp_dir)
+            manager.generate_certificate("example.com", 1965, "/")
+            manager.generate_certificate("example.com", 1965, "/api")
+
+            info = manager.get_certificate_info_for_scope(
+                "example.com", 1965, "/api/v1"
+            )
+            assert info is not None
+            assert info.path == "/api"
 
 
 class TestClientCertScopeNormalization:

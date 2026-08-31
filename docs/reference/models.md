@@ -51,6 +51,24 @@ procedure they support.
 
 ::: gopher_mcp.models.TOFUTrustUpdateResult
 
+## Client-Certificate Tool Results
+
+Returned by the `gemini_client_cert_list` and `gemini_client_cert_update` tools.
+See the [API Reference](../api-reference.md#gemini_client_cert_list) for the
+status-60 procedure they support. None of these models carries key material or
+the certificate store's filesystem path. `GeminiClientCertificateEntry` is a
+projection of the stored `GeminiCertificateInfo` (under
+[Caching and Security Models](#caching-and-security-models)): it adds the scope
+as a ready-to-use URL and the expiry resolved against the current time, and
+leaves out the certificate's subject and issuer, which this server generated and
+under which it stores the key pair.
+
+::: gopher_mcp.models.GeminiClientCertificateEntry
+
+::: gopher_mcp.models.GeminiClientCertListResult
+
+::: gopher_mcp.models.GeminiClientCertUpdateResult
+
 ## Gemtext Document Models
 
 ::: gopher_mcp.models.GemtextDocument

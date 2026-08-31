@@ -106,7 +106,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: Boolean
 - **Default**: `true`
-- **Description**: Enable client certificate storage and automatic attachment. A certificate that already covers the requested host/port/path scope is attached to the connection; you do not supply cert/key files yourself. It does **not** create certificates: nothing in the MCP tool surface does, so a capsule answering status 60 cannot be satisfied through the tools (see [Client Certificate Issues](gemini-troubleshooting.md#client-certificate-issues)).
+- **Description**: Enable client certificate storage and automatic attachment. A certificate that already covers the requested host/port/path scope is attached to the connection; you do not supply cert/key files yourself. It does **not** create certificates on demand: a status-60 response is answered by an explicit `gemini_client_cert_update(action="create", ...)` call, since a client certificate is a persistent pseudonymous identity the user has to agree to. With this off, no identity is stored or attached and both certificate tools return `CLIENT_CERTS_DISABLED` (see [Client Certificate Issues](gemini-troubleshooting.md#client-certificate-issues)).
 - **Example**: `GEMINI_CLIENT_CERTS_ENABLED=true`
 
 ### Storage Configuration
@@ -122,7 +122,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: String (directory path)
 - **Default**: `~/.gemini/certs/`
-- **Description**: Directory where client certificates and their private keys are stored, scoped per host/port/path. The directory is created with owner-only (`700`) permissions. Nothing in the MCP tool surface writes certificates here, so the directory stays empty unless an embedder calls `GeminiClient.generate_client_certificate()`.
+- **Description**: Directory where client certificates and their private keys are stored, scoped per host/port/path. The directory is created with owner-only (`700`) permissions, and private keys are written `600`. It stays empty until an identity is explicitly created — `gemini_client_cert_update` over MCP, or `GeminiClient.generate_client_certificate()` in-process. Neither the keys nor this path are ever reported back through a tool result.
 - **Example**: `GEMINI_CLIENT_CERTS_STORAGE_PATH=/custom/path/certs/`
 
 ### Content and Rate Limiting

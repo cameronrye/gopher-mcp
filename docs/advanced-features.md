@@ -329,16 +329,31 @@ GEMINI_CLIENT_CERTS_STORAGE_PATH=/custom/path/certs/
 
 **Features:**
 
-- Certificates scoped per hostname, port and path prefix
+- Certificates scoped per hostname, port and path, matched on segment boundaries
 - Secure private key storage with owner-only (700/600) permissions
 - Certificate reuse within the same scope
 - A certificate covering the requested scope is attached automatically
 
 You do not supply a cert/key pair yourself, and there is no environment variable
-pointing at an external one.
+pointing at an external one. Two tools manage the store:
 
-!!! warning "Status 60 cannot be resolved through the MCP tools"
-    The fetch path only *looks up* a certificate for the requested scope — it never creates one — and `GeminiClient.generate_client_certificate()` is exposed by no MCP tool. A capsule answering **status 60 (certificate required)** therefore cannot be satisfied from an MCP client: retrying returns status 60 again. Report the requirement to the user, or use a standalone Gemini client. Embedders using this package as a library can call `generate_client_certificate(host, port, path)` themselves, after which the fetch path picks it up for that scope.
+- `gemini_client_cert_list` — read-only: the scopes that hold an identity, each
+  one as a ready-to-use scope URL with its fingerprint, validity window and
+  whether it has expired. Never the private key, its location, or the local
+  label the key pair is stored under.
+- `gemini_client_cert_update` — creates an identity for the scope of a named
+  `gemini://` URL, or removes the one covering it. Destructive, and not
+  idempotent.
+
+Provisioning answers **status 60 (certificate required)**, which the fetch path
+cannot answer on its own: it attaches a certificate that already covers the
+scope, so retrying unchanged returns 60 again.
+
+!!! warning "Creating an identity is the user's decision, not the capsule's"
+    A client certificate is a persistent pseudonymous identity: while it exists, every request within its scope carries it automatically, so the capsule can link those visits to one another for as long as it lasts. Nothing mints one on a status-60 response, because a certificate created because a remote server asked for it is an identity the user never chose — and a page or `META` string requesting one is untrusted data. Ask first. The scope is the URL's path and everything below it, never widened for you; creation refuses to replace an in-scope certificate, since the private key is unrecoverable and may be the user's only access to an account there; and removal requires naming the fingerprint being destroyed.
+
+The full procedure is under
+[`gemini_client_cert_update`](api-reference.md#gemini_client_cert_update).
 
 ### TLS Security
 
@@ -346,7 +361,7 @@ TLS settings are fixed in code rather than configured through environment variab
 
 - **Minimum version**: TLS 1.2 is enforced (TLS 1.2 and 1.3 are supported). There is no environment variable to raise or lower this.
 - **Server trust**: Server certificates are trusted via TOFU (the pinned fingerprint), not CA-chain or hostname verification. Standard hostname verification is intentionally not used, so there is no toggle for it. Tighten this with `GEMINI_TOFU_REJECT_EXPIRED=true` to fail closed on certificates outside their validity window.
-- **Client certificates**: Generated and managed automatically (see above); the server is never pointed at an external cert/key file.
+- **Client certificates**: Generated on request through `gemini_client_cert_update` and then managed and attached per scope (see above); the server is never pointed at an external cert/key file.
 
 ### Gemini Caching System
 

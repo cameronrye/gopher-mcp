@@ -72,7 +72,7 @@ The Gopher & Gemini MCP Server is a Model Context Protocol (MCP) server that ena
 
 **Responsibility**: Expose Gopher and Gemini functionality as MCP tools
 
-**Key Functions** — six registered tools:
+**Key Functions** — eight registered tools:
 
 - `gopher_fetch(url, refresh=False)` - one Gopher resource
 - `gemini_fetch(url, input=None, refresh=False)` - one Gemini resource
@@ -82,17 +82,24 @@ The Gopher & Gemini MCP Server is a Model Context Protocol (MCP) server that ena
 - `gemini_trust_list(host=None)` - read-only inspection of the TOFU trust store
 - `gemini_trust_update(action, host, fingerprint, port=1965)` - remove or replace
   one host's certificate pin
+- `gemini_client_cert_list(host=None)` - read-only inspection of the stored
+  client identities, without key material or storage paths
+- `gemini_client_cert_update(action, url, fingerprint=None)` - create or remove
+  the client identity covering one URL scope
 
 Plus environment variable parsing and validation, and client manager singleton
 access.
 
 **Tool annotations**: the four fetch tools are `readOnlyHint` + `openWorldHint`
-(they reach arbitrary external hosts but change nothing). The trust-store tools
-are `openWorldHint=false` — local state only — and split read from write so the
-hints can be honest: `gemini_trust_list` is `readOnlyHint`, while
-`gemini_trust_update` is `destructiveHint` + `idempotentHint`. One combined tool
-behind an `action` argument could only have carried one of those, misinforming
-the client either way.
+(they reach arbitrary external hosts but change nothing). The certificate tools
+are `openWorldHint=false` — local state only — and each pair splits read from
+write so the hints can be honest: `gemini_trust_list` and
+`gemini_client_cert_list` are `readOnlyHint`, while `gemini_trust_update` is
+`destructiveHint` + `idempotentHint` and `gemini_client_cert_update` is
+`destructiveHint` and explicitly *not* idempotent (a second create is refused,
+and a second remove cannot bring the deleted key back). One combined tool behind
+an `action` argument could only have carried one of those, misinforming the
+client either way.
 
 **No-raise contract**: every tool returns a serialized result. Invalid input,
 client-setup failure, network error and a locked trust store all become sanitized
@@ -228,29 +235,45 @@ rather than proceeding with the pin unrecorded.
 
 **Responsibility**: Client certificate storage, scope matching, and generation
 
-Generation exists here (`generate_certificate`) but is reachable only from
-`GeminiClient.generate_client_certificate()`, which no MCP tool exposes. The
-fetch path calls `get_certificate_for_scope` alone, so the store is only ever
-*read* during a fetch.
+Generation exists here (`generate_certificate`) and is reachable from
+`GeminiClient.generate_client_certificate()`, which the `gemini_client_cert_update`
+tool drives — off the event loop, since RSA keygen is CPU-bound and the key,
+certificate and registry are all written to disk. The fetch path calls
+`get_certificate_for_scope` alone, so the store is only ever *read* during a
+fetch: a status-60 response never mints an identity by itself.
 
 **Key Methods**:
 
-- `get_certificate(host)` - Get or generate certificate for host
-- `generate_certificate(host)` - Generate new certificate
-- `load_certificates()` - Load from storage
-- `save_certificate(host, cert, key)` - Persist certificate
+- `generate_certificate(host, port, path)` - Mint and store one identity
+- `get_certificate_for_scope(host, port, path)` - The cert/key paths a request
+  would present, or None
+- `get_certificate_info_for_scope(host, port, path)` - The same resolution
+  reported as the registry entry, so a caller can name the identity in play
+  without learning where it is kept
+- `list_certificates()` - Every stored entry
+- `remove_certificate(host, port, path)` - Drop one entry and its files
+
+Both scope lookups require the certificate *and* key file to still exist: an
+entry whose files are gone authenticates nothing, and treating it as live would
+make a status-60 capsule permanently unanswerable.
 
 **Storage Structure** (`~/.gemini/certs/`), where `registry.json` records which
-host/port/path scope each certificate belongs to:
+host/port/path scope each certificate belongs to, and each entry's `key_id`
+names its files:
 
 ```
 ~/.gemini/certs/
 ├── registry.json
-├── example.com.crt
-├── example.com.key
-├── another.com.crt
-└── another.com.key
+├── 2f8c1e0b4a7d9c6e5b3a1f0d8c7e6b5a.crt
+├── 2f8c1e0b4a7d9c6e5b3a1f0d8c7e6b5a.key
+├── 9b1d3c5e7f0a2b4c6d8e0f1a3b5c7d9e.crt
+└── 9b1d3c5e7f0a2b4c6d8e0f1a3b5c7d9e.key
 ```
+
+The filenames are random per certificate rather than derived from the host or
+the certificate's subject: two identities on one host can share a subject, and a
+shared filename would mean the second write destroyed the first private key
+while both registry entries still resolved to the survivor.
 
 ### 8. Shared Safety Layer (`ssrf.py`, `ratelimit.py`, `robots.py`)
 
@@ -520,8 +543,13 @@ the bookkeeping and none of the hits.
    - Scoped per host, port and path; secure storage with owner-only permissions
    - Privacy-preserving (unique per scope)
    - Attached automatically when one exists for the requested scope. **Never
-     created by the fetch path or by any MCP tool**, so a status-60 prompt is
-     not satisfiable through the tool surface
+     created by the fetch path**: a status-60 prompt is answered by an explicit
+     `gemini_client_cert_update` call, because a certificate minted because a
+     remote server asked for it is a persistent identity the user never chose
+   - Creation refuses to replace an in-scope certificate (the private key is
+     unrecoverable) and removal must name the fingerprint being destroyed, so
+     an identity is never lost blindly. Key generation and the store writes run
+     off the event loop
 
 4. **Host Allowlisting**
    - Optional allowed hosts configuration
@@ -592,9 +620,10 @@ the bookkeeping and none of the hits.
 2. FastMCP framework initializes
    ↓
 3. Register tools:
-   - gopher_fetch          - gemini_fetch
-   - gopher_batch_fetch    - gemini_batch_fetch
-   - gemini_trust_list     - gemini_trust_update
+   - gopher_fetch            - gemini_fetch
+   - gopher_batch_fetch      - gemini_batch_fetch
+   - gemini_trust_list       - gemini_trust_update
+   - gemini_client_cert_list - gemini_client_cert_update
    ↓
 4. ClientManager singleton created (lazy)
    ↓

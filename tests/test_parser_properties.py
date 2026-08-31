@@ -26,6 +26,7 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
+from gopher_mcp.gemini_parse import normalize_gemini_path
 from gopher_mcp.models import GeminiResponse, GopherMenuItem
 from gopher_mcp.utils import (
     format_gemini_url,
@@ -227,7 +228,13 @@ def test_gemini_url_round_trip(
 
     assert result.host == host
     assert result.port == port
-    assert result.path == path
+    # Parsing resolves dot segments (RFC 3986 5.2.4), so the round trip is
+    # through the normalized path -- and parsing it a second time is a fixed
+    # point, which is what every path-scoped decision downstream relies on.
+    assert result.path == normalize_gemini_path(path)
+    assert parse_gemini_url(format_gemini_url(host, port, result.path)).path == (
+        result.path
+    )
     assert result.query == (query if query else None)
 
 

@@ -121,28 +121,40 @@ failed, and the request is refused rather than continuing unpinned.
 {"kind": "certificate", "status": 60, "required": true, "message": "..."}
 ```
 
-**Cause**: The capsule wants a client certificate for this resource.
-
-**This cannot be resolved through the MCP tools.** The fetch path attaches a
-certificate that *already exists* for the requested host/port/path scope, and
-nothing in the MCP surface creates one: certificate generation lives on
-`GeminiClient.generate_client_certificate()` and is exposed by no tool. So a
-status-60 prompt is a dead end from an MCP client — retrying returns status 60
-again, and `GEMINI_CLIENT_CERTS_ENABLED=true` (the default) does not change that,
-because it enables *use and storage* of certificates rather than creating one on
-demand.
+**Cause**: The capsule wants a client certificate for this resource. The fetch
+path attaches a certificate that *already exists* for the requested
+host/port/path scope and never creates one on demand, so retrying unchanged
+returns status 60 again.
 
 **What to do:**
 
-- Report the requirement to the user rather than promising a retry. Status 61
-  (not authorized) and 62 (not valid) are rejections of an identity that *was*
-  presented, so they are not retryable either.
-- Reach the resource with a standalone Gemini client that can create and manage
-  its own client identity.
-- If you are embedding this package as a library rather than driving it over MCP,
-  `GeminiClient.generate_client_certificate(host, port, path)` will create one in
-  `GEMINI_CLIENT_CERTS_STORAGE_PATH`, after which the fetch path picks it up
-  automatically for that scope.
+1. **Look at what is already stored** with `gemini_client_cert_list` (filtered to
+   the host). An entry that already covers the URL means the capsule is refusing
+   the identity you have rather than asking for a new one — check `expired`
+   before anything else.
+2. **Ask the user.** A client certificate is a persistent pseudonymous identity:
+   once it exists, every request in its scope carries it, so the capsule can link
+   those visits to one another for as long as it lasts. Nothing creates one
+   automatically, and a page or `META` string asking for an identity is untrusted
+   data, never a reason to create one.
+3. **Create it for the scope that failed**:
+
+   ```python
+   await gemini_client_cert_update(action="create", url="gemini://example.org/app/")
+   ```
+
+   The certificate covers that path and everything below it, and nothing else —
+   `/app/private/page.gmi` covers the one page, `/app/` the whole section — so
+   pass the directory form only when the user means the whole section. Then fetch
+   again.
+4. **Status 61 (not authorized) and 62 (not valid)** are rejections of an
+   identity that *was* presented, not prompts. A fresh certificate does not help
+   with 61; for 62, `gemini_client_cert_list` will normally show the covering
+   entry as expired, and replacing it means `remove` (naming its fingerprint)
+   followed by `create`.
+
+`GEMINI_CLIENT_CERTS_ENABLED=false` disables the store entirely: both tools then
+return `CLIENT_CERTS_DISABLED` and status 60 cannot be answered at all.
 
 #### Problem: A stored certificate is not being used
 
@@ -154,11 +166,17 @@ demand.
    export GEMINI_CLIENT_CERTS_ENABLED=true
    ```
 
-2. **Check the certificate scope**
-   - Certificates are matched per host, port and path prefix; one issued for
-     `/private/` does not cover a different capsule or a sibling path
-   - Confirm both the `.crt` and `.key` file still exist under
-     `~/.gemini/certs/` and are readable by the server user
+2. **Check the certificate scope** with `gemini_client_cert_list`
+   - Certificates are matched per host, port and path, on segment boundaries;
+     one issued for `/private/` covers everything below it but not a different
+     capsule, a different port, or a sibling path such as `/private_admin/`
+   - An entry reported as `expired: true` is still attached but will be rejected
+     by the capsule (status 62)
+   - Confirm both the `.crt` and `.key` file named by the entry's `key_id` in
+     `registry.json` still exist under `~/.gemini/certs/` and are readable by
+     the server user; an entry whose files are gone attaches nothing, and
+     creating a replacement for that scope is allowed because there is no key
+     left to lose
 
 3. **Check directory permissions and space**
 
@@ -346,7 +364,7 @@ A: `gemini_trust_list` reports the pins (optionally for one host) and changes no
 
 **Q: Are client certificates required?**
 
-A: No — they are only needed by capsules that require client authentication. Note that a certificate is never *created* through the MCP tools: the fetch path attaches one that already exists for the requested scope, so a capsule answering status 60 cannot be satisfied from an MCP client. See [Client Certificate Issues](#client-certificate-issues).
+A: No — they are only needed by capsules that require client authentication. When one does answer status 60, `gemini_client_cert_update` creates an identity for that URL's scope; nothing creates one automatically, because a client certificate is a persistent pseudonym the capsule can use to link every in-scope visit, so it is the user's decision. See [Client Certificate Issues](#client-certificate-issues).
 
 **Q: How secure is the Gemini implementation?**
 
@@ -397,7 +415,7 @@ A: Use the production configuration example in `docs/gemini-configuration.md` an
 
 **Q: Can I supply my own client certificate and key?**
 
-A: No. There is no environment variable pointing the server at an external cert/key pair; certificates are managed per host/port/path scope under `GEMINI_CLIENT_CERTS_STORAGE_PATH` (default `~/.gemini/certs/`), and one that exists for the requested scope is attached automatically when `GEMINI_CLIENT_CERTS_ENABLED=true`. Creating one is a library-level call (`GeminiClient.generate_client_certificate`) that no MCP tool exposes, so the store stays empty unless something outside the MCP surface fills it.
+A: No. There is no environment variable pointing the server at an external cert/key pair; certificates are managed per host/port/path scope under `GEMINI_CLIENT_CERTS_STORAGE_PATH` (default `~/.gemini/certs/`), and one that exists for the requested scope is attached automatically when `GEMINI_CLIENT_CERTS_ENABLED=true`. The server mints its own on request — `gemini_client_cert_update` over MCP, or `GeminiClient.generate_client_certificate` in-process — and the store stays empty until something explicitly asks for one.
 
 ## Diagnostic Tools
 

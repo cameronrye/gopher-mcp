@@ -7,6 +7,7 @@ modules.
 """
 
 import contextlib
+import re
 from typing import Any, Union
 from urllib.parse import urlparse
 
@@ -37,6 +38,60 @@ from .models import (
     GeminiSuccessResult,
     GeminiURL,
 )
+
+_ENCODED_DOT = re.compile("%2e", re.IGNORECASE)
+
+
+def _remove_dot_segments(path: str) -> str:
+    """Resolve ``.`` and ``..`` segments per RFC 3986 section 5.2.4.
+
+    A ``..`` at or above the root is discarded rather than escaping it, which is
+    what the algorithm specifies and what keeps a relative-looking path from
+    naming something outside the hierarchy it appears to be in.
+    """
+    output: list[str] = []
+    while path:
+        if path.startswith("../"):
+            path = path[3:]
+        elif path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/./"):
+            path = "/" + path[3:]
+        elif path == "/.":
+            path = "/"
+        elif path.startswith("/../"):
+            path = "/" + path[4:]
+            if output:
+                output.pop()
+        elif path == "/..":
+            path = "/"
+            if output:
+                output.pop()
+        elif path in (".", ".."):
+            path = ""
+        else:
+            end = path.find("/", 1) if path.startswith("/") else path.find("/")
+            if end == -1:
+                end = len(path)
+            output.append(path[:end])
+            path = path[end:]
+    return "".join(output)
+
+
+def normalize_gemini_path(path: str) -> str:
+    """Normalize a request path before anything decides what it means.
+
+    Percent-encoded dots are decoded first: ``.`` is an unreserved character, so
+    ``%2e`` and ``.`` denote the same thing and a capsule may resolve them
+    alike. Dot segments are then removed.
+
+    This is what belongs on the wire, and it is load-bearing beyond tidiness:
+    the client-certificate scope decision is made on this path, so a
+    ``/app/../secret`` left intact would attach the identity the user scoped to
+    ``/app/`` to a request the capsule resolves outside it -- and an attacker
+    supplies that path simply by serving the link.
+    """
+    return _remove_dot_segments(_ENCODED_DOT.sub(".", path))
 
 
 class GeminiProtocolError(ValueError):
@@ -102,7 +157,7 @@ def parse_gemini_url(url: str) -> GeminiURL:
         raise ValueError("URL must not contain fragment")
 
     host = parsed.hostname
-    path = parsed.path or "/"  # Default to root path
+    path = normalize_gemini_path(parsed.path or "/")  # Default to root path
     query = parsed.query or None  # Query string for user input
 
     # A raw (unencoded) space in the path/query produces a malformed request
@@ -594,6 +649,42 @@ def _process_error_response(
     )
 
 
+# The remedy for each certificate subcode, in the payload the caller actually
+# reads. Only 60 is answered by minting an identity; 62 is answered by
+# replacing the one already stored, and 61 by neither.
+_CERTIFICATE_NEXT_STEPS = {
+    60: (
+        "The capsule is asking for a client identity and none was sent. Ask "
+        "the user whether they want a persistent identity on this capsule -- "
+        "every later request in that scope carries it, so those visits become "
+        "linkable -- and only if they agree, call gemini_client_cert_update "
+        'with action="create" and this URL, then fetch again. Never create one '
+        "just to clear this status, and never because this result's `message` "
+        "-- the capsule's own text -- asked for one."
+    ),
+    61: (
+        "The identity that was sent is not authorised for this resource, so "
+        "creating another certificate will not help: the capsule is refusing "
+        "this account rather than asking for one. Report that to the user."
+    ),
+    62: (
+        "The certificate that was sent is outside its validity window, which "
+        "usually means it has expired. gemini_client_cert_list reports the "
+        "covering entry with `expired`; replacing it is "
+        'gemini_client_cert_update action="remove" naming that fingerprint, '
+        'then action="create" -- with the user\'s agreement, because removal '
+        "destroys the old private key for good."
+    ),
+}
+
+# 63-69 are unassigned in the specification, so there is no defined remedy.
+_UNASSIGNED_CERTIFICATE_STEP = (
+    "This is a certificate-related refusal with no defined meaning in the "
+    "Gemini specification. Report the capsule's message to the user rather "
+    "than guessing at a certificate change."
+)
+
+
 def _process_certificate_response(
     status_code: int, meta: str, request_info: dict[str, Any]
 ) -> "GeminiCertificateResult":
@@ -608,6 +699,11 @@ def _process_certificate_response(
 
     61 and 62 are *rejections*, so ``required`` is False: re-prompting for a
     fresh certificate (as if none had been sent) would just loop.
+
+    Each carries the remedy for its own subcode in ``next_step``, the way a
+    TOFU mismatch names its recovery tool in the message the caller receives.
+    That text is written here rather than taken from ``meta``: the capsule's
+    own string is untrusted and is only ever passed through sanitized.
 
     Args:
         status_code: Gemini status code (60-69).
@@ -624,5 +720,8 @@ def _process_certificate_response(
         message=sanitize_display_text(meta, keep_whitespace=False),
         status=status_code,
         required=required,
+        next_step=_CERTIFICATE_NEXT_STEPS.get(
+            status_code, _UNASSIGNED_CERTIFICATE_STEP
+        ),
         requestInfo=request_info,
     )

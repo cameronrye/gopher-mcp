@@ -199,20 +199,22 @@ uv run task <command>       # Direct taskipy usage
 
 ## Usage
 
-The server registers six MCP tools:
+The server registers eight MCP tools:
 
-| Tool                  | Purpose                                                         |
-| --------------------- | --------------------------------------------------------------- |
-| `gopher_fetch`        | Fetch one Gopher resource                                       |
-| `gemini_fetch`        | Fetch one Gemini resource                                       |
-| `gopher_batch_fetch`  | Fetch several Gopher URLs at once (bounded concurrency, max 50) |
-| `gemini_batch_fetch`  | Fetch several Gemini URLs at once (bounded concurrency, max 50) |
-| `gemini_trust_list`   | Inspect the Gemini TOFU trust store (read-only)                 |
-| `gemini_trust_update` | Remove or re-pin one host's certificate (**destructive**)       |
+| Tool                        | Purpose                                                         |
+| --------------------------- | --------------------------------------------------------------- |
+| `gopher_fetch`              | Fetch one Gopher resource                                       |
+| `gemini_fetch`              | Fetch one Gemini resource                                       |
+| `gopher_batch_fetch`        | Fetch several Gopher URLs at once (bounded concurrency, max 50) |
+| `gemini_batch_fetch`        | Fetch several Gemini URLs at once (bounded concurrency, max 50) |
+| `gemini_trust_list`         | Inspect the Gemini TOFU trust store (read-only)                 |
+| `gemini_trust_update`       | Remove or re-pin one host's certificate (**destructive**)       |
+| `gemini_client_cert_list`   | Inspect the stored Gemini client identities (read-only)         |
+| `gemini_client_cert_update` | Create or remove one client identity (**destructive**)          |
 
-The four fetch tools are annotated read-only and open-world. The trust-store
-tools never touch the network, and are split read from write so a client can gate
-the destructive one on its own.
+The four fetch tools are annotated read-only and open-world. The four
+certificate tools never touch the network, and each pair is split read from
+write so a client can gate the destructive one on its own.
 
 ### `gopher_fetch` Tool
 
@@ -257,10 +259,12 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 - **GeminiErrorResult**: For errors (status 40-69)
   - Detailed error information with status codes
 - **GeminiCertificateResult**: For certificate requests (status 60-69)
-  - Certificate requirement information. Note that **no MCP tool generates a
-    client certificate**: one that already exists for the host/port/path scope is
-    attached automatically, but a capsule answering status 60 cannot be satisfied
-    through the tool surface, so retrying will not help.
+  - Certificate requirement information, plus a `next_step` written by this
+    server (`message` is the capsule's own text). A certificate that already
+    exists for the host/port/path scope is attached automatically and the fetch
+    path never creates one, so retrying unchanged returns status 60 again;
+    `gemini_client_cert_update` mints one for that scope, but only once the user
+    has agreed to hold a persistent identity on that capsule.
 
 `GeminiErrorResult` is an alias for the same `ErrorResult` model `gopher_fetch`
 returns, not a separate type — its `error` object simply carries the extra
@@ -304,6 +308,30 @@ against the operator or another device, never on the say-so of a fetched page. T
 enforce that, `action: "remove"` requires the fingerprint **currently** pinned
 (as reported by `gemini_trust_list`); a mismatch returns `FINGERPRINT_MISMATCH`
 and changes nothing.
+
+### Gemini Client-Identity Tools
+
+A client certificate is the other half of Gemini's certificate story, and the
+opposite direction: it is the identity **this server presents to a capsule**,
+not the one a capsule presents to us. Capsules with accounts ask for it with
+**status 60 (certificate required)**. The fetch path attaches a certificate that
+already covers the requested scope but never creates one, so answering a 60 is
+an explicit call:
+
+- **`gemini_client_cert_list`** (read-only) reports the scopes that hold an
+  identity — each as a ready-to-use scope URL with its fingerprint, validity
+  window and whether it has expired. Never a private key or its location.
+- **`gemini_client_cert_update`** (destructive) creates the identity for the
+  scope of a named `gemini://` URL, or removes the one covering it.
+
+The certificate covers that URL's path and everything below it, so
+`gemini://host/app/page.gmi` covers one page, `gemini://host/app/` the section,
+and `gemini://host/` the whole capsule. While it exists, every request in that
+scope carries it, which is what lets the capsule link those visits — so it is
+the user's decision, never a reaction to a page or `META` string asking for one.
+Creation refuses to replace a certificate already covering the scope, because
+the private key cannot be recovered, and `action: "remove"` requires the
+fingerprint being destroyed, exactly as the trust tools require the pinned one.
 
 ### Example URLs to Try
 
@@ -366,7 +394,7 @@ gopher-mcp/
 ├── src/gopher_mcp/          # Main package
 │   ├── __init__.py          # Package initialization
 │   ├── __main__.py          # CLI entry point (transports, --host/--port)
-│   ├── server.py            # FastMCP server + the six MCP tool definitions
+│   ├── server.py            # FastMCP server + the eight MCP tool definitions
 │   ├── client_base.py       # Shared fetch scaffolding for both clients
 │   ├── gopher_client.py     # Gopher protocol client
 │   ├── gopher_transport.py  # Low-level Gopher transport
