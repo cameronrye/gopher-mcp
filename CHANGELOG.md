@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-01
+
 ### Added
 
 - `robots.txt` support for both protocols, **opt-in and off by default**: set
@@ -664,7 +666,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.3...v0.5.0
 [0.4.3]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.2...v0.4.3
