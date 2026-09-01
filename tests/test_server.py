@@ -2,11 +2,13 @@
 
 import os
 import tempfile
+from importlib.metadata import version as importlib_version
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from gopher_mcp import __version__
 from gopher_mcp.config import reset_config
 from gopher_mcp.server import (
     ClientManager,
@@ -603,8 +605,46 @@ class TestGeminiInputRoundTrip:
         assert "gemini://" in result["error"]["message"]
 
 
+class TestServerIdentity:
+    """The handshake must name this package's version, not the SDK's."""
+
+    def test_initialize_advertises_the_package_version(self):
+        """FastMCP takes no ``version`` argument, and the lowlevel server falls
+        back to ``importlib.metadata.version("mcp")`` when none is set -- so
+        leaving it unset made every client see the SDK's version (1.29.1) as
+        though it were gopher-mcp's. A bug filed against that number names the
+        wrong project."""
+        opts = mcp._mcp_server.create_initialization_options()
+        assert opts.server_version == __version__
+
+    def test_initialize_does_not_advertise_the_sdk_version(self):
+        """Guards the specific regression rather than just the happy path: the
+        fallback is silent, so only comparing against the SDK's own version
+        catches it coming back."""
+        opts = mcp._mcp_server.create_initialization_options()
+        assert opts.server_version != importlib_version("mcp")
+
+
 class TestEntrypointTransportArgs:
     """The CLI must let an operator bind host/port for the http/sse transports."""
+
+    def test_mount_path_flag_is_gone(self):
+        """--mount-path advertised a prefixed message endpoint that FastMCP
+        never actually routed: the SSE stream handed the client
+        ``/foo/messages/`` while only ``/messages/`` was mounted, so every POST
+        got a 404 and the session was dead on arrival. Removed rather than left
+        as a flag that silently breaks the transport it claims to configure."""
+        from gopher_mcp import __main__ as entry
+
+        argv = ["prog", "--transport", "sse", "--mount-path", "/foo"]
+        # Patch run() so a regression that reinstates the flag fails the
+        # assertion instead of actually binding a socket and hanging the suite.
+        with (
+            patch("sys.argv", argv),
+            patch.object(mcp, "run"),
+            pytest.raises(SystemExit),
+        ):
+            entry.main()
 
     def test_host_and_port_flow_into_fastmcp_settings(self):
         from gopher_mcp import __main__ as entry

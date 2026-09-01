@@ -8,7 +8,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "gopher-mcp"
-version = "0.6.0"
+version = "0.6.1"
 description = "A cross-platform Model Context Protocol (MCP) server for browsing Gopher and Gemini resources"
 readme = "README.md"
 license = "MIT"
@@ -40,9 +40,20 @@ dependencies = [
     # CI never sees that -- `uv sync --locked` installs the locked 1.x -- but a
     # plain `pip install gopher-mcp` resolves the newest mcp and would crash on
     # startup. Lift the cap only together with the migration.
-    "mcp>=1.0.0,<2",
+    #
+    # The floor is the real minimum, not a guess: 1.10.0 is the first release
+    # whose `FastMCP.tool()` accepts `title=`, which every tool here passes.
+    # Below it the failures are import-time and resolver-invisible (<1.2 has no
+    # mcp.server.fastmcp at all, <1.7 no ToolAnnotations). Keep all three
+    # components -- Dependabot derives the current version by scraping
+    # \d+\.\d+\.\d+ from this string, and a two-part floor like >=1.10 makes
+    # the `ignore` rule that holds the cap silently inert.
+    "mcp>=1.10.0,<2",
     "pydantic>=2.5.0",
-    "pydantic-settings>=2.0.0",
+    # config.py imports NoDecode, which landed in 2.7.0. The mcp cap gives no
+    # cover here: mcp itself only asks for >=2.5.2, so 2.5.2-2.6.1 resolve
+    # cleanly next to the newest permitted mcp and then fail at import.
+    "pydantic-settings>=2.7.0",
     "structlog>=23.2.0",
     "anyio>=4.0.0",
     # Floor kept reasonably recent: a fresh `pip install` resolves the newest

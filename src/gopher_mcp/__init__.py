@@ -6,6 +6,10 @@ Gopher and Gemini resources safely and efficiently.
 
 from importlib.metadata import PackageNotFoundError, version
 
+# Annotated because server.py imports this name back out of the package while
+# __init__ is still executing; without the annotation mypy cannot infer a type
+# through that partially-initialized module and reports has-type.
+__version__: str
 try:
     # Single source of truth: the version declared in pyproject.toml. Deriving
     # it here removes the hardcoded copy that could silently drift from the tag.

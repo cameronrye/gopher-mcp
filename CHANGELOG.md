@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-09-01
+
+### Fixed
+
+- Two declared dependency floors admitted versions this package cannot import.
+  `pydantic-settings` is now `>=2.7.0` (`config.py` imports `NoDecode`, added in
+  2.7.0) and `mcp` is now `>=1.10.0` (the first release whose `FastMCP.tool()`
+  accepts `title=`, which every tool here passes). Both failures were
+  resolver-invisible: `pip install gopher-mcp` into an environment already
+  holding an older pin succeeded, `pip check` reported no broken requirements,
+  and the crash arrived at import. The `mcp<2` cap added in 0.6.0 gave no cover
+  for the `pydantic-settings` case — mcp itself only requires `>=2.5.2`, so
+  2.5.2–2.6.1 resolved cleanly alongside the newest permitted mcp. A fresh
+  install into a clean environment was never affected, since every such path
+  resolves highest.
+- The server advertised the MCP SDK's version as its own in the `initialize`
+  handshake — clients saw `gopher-mcp 1.29.1`, so a bug reported against that
+  number named the wrong project. FastMCP accepts no `version` argument and its
+  lowlevel server falls back to the SDK's own version when none is set; the
+  package version is now set explicitly.
+
+### Removed
+
+- **Breaking (CLI):** the `--mount-path` flag. It never worked: FastMCP rewrote
+  only the endpoint advertised over the SSE stream, while the Starlette routes
+  stayed unprefixed, so a client that honoured the advertised
+  `/<mount>/messages/` POSTed to a 404 and the session was dead on arrival.
+  Passing it now fails with an unrecognized-argument error rather than
+  producing a silently broken transport. `--transport sse` without it is
+  unaffected.
+
+### Added
+
+- A `minimum-versions` CI job resolves the declared floors with
+  `uv sync --resolution lowest-direct`, then imports the package, runs the
+  console script and runs the suite against them. Every other install in the
+  repo resolves highest — `uv sync --locked` pins the lockfile and the Docker
+  image pip-installs into a clean image — so nothing had ever executed this
+  package against the floors it publishes, which is how both floors above
+  drifted unnoticed. The resolution step alone would not have caught them; the
+  job has to run the code.
+
 ## [0.6.0] - 2026-09-01
 
 ### Added
@@ -666,7 +708,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.3...v0.5.0

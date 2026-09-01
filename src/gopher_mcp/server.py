@@ -13,6 +13,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from . import __version__
+
 # The certificate store's own scope rule, imported rather than reimplemented:
 # a tool that decided "covers this path" even slightly differently from the
 # fetch path would refuse creations the fetch path cannot satisfy, or allow one
@@ -314,6 +316,14 @@ _CertFingerprint = Annotated[
 
 # Initialize FastMCP server
 mcp = FastMCP("gopher-mcp", instructions=SERVER_INSTRUCTIONS)
+
+# Advertise our own version in the initialize handshake. FastMCP exposes no
+# `version` argument, and when the lowlevel server has none it falls back to
+# `importlib.metadata.version("mcp")` -- so leaving this unset made every client
+# see the SDK's version (1.29.1) as though it were gopher-mcp's, and a bug
+# reported against that number named the wrong project. Setting the attribute is
+# the only route on mcp 1.x; 2.x takes `version=` on the constructor.
+mcp._mcp_server.version = __version__
 
 # Bounds for the batch tools: cap the list length and the number of in-flight
 # connections so a caller (or attacker-steered model) cannot fan out an

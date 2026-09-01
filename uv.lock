@@ -510,7 +510,7 @@ wheels = [
 
 [[package]]
 name = "gopher-mcp"
-version = "0.6.0"
+version = "0.6.1"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
@@ -564,7 +564,7 @@ requires-dist = [
     { name = "cryptography", specifier = ">=43.0.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.100.0" },
     { name = "hypothesis", marker = "extra == 'test'", specifier = ">=6.100.0" },
-    { name = "mcp", specifier = ">=1.0.0,<2" },
+    { name = "mcp", specifier = ">=1.10.0,<2" },
     { name = "mkdocs", marker = "extra == 'docs'", specifier = ">=1.5.0" },
     { name = "mkdocs-autorefs", marker = "extra == 'docs'", specifier = ">=0.5.0" },
     { name = "mkdocs-material", marker = "extra == 'docs'", specifier = ">=9.4.0" },
@@ -573,7 +573,7 @@ requires-dist = [
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7.0" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.5.0" },
     { name = "pydantic", specifier = ">=2.5.0" },
-    { name = "pydantic-settings", specifier = ">=2.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.7.0" },
     { name = "pymdown-extensions", marker = "extra == 'docs'", specifier = ">=10.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=7.4.0" },

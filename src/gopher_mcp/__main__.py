@@ -21,12 +21,6 @@ def main() -> None:
         help="Transport protocol to use (default: stdio)",
     )
     parser.add_argument(
-        "--mount-path",
-        type=str,
-        default=None,
-        help="Mount path for the SSE transport (only used with --transport sse)",
-    )
-    parser.add_argument(
         "--host",
         type=str,
         default=None,
@@ -41,11 +35,6 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # FastMCP's run() only honors mount_path for the SSE transport; accepting it
-    # elsewhere would silently do nothing. Reject it explicitly instead.
-    if args.mount_path is not None and args.transport != "sse":
-        parser.error("--mount-path is only supported with --transport sse")
-
     # Bind address/port for the HTTP-based transports live on FastMCP's settings
     # (its run() reads them from there); wire the CLI flags in before run().
     if args.host is not None:
@@ -55,10 +44,7 @@ def main() -> None:
 
     try:
         # FastMCP handles its own event loop.
-        if args.transport == "sse":
-            mcp.run(transport=args.transport, mount_path=args.mount_path)
-        else:
-            mcp.run(transport=args.transport)
+        mcp.run(transport=args.transport)
     except KeyboardInterrupt:
         pass
     finally:

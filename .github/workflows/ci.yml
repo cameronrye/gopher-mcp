@@ -193,6 +193,45 @@ jobs:
             bandit-report.json
             pip-audit-report.json
 
+  minimum-versions:
+    name: Declared minimum dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      # Every other install in this repo resolves highest -- `uv sync --locked`
+      # pins the lockfile, the Docker image pip-installs into a clean image --
+      # so nothing has ever run this package against the floors it publishes.
+      # That is how `mcp>=1.0.0` and `pydantic-settings>=2.0.0` both drifted
+      # into admitting versions that crash at import while `pip check` stayed
+      # happy. --resolution lowest-direct pins the declared dependencies to
+      # their floors and leaves transitives alone.
+      - name: Resolve the declared floors
+        run: uv sync --resolution lowest-direct --extra test
+
+      # The sync alone proves nothing: a bogus floor still resolves fine. Only
+      # importing and running the code catches it, so this job must execute
+      # something or it is green theatre.
+      - name: Import and run at the floors
+        run: |
+          uv run --no-sync gopher-mcp --help
+          uv run --no-sync python -c "import gopher_mcp; print(gopher_mcp.__version__)"
+
+      - name: Run tests at the floors
+        run: uv run --no-sync pytest --no-cov -q
+
   docker:
     name: Build Docker image
     runs-on: ubuntu-latest
