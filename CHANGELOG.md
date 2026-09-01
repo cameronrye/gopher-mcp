@@ -9,13 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `robots.txt` support for both protocols, honouring the `gopher-mcp` and
-  generic `*` user-agents (and, optionally, AI-crawler tokens). Gopher fails
-  open when a policy cannot be retrieved; Gemini fails closed, per RFC 9309.
-- Per-host rate limiting and a concurrency cap, **on by default** (60 requests
-  per minute per host, 5 concurrent requests). Requests to the same host are
-  paced, so a batch aimed at a single server is spaced out rather than
-  parallel; batching across several hosts is where the speedup now comes from.
+- `robots.txt` support for both protocols, **opt-in and off by default**: set
+  `GOPHER_RESPECT_ROBOTS_TXT` or `GEMINI_RESPECT_ROBOTS_TXT` to `true` to enable
+  it (both default to `false`, because it costs a round-trip per host). An
+  upgraded deployment does not honour `robots.txt` until you set them. Gopher
+  honours the `gopher-mcp` and generic `*` user-agents, per the Veronica-2
+  convention; Gemini honours those plus the companion specification's
+  `webproxy` and `indexer` virtual agents, so an existing
+  `User-agent: indexer` group on a capsule now applies to this client.
+  `GOPHER_ROBOTS_HONOR_AI_TOKENS` / `GEMINI_ROBOTS_HONOR_AI_TOKENS` (default
+  `true` — the one robots-related default that is on) additionally honour rules
+  aimed at named AI-crawler tokens such as `ClaudeBot`, `GPTBot` and `CCBot`,
+  and `GOPHER_ROBOTS_CACHE_TTL_SECONDS` / `GEMINI_ROBOTS_CACHE_TTL_SECONDS`
+  (default `86400`, the maximum RFC 9309 §2.4 permits) set how long a fetched
+  policy stays valid. Gopher fails open when a policy cannot be retrieved;
+  Gemini fails closed, per RFC 9309.
+- New `error.code` values a client can now receive: `BLOCKED_BY_ROBOTS` on both
+  protocols (only when `RESPECT_ROBOTS_TXT` is on), `CERTIFICATE_STORE_UNAVAILABLE`
+  when a trust or certificate store cannot be read or is locked by another
+  process, and — from the four new certificate tools — `TOFU_DISABLED`,
+  `CLIENT_CERTS_DISABLED`, `FINGERPRINT_MISMATCH` and `CERTIFICATE_EXISTS`. A
+  script switching on `error["code"]` needs a branch for each;
+  `docs/api-reference.md` documents them all.
 - Fetch results say whether they came from cache and when the copy was
   originally fetched, and `gopher_fetch` / `gemini_fetch` take a `refresh`
   argument that bypasses the cache for one request while still repopulating it.
@@ -65,7 +80,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An allowlist that names no hosts (`" , "`, or `"$A,$B"` with empty shell
   interpolations) is now a startup error instead of silently meaning "no
   restriction at all". The same misconfiguration on ports already failed
-  closed, so the two knobs behaved oppositely.
+  closed, so the two knobs behaved oppositely. The library API changed with it:
+  an explicitly empty allowlist passed to a client constructor —
+  `GopherClient(allowed_hosts=[])` or `GeminiClient(allowed_hosts=[])` — used to
+  mean allow-all and now denies every host. Only `None` (the default) means "no
+  restriction".
 - DNS resolution runs on its own bounded thread pool. A cancelled lookup leaves
   its worker parked in the resolver, so a batch naming tarpit hosts could pin
   every thread in the event loop's shared executor and stall unrelated fetches
@@ -124,6 +143,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Per-host rate limiting and the concurrency cap are now on by default.**
+  `GOPHER_REQUESTS_PER_MINUTE` and `GEMINI_REQUESTS_PER_MINUTE` now default to
+  `60` (one request per second, per host) instead of `0`, and
+  `GOPHER_MAX_CONCURRENT_REQUESTS` / `GEMINI_MAX_CONCURRENT_REQUESTS` to `5`
+  instead of `0`. Both settings shipped in 0.4.0 and defaulted to
+  off/unlimited through 0.5.1, so this is a change of default rather than a new
+  feature — and it changes the throughput of every existing deployment without
+  any configuration edit. Requests to the same host are paced, so a batch aimed
+  at a single server is spaced out rather than parallel; batching across
+  several hosts is where the speedup now comes from. Set all four variables to
+  `0` to restore the 0.5.x behaviour.
+- A short, malformed Gopher menu line now yields an info item instead of being
+  dropped, so tool output visibly changes. A line with fewer than four
+  tab-separated fields that begins with `i` and carries text — a bare
+  `iBanner text`, common on real menus — becomes an info item with an empty
+  selector, host and `nextUrl` and port `0`; any other short line is still
+  discarded. `items` lists are therefore longer than before, which shifts item
+  counts and where `GOPHER_MAX_MENU_ITEMS` truncation falls.
 - A cache TTL of `0` disables caching, matching the "0 means off" convention of
   the neighbouring settings, instead of storing entries that expire before they
   can ever be served. A port outside 1-65535 in an allowlist is a startup error
@@ -134,6 +171,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `ErrorResult` and `GeminiErrorResult` are one model; `GeminiErrorResult`
   remains as an alias. The split had already caused drift — Gopher errors could
   not carry the integer fields Gemini errors use.
+- The Docker image is built on `python:3.13-slim` instead of `python:3.14-slim`,
+  which was outside the tested matrix, and CI now builds and smoke-tests the
+  image on every pull request — nothing did before, so breakage reached users
+  first. Dependabot is pinned to patch bumps of the base image so it cannot
+  reopen that gap.
+- Release-pipeline changes: `pip-audit` is advisory in the pull-request and
+  release paths, with a nightly audit that files a tracking issue, so an
+  advisory published against a pinned dependency no longer turns unrelated
+  pull requests red or blocks a release. The GitHub Release is created only
+  after the PyPI upload succeeds, closing a window in which a declined approval
+  left a public release advertising a version PyPI could not serve.
 
 ### Removed
 
@@ -143,6 +191,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `validate_gemini_url_components`, and `TOFUManager.cleanup_expired` /
   `ClientCertificateManager.cleanup_expired`. `sanitize_display_text` and
   `resolve_gemini_reference` are now exported from `gopher_mcp.utils`.
+- Uncalled computed members of the result models, which raise `AttributeError`
+  if read: `GeminiMimeType.is_image`, `.is_audio`, `.is_video`,
+  `.is_application`, `.supports_charset()` and `.get_file_extension()`;
+  `GemtextLink.is_external`; and `GemtextDocument.link_count`, `.has_headings`,
+  `.line_count`, `.content_summary`, `.heading_hierarchy` and `.text_content`.
+  None of them were ever serialized into `model_dump()`, so **MCP tool output
+  is unchanged and no tool user is affected** — only code importing
+  `gopher_mcp.models` directly.
+- The `allowed_hosts` keyword parameter of `ssrf.validate_target`; passing it
+  now raises `TypeError`. It duplicated a check the clients already perform in
+  `_validate_security`, against a set normalized once at construction, and only
+  the duplicate had test coverage. The `GOPHER_ALLOWED_HOSTS` /
+  `GEMINI_ALLOWED_HOSTS` settings are unaffected.
 - Embedders using the library directly should note that
   `ClientCertificateManager` now names certificate files by a random `key_id`
   rather than by subject, rolls a failed store write back instead of leaving
@@ -603,10 +664,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.3...v0.5.0
-[0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.0
+[0.4.3]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.1
+[0.4.0]: https://github.com/cameronrye/gopher-mcp/releases/tag/v0.4.1
 [0.3.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.1.0...v0.2.1

@@ -346,7 +346,7 @@ A: Gopher is a legacy protocol from the early 1990s that uses plain text connect
 
 **Q: Can I use both protocols simultaneously?**
 
-A: Yes! The server provides both `gopher_fetch` and `gemini_fetch` tools that can be used together in the same session. Six tools are registered in total: the two single-resource fetchers, `gopher_batch_fetch` and `gemini_batch_fetch`, and the two Gemini trust-store tools `gemini_trust_list` and `gemini_trust_update`.
+A: Yes! The server provides both `gopher_fetch` and `gemini_fetch` tools that can be used together in the same session. Eight tools are registered in total: the two single-resource fetchers, `gopher_batch_fetch` and `gemini_batch_fetch`, the two Gemini trust-store tools `gemini_trust_list` and `gemini_trust_update`, and the two Gemini client-identity tools `gemini_client_cert_list` and `gemini_client_cert_update`. See the [API reference](api-reference.md#mcp-tools) for the full table.
 
 **Q: Which protocol should I use?**
 

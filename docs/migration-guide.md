@@ -17,22 +17,30 @@ The server added comprehensive Gemini protocol support (introduced in v0.2.0) al
 - **Gemtext Parser**: Native gemtext parsing with structured output
 - **Dual Caching**: Separate cache systems for each protocol
 
-### Backward Compatibility
+### Backward compatibility of the v0.2.0 Gemini addition
+
+Adding Gemini alongside Gopher changed nothing that already worked:
 
 - ✅ All existing `gopher_fetch` functionality preserved
 - ✅ Existing configuration variables unchanged
-- ✅ No breaking changes to API or behavior
 - ✅ Existing scripts and integrations continue to work
+
+That statement is scoped to the v0.2.0 addition and is **not** a standing
+guarantee about every later release. 0.6.0 in particular removes public Python
+API and changes two defaults — see [Public API Changes](#public-api-changes) and
+[Changed defaults in 0.6.0](#changed-defaults-in-060) below. Its MCP tool
+surface remains compatible: no tool was removed or renamed, and no result field
+was dropped.
 
 ## Public API Changes
 
-These affect code that imports from `gopher_mcp` directly. Nothing here changes
-the MCP tool surface, so MCP clients are unaffected.
+These affect code that imports from `gopher_mcp` directly. Nothing in this
+section changes the MCP tool surface, so MCP clients are unaffected.
 
 ### Removed as unused
 
 Importing any of these now raises `ImportError` (or `AttributeError` for the
-methods):
+attributes and methods):
 
 | Removed | Was in |
 |---------|--------|
@@ -42,6 +50,44 @@ methods):
 | `sanitize_selector` | `gopher_mcp.utils` |
 | `TOFUManager.cleanup_expired` | `gopher_mcp.tofu` |
 | `ClientCertificateManager.cleanup_expired` | `gopher_mcp.client_certs` |
+| `GeminiMimeType.is_image` / `.is_audio` / `.is_video` / `.is_application` | `gopher_mcp.models` |
+| `GeminiMimeType.supports_charset()` / `.get_file_extension()` | `gopher_mcp.models` |
+| `GemtextLink.is_external` | `gopher_mcp.models` |
+| `GemtextDocument.link_count` / `.has_headings` / `.line_count` | `gopher_mcp.models` |
+| `GemtextDocument.content_summary` / `.heading_hierarchy` / `.text_content` | `gopher_mcp.models` |
+| the `allowed_hosts` keyword of `validate_target` | `gopher_mcp.ssrf` |
+
+The `gopher_mcp.models` entries were all computed properties and methods over
+data the model already carries. None of them was ever included in
+`model_dump()`, so **MCP tool output is byte-for-byte unaffected** — this breaks
+an embedder that reads `doc.text_content` or `mime.get_file_extension()`, not a
+tool user. Recompute what you need from the model's own fields.
+
+`validate_target(..., allowed_hosts=...)` now raises `TypeError`. The clients
+apply their own host allowlist in `_validate_security` against a set normalized
+once at construction, so the parameter was a second, redundant copy of that
+check; `GopherClient`/`GeminiClient` and the `*_ALLOWED_HOSTS` settings behave
+as before.
+
+### Changed defaults in 0.6.0
+
+Two settings that shipped in 0.4.0 defaulting to off are now on. No
+configuration file changes, but throughput does:
+
+| Setting | Was | Now |
+|---------|-----|-----|
+| `GOPHER_REQUESTS_PER_MINUTE` / `GEMINI_REQUESTS_PER_MINUTE` | `0` (unlimited) | `60` (one request per second, per host) |
+| `GOPHER_MAX_CONCURRENT_REQUESTS` / `GEMINI_MAX_CONCURRENT_REQUESTS` | `0` (unlimited) | `5` |
+
+Requests to one host are now paced, so a batch aimed at a single server is
+spaced out rather than parallel. Set all four to `0` to restore the 0.5.x
+behaviour.
+
+Separately, an explicitly empty host allowlist flipped meaning:
+`GopherClient(allowed_hosts=[])` and `GeminiClient(allowed_hosts=[])` used to
+mean allow-all and now deny every host. Pass `None` (the default) for "no
+restriction". The equivalent misconfiguration via `GOPHER_ALLOWED_HOSTS` /
+`GEMINI_ALLOWED_HOSTS` is now a startup error.
 
 ### Added to `gopher_mcp.utils`
 

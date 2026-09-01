@@ -25,8 +25,8 @@ Settings are grouped into three namespaces, each with its own prefix:
 is the most convenient starting point. As shipped it is a no-op: every value in
 it is the default, so copying it to `.env` changes nothing until you edit it.
 
-!!! warning "Path variables must be commented out, not left empty"
-    `GEMINI_TOFU_STORAGE_PATH=`, `GEMINI_CLIENT_CERTS_STORAGE_PATH=` and `GOPHER_MCP_LOG_FILE_PATH=` are read as the path `.`, **not** as "unset" — the server would then treat the current directory as the trust store, the certificate directory, or the log file. Comment those three variables out to use their defaults. This does not apply to the list-valued variables, where an empty value correctly means "no restriction".
+!!! note "An empty path variable selects the default"
+    `GEMINI_TOFU_STORAGE_PATH=`, `GEMINI_CLIENT_CERTS_STORAGE_PATH=` and `GOPHER_MCP_LOG_FILE_PATH=` are read as **unset**, exactly as if the line were commented out, so either spelling selects the default. (Before 0.6.0 an empty value became the path `.`, which made the server try to open the current directory as its trust store or log file; that is fixed.) The same holds for the list-valued variables, where an empty value means "no restriction".
 
 ### List-valued variables
 
@@ -242,9 +242,9 @@ Common validation errors:
    names no entries is refused at startup; unset the variable instead
 5. **Out-of-range ports** — every entry in a `*_ALLOWED_PORTS` list must be
    between `1` and `65535`
-6. **Empty path values** — `GEMINI_TOFU_STORAGE_PATH=`,
-   `GEMINI_CLIENT_CERTS_STORAGE_PATH=` and `GOPHER_MCP_LOG_FILE_PATH=` are read
-   as the path `.`; comment them out instead
+
+An empty value for a path variable is **not** an error: it means "use the
+default", and the validator accepts it for the same reason the server does.
 
 It also warns about variables that look like settings but are ignored — an
 unprefixed `LOG_LEVEL`, or settings that never existed such as

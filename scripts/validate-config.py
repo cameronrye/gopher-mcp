@@ -333,19 +333,10 @@ class ConfigValidator:
                     "pattern and will never match"
                 )
 
-    def _empty_path(self, spec: Spec, value: str) -> bool:
-        """Flag an empty path value, which reads as '.' rather than 'unset'."""
-        if value.strip():
-            return False
-        self.errors.append(
-            f"{spec.name} is set to an empty value, which is read as the path "
-            f'"." rather than as unset. Comment the variable out to use the '
-            "default."
-        )
-        return True
-
     def _validate_file_path(self, spec: Spec, value: str) -> None:
-        if self._empty_path(spec, value):
+        # A blank value means "unset, use the default", exactly as the server
+        # reads it (config._blank_path_is_unset). There is nothing to check.
+        if not value.strip():
             return
         path = Path(value).expanduser()
         if path.is_dir():
@@ -358,7 +349,8 @@ class ConfigValidator:
             )
 
     def _validate_dir_path(self, spec: Spec, value: str) -> None:
-        if self._empty_path(spec, value):
+        # As above: blank means "use the default", not the current directory.
+        if not value.strip():
             return
         path = Path(value).expanduser()
         if path.exists() and not path.is_dir():

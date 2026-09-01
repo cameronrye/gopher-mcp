@@ -60,8 +60,8 @@ The Gopher & Gemini MCP Server is a Model Context Protocol (MCP) server that ena
                                 │  ┌──────────────────────────┐│
                                 │  │  ClientCertificateManager││
                                 │  │  (client_certs.py)       ││
-                                │  │  • Auto-generation       ││
-                                │  │  • Certificate storage   ││
+                                │  │  • Explicit creation only││
+                                │  │  • Scoped cert storage   ││
                                 │  └──────────────────────────┘│
                                 └──────────────────────────────┘
 ```
