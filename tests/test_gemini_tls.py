@@ -497,13 +497,25 @@ class TestConnectPinnedIp:
     @pytest.mark.asyncio
     async def test_connect_uses_pinned_ip_not_hostname(self):
         client = GeminiTLSClient(TLSConfig())
-        # Unresolvable hostname, but pinned to loopback:closed-port. A refusal
-        # (not a DNS error) proves the pinned IP was used without re-resolving.
-        with pytest.raises(TLSConnectionError) as exc_info:
+        # Refused at the socket layer rather than by dialling a closed port:
+        # Windows lets a connection to one hang until the deadline instead of
+        # refusing it, which says nothing about the address that was dialled.
+        with (
+            patch(
+                "asyncio.open_connection", side_effect=ConnectionRefusedError
+            ) as open_connection,
+            pytest.raises(TLSConnectionError) as exc_info,
+        ):
             await client.connect(
                 "host.that.never.resolves.invalid",
                 1,
                 connect_ip="127.0.0.1",
                 timeout=2,
             )
+
+        # No DNS error: the unresolvable hostname was never looked up. It still
+        # has to reach SNI, or the server cannot select a certificate.
         assert "DNS" not in str(exc_info.value)
+        kwargs = open_connection.call_args.kwargs
+        assert kwargs["host"] == "127.0.0.1"
+        assert kwargs["server_hostname"] == "host.that.never.resolves.invalid"
