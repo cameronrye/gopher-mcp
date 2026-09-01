@@ -628,7 +628,7 @@ class TestServerIdentity:
 class TestEntrypointTransportArgs:
     """The CLI must let an operator bind host/port for the http/sse transports."""
 
-    def test_mount_path_flag_is_gone(self):
+    def test_mount_path_flag_is_gone(self, capsys):
         """--mount-path advertised a prefixed message endpoint that FastMCP
         never actually routed: the SSE stream handed the client
         ``/foo/messages/`` while only ``/messages/`` was mounted, so every POST
@@ -645,6 +645,12 @@ class TestEntrypointTransportArgs:
             pytest.raises(SystemExit),
         ):
             entry.main()
+
+        # Pin *why* argparse exited. SystemExit alone passes for the wrong
+        # reason if "sse" ever leaves --transport's choices, and so does the
+        # exit code -- argparse uses 2 for invalid-choice as well. Only the
+        # message distinguishes the two.
+        assert "unrecognized arguments: --mount-path" in capsys.readouterr().err
 
     def test_host_and_port_flow_into_fastmcp_settings(self):
         from gopher_mcp import __main__ as entry
