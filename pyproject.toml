@@ -40,7 +40,7 @@ dependencies = [
     # CI never sees that -- `uv sync --locked` installs the locked 1.x -- but a
     # plain `pip install gopher-mcp` resolves the newest mcp and would crash on
     # startup. Lift the cap only together with the migration.
-    "mcp>=1.0.0,<2",
+    "mcp>=1.0.0,<3",
     "pydantic>=2.5.0",
     "pydantic-settings>=2.0.0",
     "structlog>=23.2.0",
