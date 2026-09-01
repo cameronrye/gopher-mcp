@@ -26,6 +26,15 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    # The mcp cap in pyproject.toml is load-bearing: 2.x renamed FastMCP to
+    # MCPServer, so widening it makes `pip install gopher-mcp` resolve a release
+    # this code cannot import against. Dependabot cannot read the comment saying
+    # so and proposed exactly that in #94. Migrating to the 2.x API is what
+    # lifts the cap, not a version bump.
+    ignore:
+      - dependency-name: "mcp"
+        update-types:
+          - "version-update:semver-major"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
