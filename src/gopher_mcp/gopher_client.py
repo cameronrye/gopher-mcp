@@ -3,12 +3,12 @@
 import asyncio
 import re
 import time
-from collections import OrderedDict
 
 import structlog
 
-from .cache import TTLCacheMixin
+from .client_base import FetchClientBase
 from .gopher_transport import GopherProtocolError, decode_gopher_text, fetch_gopher
+from .helpers import sanitize_display_text
 from .models import (
     BinaryResult,
     CacheEntry,
@@ -17,17 +17,15 @@ from .models import (
     GopherURL,
     MenuResult,
     TextResult,
+    mark_from_cache,
 )
-from .ratelimit import RateLimiter
 from .robots import (
-    AI_AGENT_TOKENS,
     GOPHER_TOKENS,
     ROBOTS_MAX_BYTES,
-    RobotsGate,
     RobotsUnavailable,
     gopher_candidate_paths,
 )
-from .ssrf import SSRFError, normalize_host, validate_target
+from .ssrf import SSRFError, validate_target
 from .utils import (
     detect_binary_mime_type,
     gopher_type_category,
@@ -89,8 +87,18 @@ def _strip_gopher_text_terminator(text: str) -> str:
     return result
 
 
-class GopherClient(TTLCacheMixin[GopherFetchResponse]):
+class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
     """Async Gopher protocol client with caching and safety features."""
+
+    _log_label = "Gopher"
+    _cache_entry_cls = CacheEntry
+    _robots_tokens = GOPHER_TOKENS
+    # Gopher fails *open*: the protocol has no status codes, so a missing
+    # selector, an error document and an empty file are indistinguishable on the
+    # wire, and RFC 9309 s2.3.1.4's "treat unreachable as complete disallow"
+    # would deny most of Gopherspace. The lenient parser makes that safe -- an
+    # error page yields no User-agent group and so imposes no rules.
+    _robots_fail_closed = False
 
     def __init__(
         self,
@@ -133,57 +141,25 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
                 tokens (ClaudeBot, GPTBot, ...).
 
         """
-        self.max_response_size = max_response_size
-        self.timeout_seconds = timeout_seconds
-        self.cache_enabled = cache_enabled
-        self.cache_ttl_seconds = cache_ttl_seconds
-        self.max_cache_entries = max_cache_entries
+        super().__init__(
+            max_response_size=max_response_size,
+            timeout_seconds=timeout_seconds,
+            cache_enabled=cache_enabled,
+            cache_ttl_seconds=cache_ttl_seconds,
+            max_cache_entries=max_cache_entries,
+            allowed_hosts=allowed_hosts,
+            allow_local_hosts=allow_local_hosts,
+            allowed_ports=allowed_ports,
+            max_rendered_chars=max_rendered_chars,
+            requests_per_minute=requests_per_minute,
+            max_concurrent_requests=max_concurrent_requests,
+            respect_robots_txt=respect_robots_txt,
+            robots_cache_ttl_seconds=robots_cache_ttl_seconds,
+            robots_honor_ai_tokens=robots_honor_ai_tokens,
+        )
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
-        self.max_rendered_chars = max_rendered_chars
         self.max_menu_items = max_menu_items
-        self._rate_limiter = RateLimiter(requests_per_minute)
-        self.max_concurrent_requests = max_concurrent_requests
-        # Coarse cap on simultaneous fetches; 0 disables it (None = unlimited).
-        self._fetch_semaphore = (
-            asyncio.Semaphore(max_concurrent_requests)
-            if max_concurrent_requests > 0
-            else None
-        )
-
-        self.allow_local_hosts = allow_local_hosts
-        self.allowed_ports = allowed_ports
-
-        # Convert allowed hosts to a set for faster lookup
-        self.allowed_hosts: set[str] | None = (
-            set(allowed_hosts) if allowed_hosts else None
-        )
-
-        # LRU cache (get/put behaviour lives in TTLCacheMixin). The element type
-        # is inherited from the mixin annotation; only the entry class differs.
-        self._cache = OrderedDict()
-        self._cache_entry_cls = CacheEntry
-
-        # Robot exclusion (opt-in). Gopher fails *open*: the protocol has no
-        # status codes, so a missing selector, an error document and an empty
-        # file are indistinguishable on the wire, and RFC 9309 s2.3.1.4's
-        # "treat unreachable as complete disallow" would deny most of
-        # Gopherspace. The lenient parser makes that safe -- an error page
-        # yields no User-agent group and so imposes no rules.
-        self.respect_robots_txt = respect_robots_txt
-        self._robots_gate = (
-            RobotsGate(
-                # Resolved at call time rather than bound here, so the
-                # gate follows the method (and stays patchable in tests).
-                fetcher=lambda host, port: self._fetch_robots(host, port),
-                tokens=GOPHER_TOKENS,
-                extra_tokens=(AI_AGENT_TOKENS if robots_honor_ai_tokens else ()),
-                ttl_seconds=robots_cache_ttl_seconds,
-                fail_closed=False,
-            )
-            if respect_robots_txt
-            else None
-        )
 
     def _validate_security(self, parsed_url: GopherURL) -> None:
         """Validate security constraints for a Gopher request.
@@ -195,11 +171,8 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             ValueError: If security validation fails
 
         """
-        # Check allowed hosts (normalized to close trailing-dot/case bypasses)
-        if self.allowed_hosts:
-            allowed = {normalize_host(h) for h in self.allowed_hosts}
-            if normalize_host(parsed_url.host) not in allowed:
-                raise ValueError(f"Host '{parsed_url.host}' not in allowed hosts list")
+        if not self._host_is_allowed(parsed_url.host):
+            raise ValueError(f"Host '{parsed_url.host}' not in allowed hosts list")
 
         # Validate selector length
         if len(parsed_url.selector) > self.max_selector_length:
@@ -230,11 +203,14 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         if not 1 <= parsed_url.port <= 65535:
             raise ValueError(f"Invalid port number: {parsed_url.port}")
 
-    async def fetch(self, url: str) -> GopherFetchResponse:
+    async def fetch(self, url: str, *, refresh: bool = False) -> GopherFetchResponse:
         """Fetch content from a Gopher URL.
 
         Args:
             url: Gopher URL to fetch
+            refresh: Skip the cache lookup and go to the server. The fresh
+                response still replaces the cached one, so this bypasses the
+                cache for this read rather than disabling it.
 
         Returns:
             Structured response based on content type
@@ -264,10 +240,15 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             # only in host case share one entry instead of duplicating.
             cache_key = normalize_cache_key(url)
 
-            # Check cache first
-            if self.cache_enabled:
-                cached_response = self._get_cached_response(cache_key)
-                if cached_response:
+            # Check cache first, unless the caller asked for the current state.
+            if self.cache_enabled and not refresh:
+                cached_entry = self._get_cached_entry(cache_key)
+                if cached_entry is not None:
+                    # Tag the copy handed back so the model can see it is a
+                    # replay, and how stale, rather than reading it as current.
+                    cached_response = mark_from_cache(
+                        cached_entry.value, cached_entry.timestamp
+                    )
                     logger.debug(
                         "Cache hit",
                         url=url,
@@ -331,22 +312,6 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
                 url, "FETCH_ERROR", "Failed to fetch the requested resource", e
             )
 
-    def _error_result(
-        self, url: str, code: str, message: str, exc: Exception
-    ) -> ErrorResult:
-        """Build a sanitized error result, logging full detail server-side."""
-        logger.error(
-            "Gopher fetch failed",
-            url=url,
-            code=code,
-            error=str(exc),
-            error_type=type(exc).__name__,
-        )
-        return ErrorResult(
-            error={"code": code, "message": message},
-            requestInfo={"url": url, "timestamp": time.time()},
-        )
-
     def _robots_denied_result(self, url: str, host: str, reason: str) -> ErrorResult:
         """Build the result returned when the robots gate blocks a resource."""
         logger.info("Blocked by robots.txt", url=url, host=host, reason=reason)
@@ -379,7 +344,12 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         an unavailable policy still allows the request through (Gopher cannot
         distinguish a missing selector from an unreachable server, and the real
         fetch would fail the same way) -- it just is not remembered.
+
+        An over-cap file is truncated and parsed rather than rejected (RFC 9309
+        section 2.5). Rejecting it made every request re-download the full cap
+        only to discard it, because an unavailable policy is never cached.
         """
+        cap = min(ROBOTS_MAX_BYTES, self.max_response_size)
         try:
             connect_addresses = await asyncio.wait_for(
                 validate_target(
@@ -396,9 +366,10 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
                 port,
                 "/robots.txt",
                 None,
-                max_bytes=ROBOTS_MAX_BYTES,
+                max_bytes=cap,
                 timeout=self.timeout_seconds,
                 connect_addresses=connect_addresses,
+                truncate_at_max=True,
             )
         except (
             SSRFError,
@@ -408,23 +379,18 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             ValueError,
         ) as e:
             raise RobotsUnavailable(f"could not reach {host}:{port}") from e
+        if len(raw) >= cap:
+            # Drop the trailing line: it was cut mid-way, and half a Disallow
+            # must not be applied as if it were a whole one.
+            logger.warning(
+                "robots.txt truncated at the size cap",
+                host=host,
+                port=port,
+                max_bytes=cap,
+            )
+            raw = raw[: raw.rfind(b"\n") + 1]
         text, _charset = decode_gopher_text(raw)
         return text
-
-    async def _bounded_fetch(self, parsed_url: GopherURL) -> GopherFetchResponse:
-        """Run :meth:`_fetch_content`, bounded by the concurrency cap if set.
-
-        The per-host spacing is waited out BEFORE a concurrency slot is
-        taken. Sleeping while holding the semaphore would let one
-        throttled host occupy every slot, starving unrelated hosts that
-        are not rate limited at all -- harmless when both settings were
-        off by default, but not now that they ship enabled.
-        """
-        await self._rate_limiter.acquire(parsed_url.host)
-        if self._fetch_semaphore is None:
-            return await self._fetch_content(parsed_url)
-        async with self._fetch_semaphore:
-            return await self._fetch_content(parsed_url)
 
     async def _fetch_content(self, parsed_url: GopherURL) -> GopherFetchResponse:
         """Fetch content from a parsed Gopher URL over the native transport.
@@ -463,9 +429,11 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         # the transport can't re-resolve to a rebinding answer.
         #
         # Bound DNS resolution by the request deadline: getaddrinfo is otherwise
-        # unbounded (a tarpit nameserver could stall a worker -- and tie up an
-        # event-loop executor thread -- far past timeout_seconds), so the
-        # documented "overall deadline" must cover it too.
+        # unbounded (a tarpit nameserver could stall a worker far past
+        # timeout_seconds), so the documented "overall deadline" must cover it
+        # too. The wait_for only abandons the lookup -- the worker itself is
+        # confined to ssrf.py's own bounded DNS pool, so a stalled resolver can
+        # never occupy the event loop's default executor.
         try:
             connect_addresses = await asyncio.wait_for(
                 validate_target(
@@ -550,12 +518,9 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
         # lone-'.' terminator line and un-dot-stuff lines beginning with '..'.
         text_content = _strip_gopher_text_terminator(text_content)
 
-        # Strip control characters except newlines, carriage returns and tabs.
-        sanitized_text = "".join(
-            char
-            for char in text_content
-            if char.isprintable() or char in ("\n", "\t", "\r")
-        )
+        # Server-controlled text: drop control characters, but keep the
+        # whitespace that carries a multi-line body's structure.
+        sanitized_text = sanitize_display_text(text_content)
 
         # Cap the text handed to the LLM (distinct from the network byte cap);
         # `bytes` still reports the full original size.
@@ -584,9 +549,5 @@ class GopherClient(TTLCacheMixin[GopherFetchResponse]):
             mimeType=detect_binary_mime_type(raw),
         )
 
-    # _get_cached_response / _cache_response are provided by TTLCacheMixin.
-
-    async def close(self) -> None:
-        """Close the client and cleanup resources."""
-        self._cache.clear()
-        logger.info("Gopher client closed")
+    # The cache accessors, _bounded_fetch, _error_result and close() are
+    # provided by FetchClientBase.

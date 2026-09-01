@@ -97,6 +97,36 @@ class TestRateLimiterAcquire:
         await rl.acquire("evil.example")
         sleep.assert_not_awaited()
 
+    async def test_penalize_ignores_a_zero_or_negative_backoff(self):
+        """Nothing to wait for must leave no reservation behind.
+
+        Writing a past timestamp would make the disabled limiter carry a host
+        entry (and take the slow path) forever for no benefit.
+        """
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep)
+        rl.penalize("polite.example", 0)
+        rl.penalize("polite.example", -5)
+        assert rl._next_allowed == {}
+        await rl.acquire("polite.example")
+        sleep.assert_not_awaited()
+
+    async def test_elapsed_penalty_is_forgotten_when_disabled(self):
+        """With throttling off, a served-out penalty must not linger.
+
+        The entry is the only thing keeping the host off ``acquire``'s fast
+        path, and an open-world fetcher sees unbounded distinct hosts.
+        """
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep)
+        rl.penalize("slow.example", 5)
+        clock.t += 10  # the backoff has fully elapsed
+        await rl.acquire("slow.example")
+        sleep.assert_not_awaited()
+        assert "slow.example" not in rl._next_allowed
+
     async def test_stale_host_entries_are_swept_when_throttling(self):
         """With throttling enabled, hosts visited once must not accumulate
         forever -- entries whose next-allowed time has elapsed are swept."""

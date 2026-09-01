@@ -11,7 +11,11 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
+
+# Whitespace that carries meaning in a multi-line body and therefore survives
+# ``sanitize_display_text`` even though it is not "printable".
+_MEANINGFUL_WHITESPACE = ("\n", "\t", "\r")
 
 
 def atomic_write_json(file_path: str, data: Any) -> None:
@@ -91,6 +95,60 @@ def bracket_host(host: str) -> str:
     if ":" in host and not host.startswith("["):
         return f"[{host}]"
     return host
+
+
+def sanitize_display_text(text: str, *, keep_whitespace: bool = True) -> str:
+    """Strip non-printable characters from server-supplied text bound for the LLM.
+
+    Every string a remote gopher/gemini server controls -- menu titles, decoded
+    bodies, gemtext link labels, a Gemini ``<META>`` -- reaches the model (and
+    often a terminal) verbatim. ANSI escapes (CSI/OSC), NUL and other C0/C1
+    control characters in that text are a display-injection vector, so drop them
+    everywhere rather than at individual call sites.
+
+    Args:
+        text: Raw server-supplied text.
+        keep_whitespace: Preserve ``\\n``, ``\\t`` and ``\\r``. True for
+            multi-line bodies whose line structure is meaningful; False for a
+            single field (a menu title, a ``<META>``) where they are noise.
+
+    Returns:
+        ``text`` with every non-printable character removed.
+
+    """
+    allowed = _MEANINGFUL_WHITESPACE if keep_whitespace else ()
+    return "".join(char for char in text if char.isprintable() or char in allowed)
+
+
+def resolve_gemini_reference(base_url: str, target: str) -> str:
+    """Resolve a (possibly relative) Gemini reference against ``base_url``.
+
+    ``urllib.parse.urljoin`` doesn't treat ``gemini`` as a hierarchical scheme,
+    so relative references would pass through unresolved. Resolve under an
+    ``https`` placeholder (which urljoin understands) and swap the scheme back.
+    An absolute reference that carries its own scheme (gemini://, https://,
+    mailto:, ...) is returned unchanged so the caller/SSRF layer can inspect
+    cross-scheme or cross-host targets.
+
+    Args:
+        base_url: The URL the reference was found in.
+        target: The (absolute or relative) reference to resolve.
+
+    Returns:
+        The absolute form of ``target``.
+
+    """
+    if urlparse(target).scheme:  # already absolute
+        return target
+
+    if not base_url.startswith("gemini://"):
+        return urljoin(base_url, target)
+
+    placeholder_base = "https://" + base_url[len("gemini://") :]
+    joined = urljoin(placeholder_base, target)
+    if joined.startswith("https://"):
+        return "gemini://" + joined[len("https://") :]
+    return joined
 
 
 def normalize_cache_key(url: str) -> str:

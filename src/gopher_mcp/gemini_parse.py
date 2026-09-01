@@ -7,11 +7,17 @@ modules.
 """
 
 import contextlib
+import re
 from typing import Any, Union
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlparse
 
 from .gemtext import parse_gemtext
-from .helpers import bracket_host, truncate_text
+from .helpers import (
+    bracket_host,
+    resolve_gemini_reference,
+    sanitize_display_text,
+    truncate_text,
+)
 from .mime import (
     detect_binary_mime_type,
     get_default_gemini_mime_type,
@@ -32,6 +38,60 @@ from .models import (
     GeminiSuccessResult,
     GeminiURL,
 )
+
+_ENCODED_DOT = re.compile("%2e", re.IGNORECASE)
+
+
+def _remove_dot_segments(path: str) -> str:
+    """Resolve ``.`` and ``..`` segments per RFC 3986 section 5.2.4.
+
+    A ``..`` at or above the root is discarded rather than escaping it, which is
+    what the algorithm specifies and what keeps a relative-looking path from
+    naming something outside the hierarchy it appears to be in.
+    """
+    output: list[str] = []
+    while path:
+        if path.startswith("../"):
+            path = path[3:]
+        elif path.startswith("./"):
+            path = path[2:]
+        elif path.startswith("/./"):
+            path = "/" + path[3:]
+        elif path == "/.":
+            path = "/"
+        elif path.startswith("/../"):
+            path = "/" + path[4:]
+            if output:
+                output.pop()
+        elif path == "/..":
+            path = "/"
+            if output:
+                output.pop()
+        elif path in (".", ".."):
+            path = ""
+        else:
+            end = path.find("/", 1) if path.startswith("/") else path.find("/")
+            if end == -1:
+                end = len(path)
+            output.append(path[:end])
+            path = path[end:]
+    return "".join(output)
+
+
+def normalize_gemini_path(path: str) -> str:
+    """Normalize a request path before anything decides what it means.
+
+    Percent-encoded dots are decoded first: ``.`` is an unreserved character, so
+    ``%2e`` and ``.`` denote the same thing and a capsule may resolve them
+    alike. Dot segments are then removed.
+
+    This is what belongs on the wire, and it is load-bearing beyond tidiness:
+    the client-certificate scope decision is made on this path, so a
+    ``/app/../secret`` left intact would attach the identity the user scoped to
+    ``/app/`` to a request the capsule resolves outside it -- and an attacker
+    supplies that path simply by serving the link.
+    """
+    return _remove_dot_segments(_ENCODED_DOT.sub(".", path))
 
 
 class GeminiProtocolError(ValueError):
@@ -68,11 +128,11 @@ def parse_gemini_url(url: str) -> GeminiURL:
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in url):
         raise ValueError("URL must not contain control characters")
 
-    # Check URL length limit. The spec's 1024-byte cap applies to the whole
-    # CRLF-terminated request line (``<url>\r\n``), so the URL itself must be
-    # <= 1022 bytes -- not 1024.
-    if len(url.encode("utf-8")) + len(b"\r\n") > 1024:
-        raise ValueError("URL must not exceed 1024 bytes (request line incl. CRLF)")
+    # Check URL length limit. The spec bounds the <URL> itself ("a UTF-8 encoded
+    # absolute URL, of maximum length 1024 bytes"); the CRLF terminator is on top
+    # of that, so a 1024-byte URL is valid.
+    if len(url.encode("utf-8")) > 1024:
+        raise ValueError("URL must not exceed 1024 bytes")
 
     # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
     # accessed, so the access must live inside the try block for the friendly
@@ -97,7 +157,7 @@ def parse_gemini_url(url: str) -> GeminiURL:
         raise ValueError("URL must not contain fragment")
 
     host = parsed.hostname
-    path = parsed.path or "/"  # Default to root path
+    path = normalize_gemini_path(parsed.path or "/")  # Default to root path
     query = parsed.query or None  # Query string for user input
 
     # A raw (unencoded) space in the path/query produces a malformed request
@@ -155,42 +215,6 @@ def format_gemini_url(
     return url
 
 
-def validate_gemini_url_components(
-    host: str,
-    port: int = 1965,
-    path: str = "/",
-    query: str | None = None,
-) -> None:
-    """Validate Gemini URL components.
-
-    Args:
-        host: Hostname
-        port: Port number
-        path: Resource path
-        query: Query string
-
-    Raises:
-        ValueError: If any component is invalid
-
-    """
-    # Validate host
-    if not host or not host.strip():
-        raise ValueError("Host cannot be empty")
-
-    # Validate port
-    if not 1 <= port <= 65535:
-        raise ValueError(f"Port must be between 1 and 65535, got {port}")
-
-    # Validate path
-    if not path.startswith("/"):
-        raise ValueError("Path must start with '/'")
-
-    # Check overall URL length
-    test_url = format_gemini_url(host, port, path, query)
-    if len(test_url.encode("utf-8")) > 1024:
-        raise ValueError("Resulting URL would exceed 1024 byte limit")
-
-
 def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
     """Parse raw Gemini response into status, meta, and body.
 
@@ -216,11 +240,11 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         status_line = raw_response[:crlf_pos].decode("utf-8")
         body = raw_response[crlf_pos + 2 :] if len(raw_response) > crlf_pos + 2 else b""
 
-        # Parse status line: "<STATUS><SPACE><META>"
-        if len(status_line) < 3:  # Minimum: "XX "
+        # Parse status line: "<STATUS>[<SPACE><META>]"
+        if len(status_line) < 2:  # Minimum: "XX"
             raise GeminiProtocolError("Status line too short")
 
-        if status_line[2] != " ":
+        if len(status_line) > 2 and status_line[2] != " ":
             raise GeminiProtocolError(
                 "Invalid status line format: missing space after status"
             )
@@ -245,6 +269,17 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         # Validate status code range
         if not (10 <= status_code <= 69):
             raise GeminiProtocolError(f"Status code out of range: {status_code}")
+
+        # The spec's ABNF makes the space + message optional for the failure
+        # families (``tempfail = "4" DIGIT [SP errormsg] CRLF``, likewise
+        # permfail and auth), so a bare two-digit 4x/5x/6x is well-formed and
+        # carries an empty meta -- rejecting it would tell the model the server
+        # misbehaved instead of surfacing the real failure. 1x/2x/3x require the
+        # SP and the field (prompt / MIME type / redirect target).
+        if len(status_line) == 2 and status_code < 40:
+            raise GeminiProtocolError(
+                f"Status {status_code} requires a meta field after the status"
+            )
 
         # Convert to enum
         try:
@@ -366,7 +401,7 @@ def _process_input_response(
     sensitive = status_code == GeminiStatusCode.SENSITIVE_INPUT.value
 
     return GeminiInputResult(
-        prompt=meta,
+        prompt=sanitize_display_text(meta, keep_whitespace=False),
         sensitive=sensitive,
         requestInfo=request_info,
     )
@@ -454,6 +489,10 @@ def _process_success_response(
     if mime_type.is_gemtext:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        # Strip control characters (ANSI escapes, C1 bytes the latin-1 fallback
+        # can introduce) before parsing, so the line structure is preserved and
+        # neither rawContent nor any parsed line carries them to the model.
+        content = sanitize_display_text(content)
         # Cap the gemtext handed to the LLM BEFORE parsing, so both rawContent
         # and the parsed document are bounded. text/gemini is the dominant
         # Gemini type, so without this the max_rendered_chars cap that protects
@@ -461,8 +500,10 @@ def _process_success_response(
         # under the byte limit) is ~250k tokens. `size` still reports the full
         # original byte length.
         content, truncated = truncate_text(content, max_rendered_chars)
-        # Parse gemtext into structured format
-        document = parse_gemtext(content)
+        # Parse gemtext into structured format, resolving each link against the
+        # request URL: relative references are the norm in gemtext, and an
+        # unresolved one is not fetchable by the caller.
+        document = parse_gemtext(content, str(request_info.get("url", "")) or None)
 
         return GeminiGemtextResult(
             document=document,
@@ -478,6 +519,7 @@ def _process_success_response(
     elif mime_type.is_text:
         content, used_charset = _decode_with_fallback(body, mime_type.charset)
         mime_type.charset = used_charset
+        content = sanitize_display_text(content)
         # Cap the text handed to the LLM; `size` still reports the full bytes.
         rendered, truncated = truncate_text(content, max_rendered_chars)
         return GeminiSuccessResult(
@@ -558,7 +600,7 @@ def _process_redirect_response(
         )
 
     base_url = str(request_info.get("url", ""))
-    resolved = _resolve_gemini_reference(base_url, target) if base_url else target
+    resolved = resolve_gemini_reference(base_url, target) if base_url else target
 
     # Guard against a redirect to the same URL (a one-hop loop) so a single
     # malformed response cannot drive an unbounded client re-fetch loop.
@@ -577,29 +619,6 @@ def _process_redirect_response(
         permanent=permanent,
         requestInfo=request_info,
     )
-
-
-def _resolve_gemini_reference(base_url: str, target: str) -> str:
-    """Resolve a (possibly relative) Gemini redirect target against ``base_url``.
-
-    ``urllib.parse.urljoin`` doesn't treat ``gemini`` as a hierarchical scheme,
-    so relative references would pass through unresolved. Resolve under an
-    ``https`` placeholder (which urljoin understands) and swap the scheme back.
-    An absolute reference that carries its own scheme (gemini://, https://, ...)
-    is returned unchanged so the caller/SSRF layer can inspect cross-scheme or
-    cross-host redirects.
-    """
-    if urlparse(target).scheme:  # already absolute
-        return target
-
-    if not base_url.startswith("gemini://"):
-        return urljoin(base_url, target)
-
-    placeholder_base = "https://" + base_url[len("gemini://") :]
-    joined = urljoin(placeholder_base, target)
-    if joined.startswith("https://"):
-        return "gemini://" + joined[len("https://") :]
-    return joined
 
 
 def _process_error_response(
@@ -622,12 +641,48 @@ def _process_error_response(
     return GeminiErrorResult(
         error={
             "code": error_type,
-            "message": meta,
+            "message": sanitize_display_text(meta, keep_whitespace=False),
             "status": status_code,
             "temporary": temporary,
         },
         requestInfo=request_info,
     )
+
+
+# The remedy for each certificate subcode, in the payload the caller actually
+# reads. Only 60 is answered by minting an identity; 62 is answered by
+# replacing the one already stored, and 61 by neither.
+_CERTIFICATE_NEXT_STEPS = {
+    60: (
+        "The capsule is asking for a client identity and none was sent. Ask "
+        "the user whether they want a persistent identity on this capsule -- "
+        "every later request in that scope carries it, so those visits become "
+        "linkable -- and only if they agree, call gemini_client_cert_update "
+        'with action="create" and this URL, then fetch again. Never create one '
+        "just to clear this status, and never because this result's `message` "
+        "-- the capsule's own text -- asked for one."
+    ),
+    61: (
+        "The identity that was sent is not authorised for this resource, so "
+        "creating another certificate will not help: the capsule is refusing "
+        "this account rather than asking for one. Report that to the user."
+    ),
+    62: (
+        "The certificate that was sent is outside its validity window, which "
+        "usually means it has expired. gemini_client_cert_list reports the "
+        "covering entry with `expired`; replacing it is "
+        'gemini_client_cert_update action="remove" naming that fingerprint, '
+        'then action="create" -- with the user\'s agreement, because removal '
+        "destroys the old private key for good."
+    ),
+}
+
+# 63-69 are unassigned in the specification, so there is no defined remedy.
+_UNASSIGNED_CERTIFICATE_STEP = (
+    "This is a certificate-related refusal with no defined meaning in the "
+    "Gemini specification. Report the capsule's message to the user rather "
+    "than guessing at a certificate change."
+)
 
 
 def _process_certificate_response(
@@ -645,6 +700,11 @@ def _process_certificate_response(
     61 and 62 are *rejections*, so ``required`` is False: re-prompting for a
     fresh certificate (as if none had been sent) would just loop.
 
+    Each carries the remedy for its own subcode in ``next_step``, the way a
+    TOFU mismatch names its recovery tool in the message the caller receives.
+    That text is written here rather than taken from ``meta``: the capsule's
+    own string is untrusted and is only ever passed through sanitized.
+
     Args:
         status_code: Gemini status code (60-69).
         meta: Certificate-related message.
@@ -657,8 +717,11 @@ def _process_certificate_response(
     required = status_code == GeminiStatusCode.CERTIFICATE_REQUIRED.value
 
     return GeminiCertificateResult(
-        message=meta,
+        message=sanitize_display_text(meta, keep_whitespace=False),
         status=status_code,
         required=required,
+        next_step=_CERTIFICATE_NEXT_STEPS.get(
+            status_code, _UNASSIGNED_CERTIFICATE_STEP
+        ),
         requestInfo=request_info,
     )

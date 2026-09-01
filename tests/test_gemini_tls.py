@@ -147,9 +147,12 @@ class TestConnectErrorMapping:
     network (asyncio.open_connection is patched)."""
 
     @pytest.mark.asyncio
-    async def test_timeout(self):
+    async def test_timeout_is_reported_as_a_timeout(self):
+        """A connect/handshake timeout must NOT masquerade as a TLS fault: a
+        firewalled host that drops SYNs would otherwise steer the caller toward
+        certificate diagnostics instead of "host unreachable"."""
         with patch("asyncio.open_connection", AsyncMock(side_effect=TimeoutError())):
-            with pytest.raises(TLSConnectionError, match="Connection timeout"):
+            with pytest.raises(TimeoutError, match=r"timed out after 1\.0 seconds"):
                 await GeminiTLSClient().connect("example.org", 1965, timeout=1.0)
 
     @pytest.mark.asyncio
@@ -266,15 +269,27 @@ class TestSendReceiveClose:
         assert result == b"x" * 1024
 
     @pytest.mark.asyncio
-    async def test_receive_accepts_exactly_max_size_when_held_open(self, monkeypatch):
-        """A complete, exactly-max_size response whose server holds the
-        connection open (no EOF) is accepted once the short probe times out,
-        rather than spuriously erroring."""
+    async def test_receive_reports_max_size_reached_when_held_open(self, monkeypatch):
+        """At the cap with no EOF the bytes in hand are indistinguishable from a
+        mid-stream prefix, so they must NOT be returned as a complete response:
+        a server that paces its body could otherwise have a truncated document
+        cached as a success for the full TTL."""
         monkeypatch.setattr("gopher_mcp.gemini_tls.PROBE_TIMEOUT_SECONDS", 0.05)
         reader = asyncio.StreamReader()
         reader.feed_data(b"x" * 1024)  # no feed_eof: connection stays open
+        with pytest.raises(TLSConnectionError, match="may be truncated"):
+            await GeminiTLSClient().receive_data(_conn(reader=reader), max_size=1024)
+
+    @pytest.mark.asyncio
+    async def test_receive_truncates_at_max_when_asked(self, monkeypatch):
+        """The robots.txt lookup asks for truncate-and-parse (RFC 9309 s2.5), so
+        the prefix is returned instead of raising -- and without paying the
+        probe, since the caller has already accepted a partial read."""
+        monkeypatch.setattr("gopher_mcp.gemini_tls.PROBE_TIMEOUT_SECONDS", 30.0)
+        reader = asyncio.StreamReader()
+        reader.feed_data(b"x" * 4096)  # no feed_eof: more is pending
         result = await GeminiTLSClient().receive_data(
-            _conn(reader=reader), max_size=1024
+            _conn(reader=reader), max_size=1024, truncate_at_max=True
         )
         assert result == b"x" * 1024
 
@@ -295,17 +310,16 @@ class TestConnectionInfo:
         ssl_obj.getpeercert.return_value = b"fake_cert_data"
         ssl_obj.cipher.return_value = ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256)
         ssl_obj.version.return_value = "TLSv1.3"
-        ssl_obj.server_hostname = "example.org"
 
         info = GeminiTLSClient()._get_connection_info(ssl_obj, 1.5)
 
         assert info["connection_time"] == 1.5
         assert info["tls_version"] == "TLSv1.3"
         assert info["cipher"] == "TLS_AES_256_GCM_SHA384"
-        assert info["cipher_strength"] == 256
-        assert info["sni_hostname"] == "example.org"
         expected = "sha256:" + hashlib.sha256(b"fake_cert_data").hexdigest()
         assert info["cert_fingerprint"] == expected
+        # Only what a caller reads is kept; the DER blob in particular is not.
+        assert "peer_cert_der" not in info
 
     def test_get_connection_info_error(self):
         ssl_obj = Mock()
@@ -483,13 +497,25 @@ class TestConnectPinnedIp:
     @pytest.mark.asyncio
     async def test_connect_uses_pinned_ip_not_hostname(self):
         client = GeminiTLSClient(TLSConfig())
-        # Unresolvable hostname, but pinned to loopback:closed-port. A refusal
-        # (not a DNS error) proves the pinned IP was used without re-resolving.
-        with pytest.raises(TLSConnectionError) as exc_info:
+        # Refused at the socket layer rather than by dialling a closed port:
+        # Windows lets a connection to one hang until the deadline instead of
+        # refusing it, which says nothing about the address that was dialled.
+        with (
+            patch(
+                "asyncio.open_connection", side_effect=ConnectionRefusedError
+            ) as open_connection,
+            pytest.raises(TLSConnectionError) as exc_info,
+        ):
             await client.connect(
                 "host.that.never.resolves.invalid",
                 1,
                 connect_ip="127.0.0.1",
                 timeout=2,
             )
+
+        # No DNS error: the unresolvable hostname was never looked up. It still
+        # has to reach SNI, or the server cannot select a certificate.
         assert "DNS" not in str(exc_info.value)
+        kwargs = open_connection.call_args.kwargs
+        assert kwargs["host"] == "127.0.0.1"
+        assert kwargs["server_hostname"] == "host.that.never.resolves.invalid"

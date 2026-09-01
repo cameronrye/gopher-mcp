@@ -158,3 +158,59 @@ async def test_fetch_gopher_connects_to_pinned_address():
             connect_addresses=["127.0.0.1"],
         )
     assert data == b"pinned\r\n"
+
+
+@pytest.mark.asyncio
+async def test_fetch_gopher_reports_cap_reached_without_burning_the_deadline():
+    """A body that fills the cap while the server holds the connection open is
+    reported as such, promptly. Reading one byte past the cap instead meant the
+    request stalled for the whole deadline and then discarded the buffered body
+    as a generic timeout, telling the caller nothing about what happened."""
+    stop = asyncio.Event()
+
+    async def handle(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        await reader.readline()
+        writer.write(b"x" * 1000)
+        await writer.drain()
+        await stop.wait()  # never closes
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    try:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(GopherProtocolError, match="may be truncated"):
+            await asyncio.wait_for(
+                fetch_gopher("127.0.0.1", port, "/", None, max_bytes=1000, timeout=30),
+                timeout=10,
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+    finally:
+        # Release the handler unconditionally: leaving it parked would make
+        # wait_closed() hang the suite whenever this assertion regresses.
+        stop.set()
+        server.close()
+        await server.wait_closed()
+
+    # Bounded by the probe, not by the 30s request deadline.
+    assert elapsed < 5
+
+
+@pytest.mark.asyncio
+async def test_fetch_gopher_truncates_at_max_when_asked():
+    """The robots.txt lookup asks for truncate-and-parse (RFC 9309 s2.5) rather
+    than an all-or-nothing read."""
+    server, port = await _serve(b"x" * 5000)
+    async with server:
+        data = await fetch_gopher(
+            "127.0.0.1",
+            port,
+            "/",
+            None,
+            max_bytes=1000,
+            timeout=5,
+            truncate_at_max=True,
+        )
+    assert data == b"x" * 1000

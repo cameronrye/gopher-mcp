@@ -9,12 +9,9 @@ import pytest
 from gopher_mcp.utils import (
     atomic_write_json,
     format_gemini_url,
-    format_gopher_url,
-    guess_mime_type,
     parse_gopher_menu,
     parse_gopher_url,
     parse_menu_line,
-    sanitize_selector,
     truncate_text,
 )
 
@@ -206,10 +203,34 @@ class TestParseMenuLine:
         assert result.title == "Test File"
 
     def test_insufficient_parts(self):
-        """Test parsing line with insufficient parts."""
+        """A short line whose first character is not the info type is junk: its
+        leading character is not reliably an item type, so it stays dropped."""
         line = "1About\t/about"  # Missing host and port
         result = parse_menu_line(line)
         assert result is None
+
+    def test_tabless_info_line_is_kept(self):
+        """'iSome banner text' with the trailing fields omitted is common enough
+        that lenient clients render it; it must not vanish from the menu."""
+        result = parse_menu_line("iSome banner text")
+
+        assert result is not None
+        assert result.type == "i"
+        assert result.title == "Some banner text"
+        assert result.selector == ""
+        assert result.host == ""
+        assert result.next_url == ""
+
+    def test_partially_tabbed_info_line_is_kept(self):
+        result = parse_menu_line("iBanner\t")
+
+        assert result is not None
+        assert result.title == "Banner"
+
+    def test_short_line_without_display_text_is_dropped(self):
+        """Nothing to render -> still None."""
+        assert parse_menu_line("i") is None
+        assert parse_menu_line("\t") is None
 
     def test_invalid_port(self):
         """Test parsing line with invalid port."""
@@ -287,7 +308,7 @@ iThis is information\t\terror.host\t1
     def test_menu_with_invalid_lines(self):
         """Test parsing menu with some invalid lines."""
         content = """1Valid\t/valid\texample.com\t70
-invalid line
+0invalid line
 0Another Valid\t/valid2\texample.com\t70
 """
         result = parse_gopher_menu(content)
@@ -295,6 +316,23 @@ invalid line
         assert len(result) == 2
         assert result[0].title == "Valid"
         assert result[1].title == "Another Valid"
+
+    def test_menu_keeps_tabless_info_lines(self):
+        """A banner written without the trailing tab fields must still appear."""
+        content = (
+            "1Valid\t/valid\texample.com\t70\r\n"
+            "iWelcome to the archive\r\n"
+            "0README\t/README\texample.com\t70\r\n"
+            ".\r\n"
+        )
+        result = parse_gopher_menu(content)
+
+        assert [item.title for item in result] == [
+            "Valid",
+            "Welcome to the archive",
+            "README",
+        ]
+        assert result[1].type == "i"
 
     def test_stops_at_terminator(self):
         """RFC 1436: the lone '.' line terminates the menu. Anything after it
@@ -323,90 +361,6 @@ invalid line
 
         assert len(result) == 1
         assert result[0].title == "Before"
-
-
-class TestSanitizeSelector:
-    """Test sanitize_selector function."""
-
-    def test_valid_selector(self):
-        """Test sanitizing valid selector."""
-        selector = "/path/to/file.txt"
-        result = sanitize_selector(selector)
-        assert result == selector
-
-    def test_selector_with_tab(self):
-        """Test selector with forbidden tab character."""
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector("/path\t/file")
-        assert "forbidden character" in str(exc_info.value)
-
-    def test_selector_with_newline(self):
-        """Test selector with forbidden newline character."""
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector("/path\n/file")
-        assert "forbidden character" in str(exc_info.value)
-
-    def test_selector_with_carriage_return(self):
-        """Test selector with forbidden carriage return character."""
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector("/path\r/file")
-        assert "forbidden character" in str(exc_info.value)
-
-    def test_selector_too_long(self):
-        """Test selector that is too long."""
-        long_selector = "a" * 256
-        with pytest.raises(ValueError) as exc_info:
-            sanitize_selector(long_selector)
-        assert "too long" in str(exc_info.value)
-
-    def test_selector_max_length(self):
-        """Test selector at maximum allowed length."""
-        max_selector = "a" * 255
-        result = sanitize_selector(max_selector)
-        assert result == max_selector
-
-
-class TestFormatGopherUrl:
-    """Test format_gopher_url function."""
-
-    def test_basic_url(self):
-        """Test formatting basic URL."""
-        result = format_gopher_url("example.com")
-        assert result == "gopher://example.com/1"
-
-    def test_url_with_custom_port(self):
-        """Test formatting URL with custom port."""
-        result = format_gopher_url("example.com", port=7070)
-        assert result == "gopher://example.com:7070/1"
-
-    def test_url_with_selector(self):
-        """Test formatting URL with selector."""
-        result = format_gopher_url("example.com", selector="/path/file.txt")
-        assert result == "gopher://example.com/1/path/file.txt"
-
-    def test_url_with_search(self):
-        """Test formatting URL with search."""
-        result = format_gopher_url("example.com", gopher_type="7", search="test query")
-        assert result == "gopher://example.com/7%09test query"
-
-    def test_url_search_ignored_for_non_search_type(self):
-        """Test that search is ignored for non-search types."""
-        result = format_gopher_url("example.com", gopher_type="1", search="test")
-        assert result == "gopher://example.com/1"
-
-    def test_ipv6_host_is_bracketed(self):
-        """An IPv6 literal host must be wrapped in brackets per RFC 3986.
-
-        Without brackets the colons in the address collide with the port
-        separator, producing a URL that re-parses incorrectly.
-        """
-        result = format_gopher_url("::1", port=70)
-        assert result == "gopher://[::1]/1"
-
-    def test_ipv6_host_with_port_is_bracketed(self):
-        """Brackets must separate an IPv6 host from an explicit port."""
-        result = format_gopher_url("2001:db8::1", port=7070)
-        assert result == "gopher://[2001:db8::1]:7070/1"
 
 
 class TestFormatGeminiUrl:
@@ -439,51 +393,72 @@ class TestParseMenuLineIPv6:
         assert parsed.port == 70
 
 
-class TestGuessMimeType:
-    """Test guess_mime_type function."""
+class TestParseMenuLineItemTypeRoundTrip:
+    """The item-type character is server-controlled and must survive nextUrl."""
 
-    def test_text_type(self):
-        """Test MIME type for text."""
-        assert guess_mime_type("0") == "text/plain"
+    def test_question_mark_type_does_not_become_a_search(self):
+        """An unencoded '?' type turned the selector into a query string, so
+        following the link ran a SEARCH against the root selector."""
+        item = parse_menu_line("?Click here\t/sel\texample.com\t70")
 
-    def test_menu_type(self):
-        """Test MIME type for menu."""
-        assert guess_mime_type("1") == "text/gopher-menu"
+        assert item is not None
+        assert item.next_url == "gopher://example.com:70/%3F/sel"
+        parsed = parse_gopher_url(item.next_url)
+        assert parsed.gopher_type == "?"
+        assert parsed.selector == "/sel"
+        assert parsed.search is None
 
-    def test_search_type(self):
-        """Test MIME type for search."""
-        assert guess_mime_type("7") == "text/gopher-menu"
+    def test_hash_type_does_not_swallow_the_selector(self):
+        """An unencoded '#' type made the selector vanish into a fragment."""
+        item = parse_menu_line("#Weird\t/sel\texample.com\t70")
 
-    def test_image_types(self):
-        """Test MIME types for images."""
-        assert guess_mime_type("g") == "image/gif"
-        assert guess_mime_type("I") == "image/jpeg"
+        assert item is not None
+        parsed = parse_gopher_url(item.next_url)
+        assert parsed.gopher_type == "#"
+        assert parsed.selector == "/sel"
 
-    def test_unknown_type(self):
-        """Test MIME type for unknown type."""
-        assert guess_mime_type("X") == "application/octet-stream"
+    def test_control_char_type_is_not_embedded_raw(self):
+        item = parse_menu_line("\x1bEsc\t/sel\texample.com\t70")
 
-    def test_extension_override(self):
-        """Test that file extension overrides type mapping."""
-        assert guess_mime_type("9", "file.jpg") == "image/jpeg"
-        assert guess_mime_type("9", "file.png") == "image/png"
-        assert guess_mime_type("9", "file.pdf") == "application/pdf"
+        assert item is not None
+        assert "\x1b" not in item.next_url
+        assert parse_gopher_url(item.next_url).gopher_type == "\x1b"
 
-    def test_no_extension(self):
-        """Test selector without extension."""
-        assert guess_mime_type("9", "somefile") == "application/octet-stream"
+    def test_ordinary_type_stays_literal(self):
+        item = parse_menu_line("1About\t/about\texample.com\t70")
+        assert item is not None
+        assert item.next_url == "gopher://example.com:70/1/about"
 
-    def test_unknown_extension(self):
-        """Test selector with unknown extension."""
-        # This should use the gopher type mapping, not extension override
-        assert guess_mime_type("0", "file.unknown") == "text/plain"
-        assert guess_mime_type("9", "file.xyz") == "application/octet-stream"
 
-    def test_extension_case_insensitive(self):
-        """Test that extension matching is case insensitive."""
-        assert guess_mime_type("9", "file.JPG") == "image/jpeg"
-        assert guess_mime_type("9", "file.PNG") == "image/png"
-        assert guess_mime_type("9", "file.PDF") == "application/pdf"
+class TestMenuItemSanitization:
+    """Server-controlled menu fields must not carry control characters."""
+
+    def test_ansi_escape_stripped_from_title(self):
+        """A hostile server can put an OSC/CSI sequence in every menu title."""
+        item = parse_menu_line("1\x1b]0;pwned\x07Evil\t/x\texample.com\t70")
+
+        assert item is not None
+        assert item.title == "]0;pwnedEvil"
+
+    def test_control_chars_stripped_from_selector_and_next_url(self):
+        item = parse_menu_line("1Title\t/se\x00l\x1b[31m\texample.com\t70")
+
+        assert item is not None
+        assert item.selector == "/sel[31m"
+        assert item.next_url == "gopher://example.com:70/1/sel%5B31m"
+
+    def test_control_chars_stripped_from_host(self):
+        item = parse_menu_line("1Title\t/x\texam\x07ple.com\t70")
+
+        assert item is not None
+        assert item.host == "example.com"
+        assert item.next_url == "gopher://example.com:70/1/x"
+
+    def test_tabless_info_line_is_sanitized(self):
+        item = parse_menu_line("iBan\x1b[2Jner")
+
+        assert item is not None
+        assert item.title == "Ban[2Jner"
 
 
 class TestGopherUrlPortAndSelectorHandling:

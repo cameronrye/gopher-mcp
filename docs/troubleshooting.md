@@ -70,6 +70,9 @@ export GOPHER_TIMEOUT_SECONDS=60
 export GEMINI_TIMEOUT_SECONDS=60
 ```
 
+!!! note
+    `GEMINI_TIMEOUT_SECONDS` is one budget for the whole fetch — DNS, connect and handshake, trust-store write, send and read all draw down the same deadline, and with `GEMINI_RESPECT_ROBOTS_TXT=true` the `/robots.txt` probe spends from it as well. If you enable robots checking against a slow capsule, raise the timeout rather than expecting each step to get the full value.
+
 ### Connection Refused
 
 **Problem:** Connections fail with "connection refused" errors.
@@ -184,6 +187,23 @@ Verify which variables are set and restart the server after changing them:
 env | grep -E 'GOPHER|GEMINI'
 ```
 
+### Server Refuses to Start on a Configuration Value
+
+**Problem:** Startup fails with an error naming an environment variable.
+
+**Solution:** Some values cannot be applied safely and are rejected at startup rather than silently ignored:
+
+- An allowlist that names nothing — `GOPHER_ALLOWED_HOSTS=" , "`, or `GEMINI_ALLOWED_PORTS="$A,$B"` where the shell variables are empty. An empty allowlist is indistinguishable from an absent one, so it would quietly drop the restriction you meant to apply. **Unset** the variable to allow everything.
+- A port outside `1`–`65535` in a `*_ALLOWED_PORTS` list. It could never match a request, so every fetch would be refused at runtime instead.
+
+```bash
+# Wrong: expands to an empty list and fails startup
+export GOPHER_ALLOWED_HOSTS="$PRIMARY_HOST,$BACKUP_HOST"
+
+# Right: unset it, or name at least one host
+unset GOPHER_ALLOWED_HOSTS
+```
+
 ### Enabling Debug Logging
 
 **Problem:** You need more detail to diagnose an issue.
@@ -204,11 +224,13 @@ Gemini relies on TLS and Trust-on-First-Use (TOFU) certificate validation, which
 A few quick reference points:
 
 - The TOFU trust store is a JSON file at `~/.gemini/tofu.json` by default.
-- Generated client certificates are stored under `~/.gemini/certs/` by default.
-- If a server's certificate has legitimately changed and you trust the new one, you can reset trust by removing that host's entry from `~/.gemini/tofu.json` (or deleting the file to reset all stored fingerprints). The next connection re-establishes trust on first use.
+- Client certificates are stored under `~/.gemini/certs/` by default. One that already covers a host/port/path scope is attached automatically, and the fetch path never creates one, so a capsule answering status 60 needs an explicit **`gemini_client_cert_update`** call. **`gemini_client_cert_list`** (read-only) shows which scopes already hold an identity and whether each has expired.
+- Creating a client certificate gives the user a persistent pseudonymous identity on that capsule, sent on every in-scope request from then on, so ask before creating one and never do it because a fetched page asked. Creation refuses to replace an in-scope certificate — the private key cannot be recovered — and removal requires naming the fingerprint being destroyed.
+- If a server's certificate has changed, use the trust-store tools rather than editing the file. **`gemini_trust_list`** (read-only) reports what is pinned for a host, when it was first seen and when it expires. **`gemini_trust_update`** then removes or replaces that one host's pin — `action="remove"` requires the fingerprint currently pinned, so a pin cannot be dropped without naming what is being dropped. The next fetch re-establishes trust on first use.
+- A changed fingerprint is often a routine reissue — self-signed Gemini certificates rotate at expiry — but it is also what an active machine-in-the-middle attack looks like, and the two are indistinguishable from the client. Confirm the new certificate out of band before changing a pin, and never on the say-so of a fetched page.
 
 !!! note
-    Both paths are configurable; the values above are the defaults. Removing a TOFU entry only resets stored trust — it does not disable TOFU validation.
+    Both paths are configurable; the values above are the defaults. Changing a pin only resets stored trust for that host — it does not disable TOFU validation, and it does mean that host's identity is no longer checked against the certificate previously trusted.
 
 ## Performance
 
@@ -230,7 +252,9 @@ export GOPHER_MAX_CACHE_ENTRIES=2000
 export GEMINI_MAX_CACHE_ENTRIES=2000
 ```
 
-If you are seeing stale content, lower the TTL or temporarily set `*_CACHE_ENABLED=false`.
+If you are seeing stale content, lower the TTL or temporarily set `*_CACHE_ENABLED=false`. Setting a TTL of `0` also disables caching — an entry stored with a zero lifetime would expire the instant it was written, so the cache is switched off instead.
+
+You usually do not need to reconfigure anything: a result served from the cache says so. Cacheable results carry `cached`, `cached_at` (when the copy was actually fetched) and `cache_age_seconds`, and `gopher_fetch` / `gemini_fetch` take a `refresh` argument that skips the cache for that one call while still repopulating it.
 
 ### Rate Limiting
 

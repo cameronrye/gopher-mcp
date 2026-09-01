@@ -7,6 +7,211 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-01
+
+### Added
+
+- `robots.txt` support for both protocols, **opt-in and off by default**: set
+  `GOPHER_RESPECT_ROBOTS_TXT` or `GEMINI_RESPECT_ROBOTS_TXT` to `true` to enable
+  it (both default to `false`, because it costs a round-trip per host). An
+  upgraded deployment does not honour `robots.txt` until you set them. Gopher
+  honours the `gopher-mcp` and generic `*` user-agents, per the Veronica-2
+  convention; Gemini honours those plus the companion specification's
+  `webproxy` and `indexer` virtual agents, so an existing
+  `User-agent: indexer` group on a capsule now applies to this client.
+  `GOPHER_ROBOTS_HONOR_AI_TOKENS` / `GEMINI_ROBOTS_HONOR_AI_TOKENS` (default
+  `true` — the one robots-related default that is on) additionally honour rules
+  aimed at named AI-crawler tokens such as `ClaudeBot`, `GPTBot` and `CCBot`,
+  and `GOPHER_ROBOTS_CACHE_TTL_SECONDS` / `GEMINI_ROBOTS_CACHE_TTL_SECONDS`
+  (default `86400`, the maximum RFC 9309 §2.4 permits) set how long a fetched
+  policy stays valid. Gopher fails open when a policy cannot be retrieved;
+  Gemini fails closed, per RFC 9309.
+- New `error.code` values a client can now receive: `BLOCKED_BY_ROBOTS` on both
+  protocols (only when `RESPECT_ROBOTS_TXT` is on), `CERTIFICATE_STORE_UNAVAILABLE`
+  when a trust or certificate store cannot be read or is locked by another
+  process, and — from the four new certificate tools — `TOFU_DISABLED`,
+  `CLIENT_CERTS_DISABLED`, `FINGERPRINT_MISMATCH` and `CERTIFICATE_EXISTS`. A
+  script switching on `error["code"]` needs a branch for each;
+  `docs/api-reference.md` documents them all.
+- Fetch results say whether they came from cache and when the copy was
+  originally fetched, and `gopher_fetch` / `gemini_fetch` take a `refresh`
+  argument that bypasses the cache for one request while still repopulating it.
+  A model can no longer mistake a five-minute-old page for the current one.
+- `gemini_trust_list` and `gemini_trust_update` tools make a legitimate
+  certificate rotation recoverable. Self-signed Gemini certificates are
+  reissued routinely, and until now a rotation produced a `CERTIFICATE_CHANGED`
+  error whose only remedy was hand-editing the TOFU store on disk. Listing is
+  read-only; removing a pin requires naming the fingerprint being replaced, so
+  the tool cannot be used to wave away an unexpected certificate change.
+- `gemini_client_cert_list` and `gemini_client_cert_update` tools make a
+  capsule that replies status 60 reachable. The fetch path only ever looked up
+  an existing client certificate and nothing generated one, so the model
+  retried, got 60 again, and there was no supported way forward. A status-60
+  result now also carries the next step, so the tools are discoverable at the
+  moment they are needed. Creation is never automatic: a client certificate is
+  a persistent pseudonymous identity attached to every in-scope request, so
+  minting one because a server asked would let any capsule make the user
+  identifiable. The scope is the URL that failed and everything below it,
+  creation refuses to replace an identity whose private key is unrecoverable,
+  and removal must name the fingerprint it destroys.
+
+### Security
+
+- A Gemini client certificate is no longer attached to requests outside its
+  scope. Scope matching ran on the raw request path, so a certificate scoped to
+  `/app` was sent with a request for `/app/../secret` — which the server
+  resolves outside that scope — and a hostile capsule needed only to publish
+  such a link to make the user's identity leak. Paths (including `%2e`-encoded
+  dot segments) are now normalized before any scope decision.
+- Two client certificates minted for the same host within one second no longer
+  share a key pair. Certificate files were named from the host and a
+  whole-second timestamp, so the second write destroyed the first identity's
+  private key unrecoverably and left it reporting a fingerprint no server would
+  ever present. Filenames are now unique per identity and a residual collision
+  fails rather than truncating a key.
+- Server-controlled text is stripped of control characters before it reaches
+  the model. Gopher menu titles, selectors and hosts, Gemini text and gemtext
+  bodies, and every status-meta string (input prompts, error and certificate
+  messages) could previously carry ANSI/OSC escape sequences; only the Gopher
+  text path was filtered. The latin-1 decode fallback could also synthesise C1
+  control characters from high bytes.
+- A sensitive `input` answer no longer reaches the logs. When the URL built
+  from `url` plus the answer failed validation, the returned and logged
+  pydantic error embedded the tail of the offending value — so the end of a
+  password answered to a status-11 prompt was written to the log file.
+- An allowlist that names no hosts (`" , "`, or `"$A,$B"` with empty shell
+  interpolations) is now a startup error instead of silently meaning "no
+  restriction at all". The same misconfiguration on ports already failed
+  closed, so the two knobs behaved oppositely. The library API changed with it:
+  an explicitly empty allowlist passed to a client constructor —
+  `GopherClient(allowed_hosts=[])` or `GeminiClient(allowed_hosts=[])` — used to
+  mean allow-all and now denies every host. Only `None` (the default) means "no
+  restriction".
+- DNS resolution runs on its own bounded thread pool. A cancelled lookup leaves
+  its worker parked in the resolver, so a batch naming tarpit hosts could pin
+  every thread in the event loop's shared executor and stall unrelated fetches
+  on both protocols long past their deadlines.
+
+### Fixed
+
+- The `mcp` dependency is capped below 2.x, so `pip install gopher-mcp` yields
+  a server that starts. mcp 2.x renamed `FastMCP` to `MCPServer`, so the
+  unbounded `mcp>=1.0.0` resolved to a release this code cannot import against.
+  CI never saw it, because `uv sync --locked` installs the locked 1.x; a user
+  installing from PyPI got an immediate `ModuleNotFoundError`. Lifting the cap
+  means migrating to the 2.x API.
+- An empty value for an optional path setting is read as unset rather than as
+  the current directory. `GOPHER_MCP_LOG_FILE_PATH=` — the natural way to write
+  "leave this at the default", and how the shipped `config/example.env` had it
+  — became `Path(".")`, which logging then tried to open as a file, so copying
+  the example config stopped the server from starting.
+- `GEMINI_DENIED_MIME_TYPES` in its documented comma-separated form crashed the
+  server at startup: the field's annotation made pydantic-settings JSON-decode
+  the value before the parsing validator could run. All three list-valued
+  variables now accept both the comma-separated and JSON-array spellings.
+- The Gemini request timeout is one budget for the whole exchange. It was
+  applied independently to DNS, the handshake, the send and the read — and
+  again to the `robots.txt` probe — so an adversarial server could hold a tool
+  call for many times the configured value.
+- TOFU trust-store persistence no longer runs on the event loop. A
+  cross-process lock, a full store re-read and two `fsync` calls ran inline on
+  every first contact with a host, stalling all in-flight requests; a wedged
+  lock holder in another instance froze the process indefinitely. The lock wait
+  is now bounded.
+- An oversized `robots.txt` is truncated and parsed as RFC 9309 expects. Under
+  Gemini's fail-closed policy it previously made an entire capsule permanently
+  unreachable while re-downloading the file on every request.
+- A bare two-digit Gemini failure status (`51`, valid per the ABNF for 4x/5x/6x
+  replies) is no longer reported as a malformed response, which told the model
+  the server misbehaved instead of that the page was missing.
+- A menu item's type character survives the round trip into `next_url`. A `?`
+  type turned a link into a search against the root selector, and a `#` type
+  discarded the selector entirely.
+- Gemtext links resolve against the request URL. Relative links are the norm in
+  gemtext, so the model was handed targets it could not fetch.
+- An SSRF-blocked target reports as blocked rather than as an unretrievable
+  `robots.txt` that suggests turning robots checking off, and a connect timeout
+  reports as a timeout rather than as a TLS failure.
+- Neither transport can now return a truncated body as complete, or discard a
+  complete response as a timeout, when a response lands exactly on the size cap.
+- Gemini fails over across resolved addresses instead of trying only the first,
+  so a dual-homed capsule whose first address is down is still reachable.
+- A per-host `robots.txt` lock can no longer be swept while coroutines are
+  still queued on it, which let two requests fetch the same policy at once.
+- Extra `#` characters in a gemtext heading stay part of the heading text,
+  bare-CR gemtext is normalised, the Gemini URL length cap no longer counts the
+  CRLF against the spec's 1024 bytes, and text beginning `BM`, `MZ` or `ID3` is
+  no longer classified as binary and withheld from the model.
+
+### Changed
+
+- **Per-host rate limiting and the concurrency cap are now on by default.**
+  `GOPHER_REQUESTS_PER_MINUTE` and `GEMINI_REQUESTS_PER_MINUTE` now default to
+  `60` (one request per second, per host) instead of `0`, and
+  `GOPHER_MAX_CONCURRENT_REQUESTS` / `GEMINI_MAX_CONCURRENT_REQUESTS` to `5`
+  instead of `0`. Both settings shipped in 0.4.0 and defaulted to
+  off/unlimited through 0.5.1, so this is a change of default rather than a new
+  feature — and it changes the throughput of every existing deployment without
+  any configuration edit. Requests to the same host are paced, so a batch aimed
+  at a single server is spaced out rather than parallel; batching across
+  several hosts is where the speedup now comes from. Set all four variables to
+  `0` to restore the 0.5.x behaviour.
+- A short, malformed Gopher menu line now yields an info item instead of being
+  dropped, so tool output visibly changes. A line with fewer than four
+  tab-separated fields that begins with `i` and carries text — a bare
+  `iBanner text`, common on real menus — becomes an info item with an empty
+  selector, host and `nextUrl` and port `0`; any other short line is still
+  discarded. `items` lists are therefore longer than before, which shifts item
+  counts and where `GOPHER_MAX_MENU_ITEMS` truncation falls.
+- A cache TTL of `0` disables caching, matching the "0 means off" convention of
+  the neighbouring settings, instead of storing entries that expire before they
+  can ever be served. A port outside 1-65535 in an allowlist is a startup error
+  rather than a configuration that rejects every request at fetch time.
+- The `gopher_fetch` and `gemini_fetch` tool descriptions now state how to
+  submit a type-7 search, what batching does and does not parallelise, and that
+  fetched content is untrusted third-party data.
+- `ErrorResult` and `GeminiErrorResult` are one model; `GeminiErrorResult`
+  remains as an alias. The split had already caused drift — Gopher errors could
+  not carry the integer fields Gemini errors use.
+- The Docker image is built on `python:3.13-slim` instead of `python:3.14-slim`,
+  which was outside the tested matrix, and CI now builds and smoke-tests the
+  image on every pull request — nothing did before, so breakage reached users
+  first. Dependabot is pinned to patch bumps of the base image so it cannot
+  reopen that gap.
+- Release-pipeline changes: `pip-audit` is advisory in the pull-request and
+  release paths, with a nightly audit that files a tracking issue, so an
+  advisory published against a pinned dependency no longer turns unrelated
+  pull requests red or blocks a release. The GitHub Release is created only
+  after the PyPI upload succeeds, closing a window in which a declined approval
+  left a public release advertising a version PyPI could not serve.
+
+### Removed
+
+- Helpers that no production code called: `guess_mime_type`,
+  `format_gopher_url`, `sanitize_selector` (whose hardcoded 255-character cap
+  contradicted the client's configurable 1024-character limit),
+  `validate_gemini_url_components`, and `TOFUManager.cleanup_expired` /
+  `ClientCertificateManager.cleanup_expired`. `sanitize_display_text` and
+  `resolve_gemini_reference` are now exported from `gopher_mcp.utils`.
+- Uncalled computed members of the result models, which raise `AttributeError`
+  if read: `GeminiMimeType.is_image`, `.is_audio`, `.is_video`,
+  `.is_application`, `.supports_charset()` and `.get_file_extension()`;
+  `GemtextLink.is_external`; and `GemtextDocument.link_count`, `.has_headings`,
+  `.line_count`, `.content_summary`, `.heading_hierarchy` and `.text_content`.
+  None of them were ever serialized into `model_dump()`, so **MCP tool output
+  is unchanged and no tool user is affected** — only code importing
+  `gopher_mcp.models` directly.
+- The `allowed_hosts` keyword parameter of `ssrf.validate_target`; passing it
+  now raises `TypeError`. It duplicated a check the clients already perform in
+  `_validate_security`, against a set normalized once at construction, and only
+  the duplicate had test coverage. The `GOPHER_ALLOWED_HOSTS` /
+  `GEMINI_ALLOWED_HOSTS` settings are unaffected.
+- Embedders using the library directly should note that
+  `ClientCertificateManager` now names certificate files by a random `key_id`
+  rather than by subject, rolls a failed store write back instead of leaving
+  the registry and the disk disagreeing, and raises when a private key survives
+  its removal. `docs/migration-guide.md` covers these.
+
 ## [0.5.1] - 2026-06-22
 
 ### Security
@@ -461,10 +666,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.3...v0.5.0
-[0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.0...v0.4.1
-[0.4.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.0
+[0.4.3]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.2...v0.4.3
+[0.4.2]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.1...v0.4.2
+[0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.1
+[0.4.0]: https://github.com/cameronrye/gopher-mcp/releases/tag/v0.4.1
 [0.3.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.1.0...v0.2.1

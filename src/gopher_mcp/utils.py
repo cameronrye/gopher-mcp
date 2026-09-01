@@ -17,28 +17,26 @@ from .gemini_parse import (
     parse_gemini_response,
     parse_gemini_url,
     process_gemini_response,
-    validate_gemini_url_components,
 )
 from .gemtext import parse_gemtext
 from .gopher_parse import (
-    format_gopher_url,
     gopher_type_category,
     parse_gopher_menu,
     parse_gopher_url,
     parse_menu_line,
-    sanitize_selector,
 )
 from .helpers import (
     atomic_write_json,
     bracket_host,
     get_home_directory,
     normalize_cache_key,
+    resolve_gemini_reference,
+    sanitize_display_text,
     truncate_text,
 )
 from .mime import (
     detect_binary_mime_type,
     get_default_gemini_mime_type,
-    guess_mime_type,
     mime_is_denied,
     parse_gemini_mime_type,
     validate_gemini_mime_type,
@@ -49,11 +47,9 @@ __all__ = [
     "bracket_host",
     "detect_binary_mime_type",
     "format_gemini_url",
-    "format_gopher_url",
     "get_default_gemini_mime_type",
     "get_home_directory",
     "gopher_type_category",
-    "guess_mime_type",
     "mime_is_denied",
     "normalize_cache_key",
     "parse_gemini_mime_type",
@@ -64,8 +60,8 @@ __all__ = [
     "parse_gopher_url",
     "parse_menu_line",
     "process_gemini_response",
-    "sanitize_selector",
+    "resolve_gemini_reference",
+    "sanitize_display_text",
     "truncate_text",
     "validate_gemini_mime_type",
-    "validate_gemini_url_components",
 ]

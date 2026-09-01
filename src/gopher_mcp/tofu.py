@@ -4,6 +4,7 @@ import contextlib
 import hmac
 import json
 import os
+import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -33,8 +34,15 @@ logger = structlog.get_logger(__name__)
 # touch is throttled.
 SAVE_THROTTLE_SECONDS = 60.0
 
+# Bounded wait for the cross-process store lock. ``flock(LOCK_EX)`` has no
+# timeout, so a second instance that wedged while holding ~/.gemini/tofu.json.lock
+# would block this one forever with no error at all; poll with LOCK_NB instead
+# and fail loudly once the budget is spent.
+LOCK_TIMEOUT_SECONDS = 5.0
+LOCK_POLL_INTERVAL_SECONDS = 0.05
 
-def _canon_fingerprint(fingerprint: str) -> str:
+
+def canonicalize_fingerprint(fingerprint: str) -> str:
     """Canonicalize a SHA-256 certificate fingerprint to one comparable form.
 
     The wire path always produces ``hashlib.sha256(...).hexdigest()`` (lowercase,
@@ -109,6 +117,16 @@ def _parse_not_before(cert_info: dict[str, Any] | None) -> float | None:
     return None
 
 
+class TOFUStorageError(Exception):
+    """The trust store could not be locked for writing.
+
+    Deliberately NOT a :class:`TOFUValidationError`: the certificate itself was
+    never in question, we simply could not record or refresh the pin. Raised
+    rather than swallowed so a wedged lock holder is visible instead of silently
+    turning persistence off (which would re-arm blind trust-on-first-use).
+    """
+
+
 class TOFUValidationError(Exception):
     """Exception raised for TOFU validation failures."""
 
@@ -172,6 +190,10 @@ class TOFUManager:
         self._entries: dict[str, TOFUEntry] = {}
         # Throttle best-effort last_seen flushes (see validate_certificate).
         self._last_save_time = 0.0
+        # The Gemini client runs validate_certificate under asyncio.to_thread
+        # (the load-merge-write cycle blocks), so two requests can now be inside
+        # this manager at once. Reentrant because the mutators call _save_entries.
+        self._lock = threading.RLock()
         self._load_entries()
 
     def _get_key(self, host: str, port: int) -> str:
@@ -204,7 +226,7 @@ class TOFUManager:
             # written before normalization (or edited by a human in colon form)
             # still matches the wire digest.
             for entry in entries.values():
-                entry.fingerprint = _canon_fingerprint(entry.fingerprint)
+                entry.fingerprint = canonicalize_fingerprint(entry.fingerprint)
         except Exception as e:
             logger.error("TOFU storage is corrupt or unreadable", error=str(e))
             raise TOFUValidationError(
@@ -228,6 +250,10 @@ class TOFUManager:
         ``fcntl`` is unavailable (e.g. Windows): the atomic rename still
         prevents torn files there; only the cross-process merge guarantee is
         relaxed.
+
+        Raises:
+            TOFUStorageError: If the lock is still held after
+                ``LOCK_TIMEOUT_SECONDS``.
         """
         if fcntl is None:  # pragma: no cover - exercised only on non-POSIX
             yield
@@ -237,11 +263,25 @@ class TOFUManager:
         Path(lock_path).parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
         try:
-            lock.flock(fd, lock.LOCK_EX)
-            yield
+            deadline = time.monotonic() + LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    lock.flock(fd, lock.LOCK_EX | lock.LOCK_NB)
+                    break
+                except OSError as e:
+                    if time.monotonic() >= deadline:
+                        raise TOFUStorageError(
+                            f"Could not lock the TOFU trust store at {lock_path} "
+                            f"within {LOCK_TIMEOUT_SECONDS} seconds; another "
+                            f"process may be holding it"
+                        ) from e
+                    time.sleep(LOCK_POLL_INTERVAL_SECONDS)
+            try:
+                yield
+            finally:
+                with contextlib.suppress(OSError):
+                    lock.flock(fd, lock.LOCK_UN)
         finally:
-            with contextlib.suppress(OSError):
-                lock.flock(fd, lock.LOCK_UN)
             os.close(fd)
 
     def _read_disk_entries(self) -> dict[str, TOFUEntry]:
@@ -263,7 +303,7 @@ class TOFUManager:
             logger.warning("Ignoring unreadable TOFU store during merge", error=str(e))
             return {}
         for entry in entries.values():
-            entry.fingerprint = _canon_fingerprint(entry.fingerprint)
+            entry.fingerprint = canonicalize_fingerprint(entry.fingerprint)
         return entries
 
     def _save_entries(self, *, removed_keys: set[str] | None = None) -> None:
@@ -277,7 +317,7 @@ class TOFUManager:
         merge doesn't resurrect them from disk.
         """
         try:
-            with self._store_lock():
+            with self._lock, self._store_lock():
                 merged = {**self._read_disk_entries(), **self._entries}
                 if removed_keys:
                     for key in removed_keys:
@@ -313,12 +353,28 @@ class TOFUManager:
         Raises:
             TOFUValidationError: If validation fails critically
         """
+        # Serialized: the Gemini client runs this under asyncio.to_thread, so
+        # two requests could otherwise interleave the read-modify-write of
+        # ``_entries`` and the store merge behind it.
+        with self._lock:
+            return self._validate_certificate_locked(
+                host, port, cert_fingerprint, cert_info
+            )
+
+    def _validate_certificate_locked(
+        self,
+        host: str,
+        port: int,
+        cert_fingerprint: str,
+        cert_info: dict[str, Any] | None = None,
+    ) -> tuple[bool, str | None]:
+        """Body of :meth:`validate_certificate`; caller must hold ``_lock``."""
         key = self._get_key(host, port)
         current_time = time.time()
 
         # Normalize to one canonical form so a colon/uppercase representation
         # can never cause a spurious mismatch against the wire digest.
-        cert_fingerprint = _canon_fingerprint(cert_fingerprint)
+        cert_fingerprint = canonicalize_fingerprint(cert_fingerprint)
 
         existing_entry = self._entries.get(key)
 
@@ -399,12 +455,24 @@ class TOFUManager:
             # Check if certificate has changed (constant-time comparison)
             if not hmac.compare_digest(existing_entry.fingerprint, cert_fingerprint):
                 # Certificate has changed - this is a security concern
+                # Name the store and the entry: self-signed Gemini certificates
+                # are routinely reissued at expiry, and without a stated
+                # remedy a legitimate rotation bricks the host until someone
+                # finds the JSON on disk and hand-edits it. Only the fingerprint
+                # PREFIXES and the operator's own configured path appear here,
+                # and the client replaces this text with a sanitized message
+                # before it reaches a caller.
                 warning = (
                     f"Certificate for {host}:{port} has changed!\n"
                     f"Previous: {existing_entry.fingerprint[:16]}...\n"
                     f"Current:  {cert_fingerprint[:16]}...\n"
                     f"First seen: {datetime.fromtimestamp(existing_entry.first_seen, tz=UTC)}\n"
-                    f"This could indicate a security issue."
+                    f"This could indicate a security issue.\n"
+                    f"If the rotation is expected, drop the pin with the "
+                    f"gemini_trust_update tool (action='remove', host='{host}', "
+                    f"port={port}, and the fingerprint gemini_trust_list "
+                    f'reports) and reconnect; the "{key}" entry in the trust '
+                    f"store at {self.storage_path} can also be removed by hand."
                 )
 
                 logger.warning(
@@ -424,7 +492,18 @@ class TOFUManager:
             # at most once per SAVE_THROTTLE_SECONDS.
             existing_entry.last_seen = current_time
             if current_time - self._last_save_time >= SAVE_THROTTLE_SECONDS:
-                self._save_entries()
+                # Best effort: last_seen is bookkeeping, not trust state, so a
+                # store we cannot lock right now must not fail an otherwise
+                # valid request. A new pin (above) still fails closed.
+                try:
+                    self._save_entries()
+                except TOFUStorageError as e:
+                    logger.warning(
+                        "Could not refresh TOFU last_seen",
+                        host=host,
+                        port=port,
+                        error=str(e),
+                    )
                 self._last_save_time = current_time
 
             # Check if certificate is expired. By default this is advisory only
@@ -466,38 +545,39 @@ class TOFUManager:
         Raises:
             TOFUValidationError: If update is not allowed
         """
-        key = self._get_key(host, port)
-        current_time = time.time()
+        with self._lock:
+            key = self._get_key(host, port)
+            current_time = time.time()
 
-        # Normalize to one canonical form (see _canon_fingerprint).
-        cert_fingerprint = _canon_fingerprint(cert_fingerprint)
+            # Normalize to one canonical form (see canonicalize_fingerprint).
+            cert_fingerprint = canonicalize_fingerprint(cert_fingerprint)
 
-        existing_entry = self._entries.get(key)
+            existing_entry = self._entries.get(key)
 
-        if existing_entry and not force:
-            raise TOFUValidationError(
-                f"Certificate for {host}:{port} already exists. Use force=True to override."
-            )
+            if existing_entry and not force:
+                raise TOFUValidationError(
+                    f"Certificate for {host}:{port} already exists. Use force=True to override."
+                )
 
-        # Parse expiry if available
-        expires = _parse_expiry(cert_info)
+            # Parse expiry if available
+            expires = _parse_expiry(cert_info)
 
-        # Create or update entry
-        if existing_entry:
-            existing_entry.fingerprint = cert_fingerprint
-            existing_entry.last_seen = current_time
-            existing_entry.expires = expires
-        else:
-            self._entries[key] = TOFUEntry(
-                host=host,
-                port=port,
-                fingerprint=cert_fingerprint,
-                first_seen=current_time,
-                last_seen=current_time,
-                expires=expires,
-            )
+            # Create or update entry
+            if existing_entry:
+                existing_entry.fingerprint = cert_fingerprint
+                existing_entry.last_seen = current_time
+                existing_entry.expires = expires
+            else:
+                self._entries[key] = TOFUEntry(
+                    host=host,
+                    port=port,
+                    fingerprint=cert_fingerprint,
+                    first_seen=current_time,
+                    last_seen=current_time,
+                    expires=expires,
+                )
 
-        self._save_entries()
+            self._save_entries()
 
         logger.info(
             "Certificate updated",
@@ -517,18 +597,19 @@ class TOFUManager:
         Returns:
             True if certificate was removed, False if not found
         """
-        key = self._get_key(host, port)
+        with self._lock:
+            key = self._get_key(host, port)
 
-        if key in self._entries:
+            if key not in self._entries:
+                return False
+
             del self._entries[key]
             # Pass the removed key so the merge-with-disk step doesn't resurrect
             # it from a stale on-disk copy.
             self._save_entries(removed_keys={key})
 
-            logger.info("Certificate removed", host=host, port=port)
-            return True
-
-        return False
+        logger.info("Certificate removed", host=host, port=port)
+        return True
 
     def list_certificates(self) -> list[TOFUEntry]:
         """List all stored certificates.
@@ -536,26 +617,5 @@ class TOFUManager:
         Returns:
             List of TOFU entries
         """
-        return list(self._entries.values())
-
-    def cleanup_expired(self) -> int:
-        """Remove expired certificates.
-
-        Returns:
-            Number of certificates removed
-        """
-        current_time = time.time()
-        expired_keys = []
-
-        for key, entry in self._entries.items():
-            if entry.is_expired(current_time):
-                expired_keys.append(key)
-
-        for key in expired_keys:
-            del self._entries[key]
-
-        if expired_keys:
-            self._save_entries(removed_keys=set(expired_keys))
-            logger.info("Expired certificates removed", count=len(expired_keys))
-
-        return len(expired_keys)
+        with self._lock:
+            return list(self._entries.values())

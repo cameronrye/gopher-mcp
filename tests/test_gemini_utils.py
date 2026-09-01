@@ -3,11 +3,11 @@
 import pytest
 from pydantic import ValidationError
 
+from gopher_mcp.gemini_parse import normalize_gemini_path
 from gopher_mcp.models import GeminiFetchRequest, GeminiURL
 from gopher_mcp.utils import (
     format_gemini_url,
     parse_gemini_url,
-    validate_gemini_url_components,
 )
 
 
@@ -146,16 +146,73 @@ class TestGeminiURLParsing:
         with pytest.raises(ValueError, match="space"):
             parse_gemini_url("gemini://example.org/a b")
 
-    def test_url_wire_length_includes_crlf(self):
-        """The on-wire request is ``<url>\\r\\n``; the 1024-byte Gemini cap
-        covers the whole line, so the URL itself must be <= 1022 bytes."""
+    def test_url_length_cap_applies_to_the_url_itself(self):
+        """The spec bounds the <URL> at 1024 bytes and puts the CRLF terminator
+        on top of it, so 1023- and 1024-byte URLs are valid and only 1025 is
+        rejected."""
         base = "gemini://example.org/"  # 21 bytes
-        ok = base + "a" * (1022 - len(base))  # 1022-byte URL -> 1024 on wire
-        assert parse_gemini_url(ok).host == "example.org"
+        for size in (1023, 1024):
+            url = base + "a" * (size - len(base))
+            assert parse_gemini_url(url).host == "example.org"
 
-        too_long = base + "a" * (1023 - len(base))  # 1023-byte URL -> 1025 wire
+        too_long = base + "a" * (1025 - len(base))
         with pytest.raises(ValueError, match="1024 bytes"):
             parse_gemini_url(too_long)
+
+
+class TestGeminiPathNormalization:
+    """Dot segments are resolved before anything reads the path.
+
+    RFC 3986 section 5.2.4 says this belongs on the wire, and here it is also
+    what every path-scoped decision depends on -- the client certificate a
+    request carries most of all, since the path in a link is chosen by the
+    capsule serving it.
+    """
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("gemini://example.org/app/../secret", "/secret"),
+            ("gemini://example.org/app/./page.gmi", "/app/page.gmi"),
+            ("gemini://example.org/app/sub/../../secret", "/secret"),
+            # `.` is unreserved, so %2e is the same character to the capsule.
+            ("gemini://example.org/app/%2e%2e/secret", "/secret"),
+            ("gemini://example.org/app/%2E%2E/secret", "/secret"),
+            # Climbing above the root resolves to the root, never past it.
+            ("gemini://example.org/../../secret", "/secret"),
+            ("gemini://example.org/..", "/"),
+            ("gemini://example.org/app/..", "/"),
+            ("gemini://example.org/app/.", "/app/"),
+            # Empty segments are not dot segments and are left alone.
+            ("gemini://example.org/app//x", "/app//x"),
+            ("gemini://example.org/app/page.gmi", "/app/page.gmi"),
+        ],
+    )
+    def test_dot_segments_are_resolved(self, url, expected):
+        assert parse_gemini_url(url).path == expected
+
+    @pytest.mark.parametrize(
+        ("path", "expected"),
+        [
+            ("../secret", "secret"),
+            ("./page.gmi", "page.gmi"),
+            (".", ""),
+            ("..", ""),
+        ],
+    )
+    def test_a_relative_path_resolves_the_same_way(self, path, expected):
+        """RFC 3986's algorithm is implemented whole rather than clipped to the
+        absolute paths a Gemini URL happens to produce, so it stays correct for
+        any caller that reaches for it."""
+        assert normalize_gemini_path(path) == expected
+
+    def test_a_query_string_is_left_untouched(self):
+        """The query is the user's answer to a status-10/11 prompt, not a
+        hierarchy, so nothing in it is a path segment."""
+        parsed = parse_gemini_url("gemini://example.org/app/?a/../b")
+
+        assert parsed.path == "/app/"
+        assert parsed.query == "a/../b"
 
 
 class TestGeminiURLFormatting:
@@ -197,51 +254,6 @@ class TestGeminiURLFormatting:
             "example.org", port=7070, path="/search", query="q=gemini"
         )
         assert url == "gemini://example.org:7070/search?q=gemini"
-
-
-class TestGeminiURLValidation:
-    """Test Gemini URL component validation."""
-
-    def test_valid_components(self):
-        """Test validation of valid URL components."""
-        # Should not raise any exception
-        validate_gemini_url_components("example.org", 1965, "/path", "query=test")
-
-    def test_empty_host(self):
-        """Test that empty host is rejected."""
-        with pytest.raises(ValueError, match="Host cannot be empty"):
-            validate_gemini_url_components("", 1965, "/")
-
-    def test_whitespace_host(self):
-        """Test that whitespace-only host is rejected."""
-        with pytest.raises(ValueError, match="Host cannot be empty"):
-            validate_gemini_url_components("   ", 1965, "/")
-
-    def test_invalid_port_low(self):
-        """Test that port below 1 is rejected."""
-        with pytest.raises(ValueError, match="Port must be between 1 and 65535"):
-            validate_gemini_url_components("example.org", 0, "/")
-
-    def test_invalid_port_high(self):
-        """Test that port above 65535 is rejected."""
-        with pytest.raises(ValueError, match="Port must be between 1 and 65535"):
-            validate_gemini_url_components("example.org", 70000, "/")
-
-    def test_invalid_path(self):
-        """Test that path not starting with / is rejected."""
-        with pytest.raises(ValueError, match="Path must start with '/'"):
-            validate_gemini_url_components("example.org", 1965, "path")
-
-    def test_url_length_limit_validation(self):
-        """Test that resulting URL length is validated."""
-        # Create components that would result in a URL > 1024 bytes
-        # "gemini://example.org/" is 21 bytes, so path needs to be > 1003 bytes
-        long_path = "/" + "a" * 1010  # This will make the total URL > 1024 bytes
-
-        with pytest.raises(
-            ValueError, match="Resulting URL would exceed 1024 byte limit"
-        ):
-            validate_gemini_url_components("example.org", 1965, long_path)
 
 
 class TestGeminiURLModel:
@@ -414,17 +426,6 @@ class TestGeminiUtilityFunctions:
                 assert home_dir is not None
                 assert home_dir == Path("/tmp")
 
-    def test_guess_mime_type(self):
-        """Test MIME type guessing functionality."""
-        from gopher_mcp.utils import guess_mime_type
-
-        # Test various gopher types
-        assert guess_mime_type("0") == "text/plain"
-        assert guess_mime_type("1") == "text/gopher-menu"
-        assert guess_mime_type("g") == "image/gif"
-        assert guess_mime_type("I") == "image/jpeg"
-        assert guess_mime_type("9") == "application/octet-stream"
-
     def test_detect_binary_mime_type(self):
         """Test binary MIME type detection."""
         from gopher_mcp.utils import detect_binary_mime_type
@@ -469,43 +470,6 @@ class TestGeminiUtilityFunctions:
         assert document.lines[0].type == "heading1"
         assert document.lines[1].type == "text"
         assert document.lines[2].type == "link"
-
-    def test_format_gopher_url_with_search(self):
-        """Test Gopher URL formatting with search parameter."""
-        from gopher_mcp.utils import format_gopher_url
-
-        # Test with search parameter for type 7 (search)
-        url = format_gopher_url(
-            host="example.com",
-            port=70,
-            gopher_type="7",
-            selector="/search",
-            search="test query",
-        )
-
-        assert url == "gopher://example.com/7/search%09test query"
-
-    def test_format_gopher_url_non_standard_port(self):
-        """Test Gopher URL formatting with non-standard port."""
-        from gopher_mcp.utils import format_gopher_url
-
-        url = format_gopher_url(
-            host="example.com", port=7070, gopher_type="1", selector="/menu"
-        )
-
-        assert url == "gopher://example.com:7070/1/menu"
-
-    def test_guess_mime_type_with_selector(self):
-        """Test MIME type guessing with selector hints."""
-        from gopher_mcp.utils import guess_mime_type
-
-        # Test with file extension hints in selector
-        mime_type = guess_mime_type("0", "/documents/readme.txt")
-        assert mime_type == "text/plain"
-
-        # Test with image extension
-        mime_type = guess_mime_type("9", "/images/photo.jpg")
-        assert mime_type == "image/jpeg"
 
 
 class TestGeminiUrlPortHandling:
@@ -587,13 +551,48 @@ class TestGemtextParsingRobustness:
         assert line.type == "heading1"
         assert line.heading.text == "NoSpace"
 
-    def test_extra_hash_not_kept_in_heading_text(self):
+    def test_extra_hash_is_heading_content(self):
         from gopher_mcp.utils import parse_gemtext
 
-        # A 4th '#' is content, not a 4th level: cap at H3 and don't leak '#'.
+        # A 4th '#' is content, not a 4th level: cap the marker run at H3 and
+        # keep the remaining '#' as the first character of the heading text.
         line = parse_gemtext("#### four").lines[0]
         assert line.type == "heading3"
-        assert line.heading.text == "four"
+        assert line.heading.text == "# four"
+
+    def test_heading_content_hash_is_not_deleted(self):
+        """'####note' is an H3 whose text is '#note' -- the extra marker must not
+        be stripped along with the level markers."""
+        from gopher_mcp.utils import parse_gemtext
+
+        line = parse_gemtext("####note").lines[0]
+        assert line.type == "heading3"
+        assert line.heading.text == "#note"
+
+    def test_heading_content_hash_preserved_at_lower_levels(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        assert parse_gemtext("##note").lines[0].heading.text == "note"
+        assert parse_gemtext("###note").lines[0].heading.text == "note"
+        # Two markers then content: level 2 with a literal '#' kept is only
+        # possible from three markers, so check the H1 case explicitly.
+        line = parse_gemtext("#####x").lines[0]
+        assert line.heading.level == 3
+        assert line.heading.text == "##x"
+
+    def test_bare_cr_line_endings_are_normalized(self):
+        """A legacy CR-only page must still split into lines; otherwise every
+        heading and link collapses into a single text line."""
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("# Title\r=> /a A link\rbody")
+        assert [line.type for line in document.lines] == ["heading1", "link", "text"]
+
+    def test_stray_cr_does_not_survive_into_line_content(self):
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("before\rafter")
+        assert [line.content for line in document.lines] == ["before", "after"]
 
     def test_quote_strips_only_one_leading_space(self):
         from gopher_mcp.utils import parse_gemtext

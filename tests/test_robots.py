@@ -6,7 +6,10 @@ Gopher and Gemini clients.
 """
 
 import asyncio
+import re
 from unittest.mock import patch
+
+import pytest
 
 from gopher_mcp.gemini_client import GeminiClient
 from gopher_mcp.gopher_client import GopherClient
@@ -22,6 +25,7 @@ from gopher_mcp.robots import (
     GOPHER_TOKENS,
     RobotsGate,
     RobotsUnavailable,
+    _matches,
     gopher_candidate_paths,
     parse_robots,
 )
@@ -120,6 +124,81 @@ class TestMatching:
         policy = parse_robots("User-agent: *\nDisallow: /*.gmi$\n")
         assert policy.is_allowed(["/a/b.gmi"], ("*",)) is False
         assert policy.is_allowed(["/a/b.txt"], ("*",)) is True
+
+
+class TestWildcardMatcher:
+    """The greedy scan that stands in for a translated regular expression.
+
+    ``_matches`` trades ``re`` for a linear leftmost scan to stay ReDoS-safe
+    (see :func:`_matches`), so its equivalence to ``re.match`` of the same
+    pattern is a security property: under-matching would let the client fetch
+    resources a capsule disallowed. Every case here is cross-checked against
+    the regex the pattern translates to.
+    """
+
+    @staticmethod
+    def _via_regex(rule: str, path: str) -> bool:
+        """Match ``path`` the way a naive regex translation of ``rule`` would."""
+        anchored = rule.endswith("$")
+        pattern = rule[:-1] if anchored else rule
+        translated = ".*".join(re.escape(part) for part in pattern.split("*"))
+        return re.match(translated + ("$" if anchored else ""), path) is not None
+
+    @pytest.mark.parametrize(
+        ("rule", "path", "expected"),
+        [
+            # Leading segment must sit at the start of the path.
+            ("/a*b", "/ab", True),
+            ("/a*b", "/xa/b", False),
+            ("/a*b", "/", False),
+            # A single interior literal segment between two stars.
+            ("/a*mid*end", "/a-mid-end", True),
+            ("/a*mid*end", "/a-mid-and-then-end", True),
+            ("/a*mid*end", "/a-end", False),
+            ("/a*mid*end", "/a-mid-nope", False),
+            # The interior segment may not be found before the previous match.
+            ("/x*ab*ab", "/x-ab", False),
+            ("/x*ab*ab", "/x-abab", True),
+            # Several interior segments, matched leftmost in order.
+            ("/*a*b*c", "/zzazzbzzc", True),
+            ("/*a*b*c", "/zzczzbzza", False),
+            # A trailing star absorbs whatever is left, including nothing.
+            ("/private*", "/private", True),
+            ("/private*", "/private/notes.gmi", True),
+            ("/private*", "/public", False),
+            ("*", "/anything", True),
+            # Adjacent stars must behave like a single one.
+            ("/a**b", "/a-b", True),
+            ("/a**b", "/b-a", False),
+            ("/*****", "/deep/path", True),
+            # Overlapping literals: the tail may not reuse characters the head
+            # already consumed.
+            ("/aaa*aaa", "/aaaaa", False),
+            ("/aaa*aaa", "/aaaaaa", True),
+            ("/ab*b", "/ab", False),
+            ("/ab*b", "/abb", True),
+            # `$` anchoring combined with stars.
+            ("/*.gmi$", "/a/b.gmi", True),
+            ("/*.gmi$", "/a/b.gmi.txt", False),
+            ("/a*b$", "/ab", True),
+            ("/a*b$", "/abc", False),
+            ("/ab*b$", "/ab", False),
+            ("/*aa*aa$", "/aaa", False),
+            ("/*aa*aa$", "/aaaa", True),
+            ("/*ab*ba$", "/abba", True),
+            # No star at all: prefix match, or exact match when anchored.
+            ("/priv", "/private/x", True),
+            ("/priv$", "/private/x", False),
+            ("/priv$", "/priv", True),
+        ],
+    )
+    def test_matches_agrees_with_the_regex_it_replaces(self, rule, path, expected):
+        assert _matches(rule, path) is expected
+        assert self._via_regex(rule, path) is expected
+
+    def test_empty_rule_never_matches(self):
+        """``Disallow:`` with no value is the 1994 way to say "nothing"."""
+        assert _matches("", "/anything") is False
 
     def test_specific_token_beats_catch_all(self):
         policy = parse_robots(
@@ -532,7 +611,7 @@ class TestGeminiClientIntegration:
         seen = {}
 
         async def fake_fetch_content(
-            parsed_url, *, max_bytes=None, apply_content_policy=True
+            parsed_url, *, max_bytes=None, apply_content_policy=True, **kwargs
         ):
             if parsed_url.path == "/robots.txt":
                 seen["max_bytes"] = max_bytes
@@ -613,7 +692,7 @@ def _gemini_success():
 
 
 def _fake_gemini_content(robots=None):
-    async def fake(parsed_url, *, max_bytes=None, apply_content_policy=True):
+    async def fake(parsed_url, *, max_bytes=None, apply_content_policy=True, **kwargs):
         if parsed_url.path == "/robots.txt":
             if robots is None:
                 raise AssertionError("unexpected robots fetch")
@@ -651,6 +730,60 @@ class TestGateMemoryIsBounded:
 
         assert len(gate._cache) <= 120
         assert len(gate._locks) <= gate._sweep_threshold + 1
+
+    async def test_sweep_never_drops_a_lock_with_waiters(self):
+        """A lock released this tick still has coroutines queued on it.
+
+        ``asyncio.Lock.release()`` clears the flag and only *schedules* the
+        first waiter, so for one loop iteration a contended lock reports
+        ``locked() == False``. Sweeping on that flag dropped the lock while a
+        waiter still held it, the next caller ``setdefault``-created a second
+        lock for the same host, and both fetched ``/robots.txt`` concurrently --
+        the duplicate outbound request the gate exists to prevent. A failed
+        fetch is the worst case, since ``RobotsUnavailable`` is not cached.
+
+        The interleaving below is deterministic: ``first.set()`` queues the
+        holder's resumption ahead of the third caller, so the third caller runs
+        (and sweeps) in exactly the window between the release and the waiter
+        waking up.
+        """
+        started = asyncio.Event()
+        first = asyncio.Event()
+        inflight = 0
+        peak = 0
+        calls = 0
+
+        async def fetcher(host, port):
+            nonlocal inflight, peak, calls
+            calls += 1
+            mine = calls
+            inflight += 1
+            peak = max(peak, inflight)
+            if mine == 1:
+                started.set()
+                await first.wait()
+            else:
+                await asyncio.sleep(0)
+            inflight -= 1
+            raise RobotsUnavailable("blip")
+
+        gate = RobotsGate(
+            fetcher=fetcher, tokens=("*",), ttl_seconds=60, fail_closed=False
+        )
+        gate._sweep_threshold = 0  # sweep on every lookup
+
+        holder = asyncio.create_task(gate.allows("example.com", 70, ["/a"]))
+        await started.wait()
+        waiter = asyncio.create_task(gate.allows("example.com", 70, ["/b"]))
+        await asyncio.sleep(0)  # let the waiter sweep and queue on the lock
+        first.set()  # schedules the holder's release...
+        third = asyncio.create_task(gate.allows("example.com", 70, ["/c"]))
+
+        await asyncio.wait_for(asyncio.gather(holder, waiter, third), timeout=5.0)
+
+        assert peak == 1
+        # The bookkeeping that keeps the sweep honest must not itself leak.
+        assert gate._lock_users == {}
 
     async def test_sweep_preserves_live_entries(self):
         calls = []
@@ -791,7 +924,9 @@ class TestReviewRegressions:
         )
         seen = {}
 
-        async def fake(parsed_url, *, max_bytes=None, apply_content_policy=True):
+        async def fake(
+            parsed_url, *, max_bytes=None, apply_content_policy=True, **kwargs
+        ):
             if parsed_url.path == "/robots.txt":
                 seen["policy_applied"] = apply_content_policy
                 return GeminiErrorResult(
@@ -814,7 +949,9 @@ class TestReviewRegressions:
         )
         seen = {}
 
-        async def fake(parsed_url, *, max_bytes=None, apply_content_policy=True):
+        async def fake(
+            parsed_url, *, max_bytes=None, apply_content_policy=True, **kwargs
+        ):
             if parsed_url.path == "/robots.txt":
                 seen["max_bytes"] = max_bytes
                 return GeminiErrorResult(

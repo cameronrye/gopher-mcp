@@ -276,6 +276,17 @@ class TestCacheManagement:
         client._cache_response("gopher://example.com/1/", response)
         assert len(client._cache) == 0
 
+    def test_zero_ttl_disables_the_cache(self):
+        """A zero TTL means every entry is expired the instant it is written, so
+        the client must treat it as caching off rather than keep the bookkeeping
+        for a cache that can never hit -- the same rule the config layer applies.
+        """
+        client = GopherClient(cache_ttl_seconds=0)
+        assert client.cache_enabled is False
+
+        client._cache_response("gopher://example.com/1/", MenuResult(items=[]))
+        assert len(client._cache) == 0
+
     def test_cache_response_eviction(self):
         """Test cache eviction when max entries reached."""
         client = GopherClient(max_cache_entries=2)
@@ -349,7 +360,11 @@ class TestFetchMethod:
             )
 
             result = await client.fetch(url)
-            assert result == expected_result
+            # The cached items come back, marked as a replay rather than as the
+            # current state of the menu.
+            assert isinstance(result, MenuResult)
+            assert result.items == expected_result.items
+            assert result.cached is True
             # parse_gopher_url should still be called for validation even with cache hit
             mock_parse.assert_called_once_with(url)
 
@@ -448,8 +463,10 @@ class TestFetchMethod:
             second = await client.fetch("gopher://example.com/1/")
 
             assert first == expected_result
-            assert second == expected_result
+            assert isinstance(second, MenuResult)
+            assert second.items == expected_result.items
             # The second request is served from cache -- no second fetch.
+            assert second.cached is True
             assert mock_fetch.call_count == 1
 
     @pytest.mark.asyncio
@@ -1066,3 +1083,72 @@ class TestMenuItemCap:
         result = client._process_menu_response(self._menu(5))
         assert len(result.items) == 5
         assert result.truncated is False
+
+
+class TestEmptyAllowlistDenies:
+    """An explicitly empty allowlist admits nothing.
+
+    ``set(allowed_hosts) if allowed_hosts else None`` collapsed ``[]`` to "no
+    allowlist configured", so a caller who deliberately locked the client down
+    got NO host restriction at all -- the opposite of what they asked for.
+    ``allowed_ports`` in ssrf.validate_target already behaves this way.
+    """
+
+    def test_empty_list_blocks_every_host(self):
+        client = GopherClient(allowed_hosts=[])
+        assert client.allowed_hosts == set()
+        parsed_url = GopherURL(
+            host="example.com", port=70, gopherType="1", selector="/", search=None
+        )
+        with pytest.raises(ValueError, match="not in allowed hosts list"):
+            client._validate_security(parsed_url)
+
+    def test_none_still_allows_every_host(self):
+        client = GopherClient(allowed_hosts=None)
+        assert client.allowed_hosts is None
+        parsed_url = GopherURL(
+            host="example.com", port=70, gopherType="1", selector="/", search=None
+        )
+        client._validate_security(parsed_url)
+
+    def test_allowlist_is_normalized_once_at_construction(self):
+        """Normalizing per request rebuilt the set on every fetch even though
+        the allowlist is fixed at construction."""
+        client = GopherClient(allowed_hosts=["Example.COM."])
+        assert client.allowed_hosts == {"example.com"}
+        parsed_url = GopherURL(
+            host="EXAMPLE.com", port=70, gopherType="1", selector="/", search=None
+        )
+        client._validate_security(parsed_url)
+
+
+class TestRobotsOversizeHandling:
+    """An over-cap robots.txt is truncated and parsed (RFC 9309 s2.5), not
+    re-downloaded in full and discarded on every single request."""
+
+    @pytest.mark.asyncio
+    async def test_robots_fetch_is_capped_by_max_response_size(self):
+        client = GopherClient(max_response_size=4096, respect_robots_txt=True)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"User-agent: *\r\nDisallow:\r\n"),
+        ) as mock_fetch:
+            await client._fetch_robots("example.com", 70)
+
+        assert mock_fetch.await_args.kwargs["max_bytes"] == 4096
+        assert mock_fetch.await_args.kwargs["truncate_at_max"] is True
+
+    @pytest.mark.asyncio
+    async def test_truncated_robots_drops_the_incomplete_final_line(self):
+        """Half a Disallow must not be applied as if it were a whole one."""
+        # The transport stops exactly at the cap, so the body it hands back ends
+        # mid-directive.
+        body = b"User-agent: *\nDisallow: /private/\nDisallow: /secr"
+        client = GopherClient(max_response_size=len(body), respect_robots_txt=True)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=body),
+        ):
+            text = await client._fetch_robots("example.com", 70)
+
+        assert text == "User-agent: *\nDisallow: /private/\n"

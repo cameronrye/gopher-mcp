@@ -29,8 +29,9 @@ READ_CHUNK = 65536
 CLOSE_TIMEOUT_SECONDS = 5.0
 # Short probe deadline used once the size cap is reached: a server that sent
 # exactly ``max_size`` bytes and then holds the connection open (delayed/absent
-# close_notify) would otherwise block until the request deadline. A probe
-# timeout means "no more data is forthcoming", so treat the response as complete.
+# close_notify) would otherwise block until the request deadline. Only an EOF
+# within the probe window proves the response is complete -- a probe that times
+# out leaves the bytes in hand indistinguishable from a mid-stream prefix.
 PROBE_TIMEOUT_SECONDS = 1.0
 
 
@@ -38,6 +39,12 @@ PROBE_TIMEOUT_SECONDS = 1.0
 class TLSConfig:
     """Configuration for TLS connections."""
 
+    # ``min_version`` and ``verify_mode`` are intentionally fixed: no GEMINI_*
+    # environment variable reaches either, and the only production construction
+    # of this class takes the defaults. CERT_NONE in particular must stay a
+    # constant -- peer authentication in Gemini is TOFU fingerprint pinning, so
+    # exposing it as a knob would invite turning on CA validation and rejecting
+    # the self-signed certificates the protocol is built around.
     min_version: str = "TLSv1.2"
     verify_mode: ssl.VerifyMode = ssl.CERT_NONE
     client_cert_path: str | None = None
@@ -172,7 +179,8 @@ class GeminiTLSClient:
             Tuple of (TLSConnection, connection info)
 
         Raises:
-            TLSConnectionError: If connection fails
+            TimeoutError: If connect + handshake exceed ``timeout``.
+            TLSConnectionError: If the connection fails for any other reason.
         """
         # Host-level SSRF/allowlist validation is performed by the caller
         # (GeminiClient) before reaching the transport.
@@ -202,8 +210,12 @@ class GeminiTLSClient:
                 timeout=timeout,
             )
         except TimeoutError as e:
-            raise TLSConnectionError(
-                f"Connection timeout after {timeout} seconds"
+            # A timeout is reported AS a timeout. Folding it into
+            # TLSConnectionError made a firewalled host that drops SYNs look
+            # like a handshake/certificate fault, steering diagnosis away from
+            # "unreachable" (the Gopher transport already reports it correctly).
+            raise TimeoutError(
+                f"Connection to {host}:{port} timed out after {timeout} seconds"
             ) from e
         except socket.gaierror as e:
             raise TLSConnectionError(f"DNS resolution failed for {host}: {e}", e) from e
@@ -252,14 +264,15 @@ class GeminiTLSClient:
             peer_cert_info = self._parse_peer_cert(peer_cert)
             cipher = ssl_object.cipher()
 
+            # Only what a caller actually consumes: TOFU reads the fingerprint
+            # and cert info, and request_info reports the version and cipher.
+            # The DER in particular is deliberately not kept -- retaining the
+            # whole certificate per connection bought nothing.
             info: dict[str, Any] = {
                 "connection_time": connection_time,
                 "tls_version": ssl_object.version(),
                 "cipher": cipher[0] if cipher else None,
-                "cipher_strength": cipher[2] if cipher else None,
-                "peer_cert_der": peer_cert,
                 "peer_cert_info": peer_cert_info,
-                "sni_hostname": ssl_object.server_hostname,
             }
 
             # Add certificate fingerprint if available
@@ -334,18 +347,26 @@ class GeminiTLSClient:
         self,
         conn: TLSConnection,
         max_size: int = 1024 * 1024,  # 1MB default
+        *,
+        truncate_at_max: bool = False,
     ) -> bytes:
         """Receive data from the TLS connection, bounded by ``max_size``.
 
         Args:
             conn: Connected TLS connection
             max_size: Maximum data size to receive
+            truncate_at_max: Return the first ``max_size`` bytes instead of
+                raising when the peer still has more to send. Used only by the
+                robots.txt lookup, where RFC 9309 section 2.5 prescribes parsing
+                a truncated prefix rather than rejecting the file.
 
         Returns:
             Received data
 
         Raises:
-            TLSConnectionError: If receive fails or the response exceeds max_size.
+            TLSConnectionError: If receive fails, or (unless ``truncate_at_max``)
+                the response reaches ``max_size`` without the peer signalling
+                that it has finished.
         """
         reader = conn.reader
         try:
@@ -358,16 +379,24 @@ class GeminiTLSClient:
                 chunks.append(chunk)
                 total += len(chunk)
 
-            # Hit the cap without EOF: probe one more byte so an over-limit
-            # response is REJECTED rather than silently truncated. Use a short
-            # probe deadline so a complete, exactly-max_size response whose
-            # server holds the connection open is still treated as complete.
+            if truncate_at_max:
+                return b"".join(chunks)
+
+            # Hit the cap without EOF: probe one more byte under a short
+            # deadline. A byte means the response is genuinely over the limit; a
+            # probe that times out means the peer has neither finished nor
+            # closed, so the bytes in hand may be a mid-stream prefix. Returning
+            # those as a complete response would hand the caller -- and its
+            # cache -- a silently corrupted document, so say so instead.
             try:
                 extra = await asyncio.wait_for(
                     reader.read(1), timeout=PROBE_TIMEOUT_SECONDS
                 )
             except TimeoutError:
-                extra = b""
+                raise TLSConnectionError(
+                    f"Response reached the maximum size of {max_size} bytes and "
+                    f"the server did not close the connection; it may be truncated"
+                ) from None
             if extra:
                 raise TLSConnectionError(
                     f"Response exceeds maximum size of {max_size} bytes"

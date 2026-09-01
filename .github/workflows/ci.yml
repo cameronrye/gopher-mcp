@@ -165,8 +165,24 @@ jobs:
       - name: Run bandit security linting
         run: uv run bandit -r src/ -f json -o bandit-report.json
 
+      # Advisory only: a new advisory against a pinned dependency is not a
+      # defect in the PR under test, so it must not gate unrelated work. The
+      # nightly security-audit workflow files a tracking issue instead.
       - name: Run pip-audit dependency scan
+        id: pip-audit
+        continue-on-error: true
         run: uv run pip-audit --format json --output pip-audit-report.json
+
+      - name: Report pip-audit findings
+        if: steps.pip-audit.outcome == 'failure'
+        run: |
+          echo "::warning title=pip-audit::Dependency advisories found - see the security-reports artifact and the nightly audit issue"
+          {
+            echo "### ⚠️ pip-audit found dependency advisories"
+            echo
+            echo "This does **not** fail the build. Details are in the \`security-reports\` artifact,"
+            echo "and the nightly [security audit](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/security-audit.yml) tracks them in an issue."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload security reports
         uses: actions/upload-artifact@v7
@@ -176,6 +192,25 @@ jobs:
           path: |
             bandit-report.json
             pip-audit-report.json
+
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # Buildx is preinstalled on the runner; no third-party action is needed,
+      # and the job runs alongside the test matrix so it adds no wall-clock time.
+      - name: Build image
+        env:
+          DOCKER_BUILDKIT: "1"
+        run: docker build --tag gopher-mcp:ci .
+
+      - name: Smoke-test the image
+        # The image's ENTRYPOINT is gopher-mcp, so this runs `gopher-mcp --help`
+        # against the wheel as it was actually installed in the container.
+        run: docker run --rm gopher-mcp:ci --help
 
   docs:
     name: Build documentation
@@ -198,8 +233,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --locked --extra docs
 
+      # --strict matches docs.yml and release.yml: without it a mkdocstrings
+      # warning only surfaces at deploy time, after the merge.
       - name: Build documentation
-        run: uv run mkdocs build
+        run: uv run mkdocs build --clean --strict
 
       - name: Upload docs artifact
         uses: actions/upload-artifact@v7

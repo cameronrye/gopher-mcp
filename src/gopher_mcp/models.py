@@ -1,8 +1,9 @@
 """Pydantic models for Gopher MCP data validation."""
 
+import time
+from datetime import UTC, datetime
 from enum import Enum, IntEnum
-from typing import Any, Generic, Literal, TypeVar
-from urllib.parse import urlparse
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -10,6 +11,70 @@ from pydantic import (
     field_validator,
     model_serializer,
 )
+
+# Cache provenance. Only the result kinds the clients actually cache carry these
+# fields -- Gopher menus/text/binaries and the Gemini success/gemtext bodies. An
+# error, redirect, input prompt or certificate prompt is never cached, so adding
+# three permanently-null keys to it would be noise. The descriptions are the
+# whole point of the feature: they are what the model reads when it has to
+# decide whether a response is fresh enough to answer with.
+_CachedFlag = Annotated[
+    bool,
+    Field(
+        description=(
+            "True when this result was replayed from the local response cache "
+            "instead of being fetched from the server during this call. Treat "
+            "the content as a snapshot taken at `cached_at`, not as the "
+            "current state of the resource."
+        )
+    ),
+]
+_CachedAt = Annotated[
+    float | None,
+    Field(
+        description=(
+            "UNIX timestamp (seconds) at which the cached copy was actually "
+            "fetched from the server. Null when `cached` is false."
+        )
+    ),
+]
+_CacheAgeSeconds = Annotated[
+    float | None,
+    Field(
+        description=(
+            "How old the cached copy was, in seconds, when this result was "
+            "returned. If the user is asking about something that may have "
+            "changed since then, fetch again with `refresh=true`. Null when "
+            "`cached` is false."
+        )
+    ),
+]
+
+_ResultT = TypeVar("_ResultT", bound=BaseModel)
+
+
+def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
+    """Return a copy of ``response`` tagged as served from the cache.
+
+    A copy, never the stored object: the cache hands back the very instance it
+    holds, so tagging in place would also mark the entry itself -- and with it
+    the response already returned by the fetch that populated the entry.
+
+    Args:
+        response: The cached result to tag.
+        cached_at: When the cached copy was fetched from the server.
+
+    Returns:
+        A copy of ``response`` carrying the cache-provenance fields.
+
+    """
+    return response.model_copy(
+        update={
+            "cached": True,
+            "cached_at": cached_at,
+            "cache_age_seconds": round(time.time() - cached_at, 1),
+        }
+    )
 
 
 class GopherFetchRequest(BaseModel):
@@ -59,6 +124,9 @@ class MenuResult(BaseModel):
         description="True if the menu had more items than the render limit and "
         "`items` was truncated",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -78,6 +146,9 @@ class TextResult(BaseModel):
         description="True if `text` was truncated to the render limit (`bytes` "
         "still reports the full original size)",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -97,6 +168,9 @@ class BinaryResult(BaseModel):
         default="Binary content not returned to preserve context",
         description="Note about binary handling",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -105,12 +179,18 @@ class BinaryResult(BaseModel):
 
 
 class ErrorResult(BaseModel):
-    """Result model for error responses."""
+    """Result model for error responses, shared by both protocols.
+
+    ``error`` is deliberately ``dict[str, Any]``: a Gemini failure carries the
+    numeric ``status`` (and the boolean ``temporary``) beside the message, and a
+    Gopher-only ``dict[str, str]`` twin meant that annotation was the only thing
+    keeping those fields out of a Gopher error.
+    """
 
     # 'kind' makes the result self-describing and a reliable discriminator
-    # across every Gopher result type (and matches GeminiErrorResult).
+    # across every result type.
     kind: Literal["error"] = "error"
-    error: dict[str, str] = Field(..., description="Error information")
+    error: dict[str, Any] = Field(..., description="Error information")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -295,56 +375,6 @@ class GeminiMimeType(BaseModel):
         """Check if this is a binary MIME type."""
         return not self.is_text
 
-    @property
-    def is_image(self) -> bool:
-        """Check if this is an image MIME type."""
-        return self.type == "image"
-
-    @property
-    def is_audio(self) -> bool:
-        """Check if this is an audio MIME type."""
-        return self.type == "audio"
-
-    @property
-    def is_video(self) -> bool:
-        """Check if this is a video MIME type."""
-        return self.type == "video"
-
-    @property
-    def is_application(self) -> bool:
-        """Check if this is an application MIME type."""
-        return self.type == "application"
-
-    def supports_charset(self) -> bool:
-        """Check if this MIME type supports charset parameter."""
-        return self.is_text
-
-    def get_file_extension(self) -> str:
-        """Get common file extension for this MIME type."""
-        # Common MIME type to extension mappings
-        extensions = {
-            "text/gemini": ".gmi",
-            "text/plain": ".txt",
-            "text/html": ".html",
-            "text/css": ".css",
-            "text/javascript": ".js",
-            "image/jpeg": ".jpg",
-            "image/png": ".png",
-            "image/gif": ".gif",
-            "image/webp": ".webp",
-            "image/bmp": ".bmp",
-            "audio/mpeg": ".mp3",
-            "audio/ogg": ".ogg",
-            "audio/wav": ".wav",
-            "video/mp4": ".mp4",
-            "video/webm": ".webm",
-            "application/pdf": ".pdf",
-            "application/zip": ".zip",
-            "application/json": ".json",
-            "application/xml": ".xml",
-        }
-        return extensions.get(self.full_type, "")
-
 
 class GeminiResponse(BaseModel):
     """Base model for Gemini protocol responses."""
@@ -381,6 +411,9 @@ class GeminiSuccessResult(BaseModel):
         description="True if `content` was truncated to the render limit "
         "(`size` still reports the full original size).",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
 
     request_info: dict[str, Any] = Field(
         default_factory=dict,
@@ -408,6 +441,9 @@ class GeminiBinaryResult(BaseModel):
         default="Binary content not returned to preserve context",
         description="Note about binary handling",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -441,20 +477,17 @@ class GeminiRedirectResult(BaseModel):
     )
 
 
-class GeminiErrorResult(BaseModel):
-    """Result model for error responses."""
-
-    kind: Literal["error"] = "error"
-    error: dict[str, Any] = Field(..., description="Error information")
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        alias="requestInfo",
-        description="Information about the original request",
-    )
+# The Gemini error result IS :class:`ErrorResult`; the alias keeps the
+# protocol-suffixed spelling used by the Gemini modules and their tests.
+GeminiErrorResult = ErrorResult
 
 
 class GeminiCertificateResult(BaseModel):
-    """Result model for certificate request responses (status 60-62)."""
+    """Result model for certificate request responses (status 60-62).
+
+    ``message`` is the capsule's own text and is untrusted; ``next_step`` is
+    written by this server and is the only instruction in the payload.
+    """
 
     kind: Literal["certificate"] = "certificate"
     message: str = Field(..., description="Certificate-related message")
@@ -469,6 +502,12 @@ class GeminiCertificateResult(BaseModel):
         default=True,
         description="Whether the server is prompting for a certificate (status "
         "60). False for 61/62, which are rejections of a presented identity.",
+    )
+    next_step: str = Field(
+        default="",
+        description="What to do about this response, written by this server "
+        "rather than by the capsule. The three sub-codes need different "
+        "answers, and only one of them is fixed by creating a certificate.",
     )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
@@ -494,7 +533,13 @@ class GemtextLineType(str, Enum):
 class GemtextLink(BaseModel):
     """Model for gemtext link lines."""
 
-    url: str = Field(..., description="Link URL (absolute or relative)")
+    url: str = Field(
+        ...,
+        description=(
+            "Link URL, resolved against the request URL when the document was "
+            "fetched, so links returned by a fetch are absolute"
+        ),
+    )
     text: str | None = Field(None, description="Link text (optional)")
 
     @field_validator("url")
@@ -504,16 +549,6 @@ class GemtextLink(BaseModel):
         if not v.strip():
             raise ValueError("Link URL cannot be empty")
         return v.strip()
-
-    @property
-    def is_external(self) -> bool:
-        """Whether the link points outside the current capsule.
-
-        External links carry a URL scheme (``gemini://``, ``https://``,
-        ``mailto:`` ...) or are protocol-relative (``//host/...``). Scheme-less
-        relative links (``foo.gmi``, ``/abs``, ``./page``) are internal.
-        """
-        return bool(urlparse(self.url).scheme) or self.url.startswith("//")
 
 
 class GemtextHeading(BaseModel):
@@ -607,95 +642,6 @@ class GemtextDocument(BaseModel):
         default_factory=list, description="Extracted links"
     )
 
-    @property
-    def link_count(self) -> int:
-        """Get number of links in document."""
-        return len(self.links)
-
-    @property
-    def has_headings(self) -> bool:
-        """Check if document has any headings."""
-        return any(line.type.startswith("heading") for line in self.lines)
-
-    @property
-    def line_count(self) -> int:
-        """Get total number of lines in document."""
-        return len(self.lines)
-
-    @property
-    def content_summary(self) -> dict[str, int]:
-        """Get summary of content types for LLM consumption."""
-        summary = {
-            "text_lines": 0,
-            "headings": 0,
-            "links": 0,
-            "list_items": 0,
-            "quotes": 0,
-            "preformat_blocks": 0,
-        }
-
-        in_preformat = False
-        for line in self.lines:
-            if line.type == GemtextLineType.TEXT:
-                summary["text_lines"] += 1
-            elif line.type.startswith("heading"):
-                summary["headings"] += 1
-            elif line.type == GemtextLineType.LINK:
-                summary["links"] += 1
-            elif line.type == GemtextLineType.LIST_ITEM:
-                summary["list_items"] += 1
-            elif line.type == GemtextLineType.QUOTE:
-                summary["quotes"] += 1
-            elif (
-                line.type == GemtextLineType.PREFORMAT
-                and line.preformat
-                and line.preformat.is_toggle
-            ):
-                if not in_preformat:
-                    summary["preformat_blocks"] += 1
-                    in_preformat = True
-                else:
-                    in_preformat = False
-
-        return summary
-
-    @property
-    def heading_hierarchy(self) -> list[dict[str, Any]]:
-        """Get document heading structure for navigation."""
-        headings = []
-        for i, line in enumerate(self.lines):
-            if line.heading:
-                headings.append(
-                    {
-                        "line_number": i + 1,
-                        "level": line.heading.level,
-                        "text": line.heading.text,
-                        "raw_content": line.heading.raw_content,
-                    }
-                )
-        return headings
-
-    @property
-    def text_content(self) -> str:
-        """Get plain text content (excluding markup) for search/analysis."""
-        text_parts = []
-        for line in self.lines:
-            if line.type == GemtextLineType.TEXT:
-                text_parts.append(line.content)
-            elif line.heading:
-                text_parts.append(line.heading.text)
-            elif line.list_item:
-                text_parts.append(line.list_item.text)
-            elif line.quote:
-                text_parts.append(line.quote.text)
-            elif (
-                line.type == GemtextLineType.PREFORMAT
-                and line.preformat
-                and not line.preformat.is_toggle
-            ):
-                text_parts.append(line.content)
-        return "\n".join(text_parts)
-
 
 class GeminiGemtextResult(BaseModel):
     """Result model for gemtext content responses."""
@@ -711,6 +657,9 @@ class GeminiGemtextResult(BaseModel):
         description="True if the gemtext was truncated to the render limit "
         "(`size` still reports the full original byte size)",
     )
+    cached: _CachedFlag = False
+    cached_at: _CachedAt = None
+    cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
@@ -732,7 +681,13 @@ GeminiFetchResponse = (
 
 # Certificate and security models
 class GeminiCertificateInfo(BaseModel):
-    """Model for client certificate information."""
+    """Model for client certificate information.
+
+    Records what a stored client certificate *is* and where it applies. It
+    deliberately holds no key material and no filesystem path: the private key
+    is the identity itself, and its location is operator state that must not
+    reach a model through any tool result.
+    """
 
     fingerprint: str = Field(..., description="Certificate SHA-256 fingerprint")
     subject: str = Field(..., description="Certificate subject")
@@ -742,6 +697,76 @@ class GeminiCertificateInfo(BaseModel):
     host: str = Field(..., description="Associated hostname")
     port: int = Field(default=1965, description="Associated port")
     path: str = Field(default="/", description="Associated path scope")
+    key_id: str | None = Field(
+        default=None,
+        description="Opaque per-certificate identifier naming this entry's key "
+        "pair within the certificate store. Not a path, and not part of any "
+        "tool result. Absent on entries written before it existed, whose files "
+        "are named after the certificate's own common name",
+    )
+
+    def is_expired(self, current_time: float | None = None) -> bool:
+        """Check if the certificate's validity window has ended.
+
+        An unparseable ``not_after`` reports False rather than True: reporting a
+        certificate expired is what prompts a user to destroy an unrecoverable
+        private key, so an unreadable timestamp must not be the reason for it.
+        A genuinely unusable certificate is rejected by the capsule anyway
+        (status 62).
+
+        Args:
+            current_time: UNIX timestamp to compare against (default: now).
+
+        Returns:
+            True if the certificate is no longer valid.
+
+        """
+        try:
+            expires = datetime.fromisoformat(self.not_after)
+        except ValueError:
+            return False
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=UTC)
+        now = time.time() if current_time is None else current_time
+        return expires.timestamp() <= now
+
+
+class GeminiClientCertificateEntry(BaseModel):
+    """A stored client certificate as reported by ``gemini_client_cert_list``.
+
+    A deliberate projection of :class:`GeminiCertificateInfo` rather than a
+    subclass of it: only what a model needs to act on an identity is reported.
+    The certificate's own subject and issuer are left out because for a
+    self-signed identity this server minted they say nothing about the capsule,
+    and the subject doubles as the local name of the key pair on disk -- which
+    the parent's rule keeps out of every tool result. The scope URL is carried
+    ready-made so acting on an entry never means reassembling one.
+    """
+
+    url: str = Field(
+        ...,
+        description="The scope URL this identity covers. Pass it verbatim as "
+        "gemini_client_cert_update's `url` to act on this entry",
+    )
+    host: str = Field(..., description="Host of the scope this identity covers")
+    port: int = Field(default=1965, description="Port of the scope")
+    path: str = Field(
+        default="/",
+        description="Path scope. The identity is sent for this path and every "
+        "path below it",
+    )
+    fingerprint: str = Field(
+        ...,
+        description="SHA-256 fingerprint of the certificate. This is the value "
+        "gemini_client_cert_update requires before it will destroy it",
+    )
+    not_before: str = Field(..., description="Start of the validity window")
+    not_after: str = Field(..., description="End of the validity window")
+    expired: bool = Field(
+        ...,
+        description="True if the certificate's validity window has ended, in "
+        "which case the capsule will reject it (status 62)",
+    )
 
 
 class TOFUEntry(BaseModel):
@@ -757,6 +782,115 @@ class TOFUEntry(BaseModel):
     def is_expired(self, current_time: float) -> bool:
         """Check if certificate is expired."""
         return self.expires is not None and current_time > self.expires
+
+
+class TOFUTrustListResult(BaseModel):
+    """Result model for a read-only inspection of the TOFU trust store.
+
+    Only the entries the caller asked about are returned. The store's own
+    filesystem path is deliberately absent: it is operator configuration that
+    belongs in the server log, not in a payload handed to a model.
+    """
+
+    kind: Literal["trust_list"] = "trust_list"
+    entries: list[TOFUEntry] = Field(
+        ...,
+        description="Pinned certificates matching the request, ordered by host",
+    )
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
+
+
+class TOFUTrustUpdateResult(BaseModel):
+    """Result model for a change to the TOFU trust store.
+
+    Reports only the host the caller named, so a modification can never become
+    a way to enumerate the rest of the store.
+    """
+
+    kind: Literal["trust_update"] = "trust_update"
+    action: Literal["remove", "pin"] = Field(
+        ..., description="The change that was requested"
+    )
+    host: str = Field(..., description="Host whose pin was targeted")
+    port: int = Field(..., ge=1, le=65535, description="Port whose pin was targeted")
+    changed: bool = Field(
+        ...,
+        description="True if the trust store was actually modified. False means "
+        "there was nothing to change (e.g. the host had no pin to remove)",
+    )
+    message: str = Field(..., description="Human-readable summary of the outcome")
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
+
+
+class GeminiClientCertListResult(BaseModel):
+    """Result model for a read-only inspection of the client certificate store.
+
+    Only the certificates the caller asked about are returned, and each is
+    reported through :class:`GeminiClientCertificateEntry`, which carries no
+    private key and no path to one.
+    """
+
+    kind: Literal["client_cert_list"] = "client_cert_list"
+    entries: list[GeminiClientCertificateEntry] = Field(
+        ...,
+        description="Stored client certificates matching the request, ordered "
+        "by host, port and path scope",
+    )
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
+
+
+class GeminiClientCertUpdateResult(BaseModel):
+    """Result model for a change to the client certificate store.
+
+    Reports only the scope the caller named, so creating or removing an
+    identity can never become a way to enumerate the others.
+    """
+
+    kind: Literal["client_cert_update"] = "client_cert_update"
+    action: Literal["create", "remove"] = Field(
+        ..., description="The change that was requested"
+    )
+    host: str = Field(..., description="Host of the scope acted on")
+    port: int = Field(..., ge=1, le=65535, description="Port of the scope acted on")
+    path: str = Field(
+        ...,
+        description="Path scope acted on. The certificate applies to this path "
+        "and every path below it",
+    )
+    fingerprint: str | None = Field(
+        None,
+        description="SHA-256 fingerprint of the certificate created or removed. "
+        "Null when nothing changed",
+    )
+    expires: str | None = Field(
+        None,
+        description="End of the created certificate's validity window. Null on "
+        "removal and when nothing changed",
+    )
+    changed: bool = Field(
+        ...,
+        description="True if the certificate store was actually modified. False "
+        "means there was nothing to change (e.g. no certificate covered the "
+        "scope named for removal)",
+    )
+    message: str = Field(..., description="Human-readable summary of the outcome")
+    request_info: dict[str, Any] = Field(
+        default_factory=dict,
+        alias="requestInfo",
+        description="Information about the original request",
+    )
 
 
 class GeminiCacheEntry(_BaseCacheEntry[GeminiFetchResponse]):

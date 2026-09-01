@@ -1,6 +1,9 @@
 name: Validate PR
 
-# This workflow validates PRs without requiring secrets
+# Packaging checks for PRs, without requiring secrets. Formatting, linting,
+# type checking, tests and the docs build all run in ci.yml on the same
+# pull_request trigger -- repeating them here only burned a second runner, so
+# this workflow is deliberately limited to what ci.yml does not cover.
 on:
   pull_request:
     branches: [main, develop]
@@ -41,21 +44,6 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --locked --all-extras
-
-      - name: Check code formatting
-        run: uv run ruff format --check .
-
-      - name: Run linting
-        run: uv run ruff check .
-
-      - name: Run type checking
-        run: uv run mypy src
-
-      - name: Run tests
-        run: uv run pytest --tb=short
-
-      - name: Build documentation
-        run: uv run mkdocs build --strict
 
       - name: Build package
         run: uv build

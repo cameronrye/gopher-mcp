@@ -13,16 +13,136 @@ The server added comprehensive Gemini protocol support (introduced in v0.2.0) al
 - **Gemini Protocol Support**: Full implementation of Gemini v0.24.1
 - **`gemini_fetch` Tool**: New MCP tool for Gemini protocol access
 - **TLS Security**: Mandatory TLS with TOFU certificate validation
-- **Client Certificates**: Automatic generation and management
+- **Client Certificates**: Scoped storage, attached automatically when present
 - **Gemtext Parser**: Native gemtext parsing with structured output
 - **Dual Caching**: Separate cache systems for each protocol
 
-### Backward Compatibility
+### Backward compatibility of the v0.2.0 Gemini addition
+
+Adding Gemini alongside Gopher changed nothing that already worked:
 
 - ✅ All existing `gopher_fetch` functionality preserved
 - ✅ Existing configuration variables unchanged
-- ✅ No breaking changes to API or behavior
 - ✅ Existing scripts and integrations continue to work
+
+That statement is scoped to the v0.2.0 addition and is **not** a standing
+guarantee about every later release. 0.6.0 in particular removes public Python
+API and changes two defaults — see [Public API Changes](#public-api-changes) and
+[Changed defaults in 0.6.0](#changed-defaults-in-060) below. Its MCP tool
+surface remains compatible: no tool was removed or renamed, and no result field
+was dropped.
+
+## Public API Changes
+
+These affect code that imports from `gopher_mcp` directly. Nothing in this
+section changes the MCP tool surface, so MCP clients are unaffected.
+
+### Removed as unused
+
+Importing any of these now raises `ImportError` (or `AttributeError` for the
+attributes and methods):
+
+| Removed | Was in |
+|---------|--------|
+| `guess_mime_type` | `gopher_mcp.utils` |
+| `format_gopher_url` | `gopher_mcp.utils` |
+| `validate_gemini_url_components` | `gopher_mcp.utils` |
+| `sanitize_selector` | `gopher_mcp.utils` |
+| `TOFUManager.cleanup_expired` | `gopher_mcp.tofu` |
+| `ClientCertificateManager.cleanup_expired` | `gopher_mcp.client_certs` |
+| `GeminiMimeType.is_image` / `.is_audio` / `.is_video` / `.is_application` | `gopher_mcp.models` |
+| `GeminiMimeType.supports_charset()` / `.get_file_extension()` | `gopher_mcp.models` |
+| `GemtextLink.is_external` | `gopher_mcp.models` |
+| `GemtextDocument.link_count` / `.has_headings` / `.line_count` | `gopher_mcp.models` |
+| `GemtextDocument.content_summary` / `.heading_hierarchy` / `.text_content` | `gopher_mcp.models` |
+| the `allowed_hosts` keyword of `validate_target` | `gopher_mcp.ssrf` |
+
+The `gopher_mcp.models` entries were all computed properties and methods over
+data the model already carries. None of them was ever included in
+`model_dump()`, so **MCP tool output is byte-for-byte unaffected** — this breaks
+an embedder that reads `doc.text_content` or `mime.get_file_extension()`, not a
+tool user. Recompute what you need from the model's own fields.
+
+`validate_target(..., allowed_hosts=...)` now raises `TypeError`. The clients
+apply their own host allowlist in `_validate_security` against a set normalized
+once at construction, so the parameter was a second, redundant copy of that
+check; `GopherClient`/`GeminiClient` and the `*_ALLOWED_HOSTS` settings behave
+as before.
+
+### Changed defaults in 0.6.0
+
+Two settings that shipped in 0.4.0 defaulting to off are now on. No
+configuration file changes, but throughput does:
+
+| Setting | Was | Now |
+|---------|-----|-----|
+| `GOPHER_REQUESTS_PER_MINUTE` / `GEMINI_REQUESTS_PER_MINUTE` | `0` (unlimited) | `60` (one request per second, per host) |
+| `GOPHER_MAX_CONCURRENT_REQUESTS` / `GEMINI_MAX_CONCURRENT_REQUESTS` | `0` (unlimited) | `5` |
+
+Requests to one host are now paced, so a batch aimed at a single server is
+spaced out rather than parallel. Set all four to `0` to restore the 0.5.x
+behaviour.
+
+Separately, an explicitly empty host allowlist flipped meaning:
+`GopherClient(allowed_hosts=[])` and `GeminiClient(allowed_hosts=[])` used to
+mean allow-all and now deny every host. Pass `None` (the default) for "no
+restriction". The equivalent misconfiguration via `GOPHER_ALLOWED_HOSTS` /
+`GEMINI_ALLOWED_HOSTS` is now a startup error.
+
+### Added to `gopher_mcp.utils`
+
+| Added | Purpose |
+|-------|---------|
+| `sanitize_display_text` | Strip non-printable characters from server-controlled text before returning it |
+| `resolve_gemini_reference` | Resolve a gemtext link or redirect target against the URL it was fetched from |
+
+### `GeminiErrorResult` is now `ErrorResult`
+
+The two error models were merged. `gopher_mcp.models.GeminiErrorResult` is an
+alias for `ErrorResult`, so `isinstance(x, ErrorResult)` is now true for a Gemini
+error and both spellings import fine. The merged model's `error` field is
+`dict[str, Any]` rather than the old Gopher-only `dict[str, str]` — which is what
+lets a Gemini failure carry the numeric `status` and boolean `temporary`
+alongside `code` and `message`. Code that assumed `dict[str, str]` should read
+`error["code"]` and use `error.get("status")` / `error.get("temporary")`.
+
+### New tools and result fields
+
+- Two tools were added: `gemini_trust_list` and `gemini_trust_update`, with the
+  result models `TOFUTrustListResult` and `TOFUTrustUpdateResult`.
+- Two more were added for client identities: `gemini_client_cert_list` and
+  `gemini_client_cert_update`, with the result models
+  `GeminiClientCertListResult` and `GeminiClientCertUpdateResult`. They make a
+  status-60 (certificate required) capsule reachable, which it previously was
+  not — deliberately, only on an explicit call, never automatically on a
+  status-60 response.
+- Cacheable result models grew `cached`, `cached_at` and `cache_age_seconds`;
+  `gopher_fetch` and `gemini_fetch` grew an optional `refresh` argument, and
+  `GopherClient.fetch` / `GeminiClient.fetch` grew a keyword-only `refresh`.
+  Both are additive.
+- `GeminiCertificateResult` grew `next_step`: this server's own instruction for
+  that status (60, 61 and 62 need different answers), beside the capsule's
+  untrusted `message`.
+
+### Client-certificate store changes
+
+Embedders driving `ClientCertificateManager` directly should know three things:
+
+- Certificate and key files are now named after a random per-certificate
+  `key_id`, recorded in `registry.json`, instead of the certificate's common
+  name — two identities on one host could share that name and so share one key
+  pair. Existing entries have no `key_id` and keep resolving to their
+  common-name filenames, so no store needs migrating.
+- `generate_certificate` and `remove_certificate` roll back their in-memory
+  change if the registry cannot be persisted, so a raised error now always
+  means the store is unchanged.
+- `remove_certificate` raises `ClientCertificateKeyRetainedError` (a
+  `ClientCertificateError`) when the registry entry was removed but the private
+  key file survived its unlink, rather than returning True as though the key
+  had been destroyed.
+- `ClientCertificateManager.get_certificate_info_for_scope` is new: the same
+  resolution `get_certificate_for_scope` performs, returning the registry entry
+  instead of file paths.
 
 ## Migration Steps
 
@@ -122,8 +242,8 @@ python scripts/validate-config.py
 | Caching | ✅ | ✅ | Separate cache systems |
 | Host Allowlists | ✅ | ✅ | Independent configuration |
 | Timeout Configuration | ✅ | ✅ | Independent settings |
-| Certificate Validation | N/A | ✅ TOFU | Gemini-specific security |
-| Client Certificates | N/A | ✅ Auto-generated | Gemini-specific feature |
+| Certificate Validation | N/A | ✅ TOFU | Gemini-specific security; inspect and recover with `gemini_trust_list` / `gemini_trust_update` |
+| Client Certificates | N/A | ✅ Scoped storage | Attached automatically when one exists; create or remove one deliberately with `gemini_client_cert_update` |
 
 ## Common Migration Scenarios
 

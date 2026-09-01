@@ -86,13 +86,32 @@ class TestGopherIntegration:
             assert result1["kind"] == "text"
             assert result1["text"] == "Cached content"
 
+            assert result1["cached"] is False
+
             # Second fetch - should use cache (transport called only once)
             result2 = await gopher_fetch("gopher://example.com/0/cached.txt")
             assert result2["kind"] == "text"
             assert result2["text"] == "Cached content"
-
-            assert result1 == result2
             assert mock_fetch.await_count == 1
+
+            # Same content, but the replay says so: the model must be able to
+            # tell a five-minute-old copy from a fresh read.
+            assert result2["cached"] is True
+            assert result2["cached_at"] == pytest.approx(
+                result1["request_info"]["timestamp"]
+            )
+            assert result2["cache_age_seconds"] >= 0
+
+            # A refreshing fetch bypasses the cache but still repopulates it.
+            result3 = await gopher_fetch(
+                "gopher://example.com/0/cached.txt", refresh=True
+            )
+            assert result3["cached"] is False
+            assert mock_fetch.await_count == 2
+            assert (await gopher_fetch("gopher://example.com/0/cached.txt"))[
+                "cached"
+            ] is True
+            assert mock_fetch.await_count == 2
 
 
 @pytest.mark.integration
