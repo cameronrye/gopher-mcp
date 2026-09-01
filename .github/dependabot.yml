@@ -66,3 +66,13 @@ updates:
     labels:
       - "dependencies"
       - "docker"
+    # The base image must stay on an interpreter the CI matrix covers, and the
+    # Dockerfile comment saying so is invisible here. Left unpinned, the image
+    # drifts ahead of the tested versions and only breaks for whoever runs the
+    # container. Patch bumps are still welcome; widening the matrix is what
+    # unblocks a minor or major one.
+    ignore:
+      - dependency-name: "python"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"

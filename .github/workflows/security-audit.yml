@@ -60,8 +60,15 @@ jobs:
           else
             echo "clean=false" >> "$GITHUB_OUTPUT"
           fi
+          # pip-audit writes no markdown file at all when it finds nothing, so
+          # an empty report on exit 0 is the healthy case and must not read like
+          # a tool failure. Branch on the status, not on the file.
           if [[ ! -s pip-audit-report.md ]]; then
-            echo "pip-audit produced no report (exit ${STATUS}); see the workflow logs." > pip-audit-report.md
+            if [[ $STATUS -eq 0 ]]; then
+              echo "No known advisories against the locked dependencies." > pip-audit-report.md
+            else
+              echo "pip-audit failed without writing a report (exit ${STATUS}); see the workflow logs." > pip-audit-report.md
+            fi
           fi
           cat pip-audit-report.md >> "$GITHUB_STEP_SUMMARY"
 
