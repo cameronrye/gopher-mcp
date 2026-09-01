@@ -278,11 +278,13 @@ class GopherConfig(_ProtocolConfig):
         le=6000,
     )
     respect_robots_txt: bool = Field(
-        default=False,
+        default=True,
         description="Fetch and honour /robots.txt from the host root before "
         "retrieving a resource, following the convention Veronica-2 documents "
-        "(User-agent 'gopher-mcp' and '*'). Off by default because it adds a "
-        "round-trip per host; see docs for the fail-open caveat.",
+        "(User-agent 'gopher-mcp' and '*'). On by default: the round-trip it "
+        "costs is cached per host, and defaulting to ignoring an operator's "
+        "stated policy is not a reasonable default for a tool an LLM drives. "
+        "See docs for the fail-open caveat.",
     )
     robots_honor_ai_tokens: bool = Field(
         default=True,
@@ -344,11 +346,13 @@ class GeminiConfig(_ProtocolConfig):
         le=6000,
     )
     respect_robots_txt: bool = Field(
-        default=False,
+        default=True,
         description="Fetch and honour /robots.txt from the capsule root before "
         "retrieving a resource, following the Gemini companion specification "
-        "(virtual agents 'webproxy' and 'indexer', plus '*'). Off by default "
-        "because it adds a round-trip per host.",
+        "(virtual agents 'webproxy' and 'indexer', plus '*'). On by default: "
+        "the round-trip it costs is cached per host, and Gemini capsules are "
+        "overwhelmingly hobbyist-run, so honouring a stated policy is the "
+        "courteous default.",
     )
     robots_honor_ai_tokens: bool = Field(
         default=True,

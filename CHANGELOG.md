@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-01
+
+### Changed
+
+- **Breaking:** `robots.txt` is now honoured by **default** on both protocols.
+  `GOPHER_RESPECT_ROBOTS_TXT` and `GEMINI_RESPECT_ROBOTS_TXT` both default to
+  `true`; set either to `false` to restore the previous behaviour. 0.6.0 shipped
+  this opt-in on the grounds that it costs a round-trip per host, but the policy
+  is cached per host for 24 hours, so the cost is one probe per host rather than
+  one per fetch — and defaulting to ignoring an operator's stated policy is not
+  a reasonable default for a tool an LLM drives unattended. A blocked fetch
+  returns the existing `BLOCKED_BY_ROBOTS` error code.
+
+  Two consequences worth planning for. A fetch that previously succeeded can now
+  be refused, if the host disallows it. And because Gemini fails **closed** per
+  RFC 9309 §2.3.1.4, a capsule whose `robots.txt` cannot be retrieved at all —
+  including during a plain network or TLS outage — is now reported as
+  `BLOCKED_BY_ROBOTS` rather than as a transport error. Gopher fails open, since
+  it has no status codes to distinguish an absent policy from an unreachable one.
+
+  A `User-agent: gopher-mcp` group is honoured by name on both protocols, so an
+  operator can exclude this tool specifically without excluding anything else.
+
+### Fixed
+
+- An interactive Gopher item (telnet `8`, tn3270 `T`, CSO `2`) no longer
+  resolves DNS and opens a TCP connection before being refused. These items have
+  no Gopher-fetchable body and are answered from the item type alone, but the
+  robots gate ran ahead of that check, so enabling robots by default would have
+  had every such item probe `/robots.txt` on a host it never needed to contact.
+- An unreachable `robots.txt` is no longer re-probed on every single request. A
+  failed probe is deliberately not cached for the full policy TTL — a transient
+  outage should be retried — but with no backoff at all, every request to a host
+  whose `robots.txt` could not be retrieved paid a fresh connect timeout,
+  including requests that would otherwise have been served entirely from the
+  response cache (the gate runs ahead of that lookup so a `Disallow` also
+  withholds previously cached content). On Gopher the gate then failed open and
+  proceeded anyway, so the wait bought nothing. Such a host is now left alone for
+  60 seconds before being probed again, which keeps the retry without the
+  per-request cost.
+
 ## [0.6.1] - 2026-09-01
 
 ### Fixed
@@ -708,7 +749,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.5.0...v0.5.1

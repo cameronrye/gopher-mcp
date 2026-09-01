@@ -8,11 +8,15 @@ These tests verify end-to-end functionality including:
 """
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.gopher_client import GopherClient
 from gopher_mcp.server import (
     ClientManager,
     gemini_fetch,
@@ -24,6 +28,35 @@ from gopher_mcp.server import (
 def clear_client_manager():
     """Helper to clear client manager singleton."""
     ClientManager._instance = None
+
+
+@contextmanager
+def offline_robots() -> Iterator[None]:
+    """Answer the robots.txt probe with an empty (allow-all) policy.
+
+    ``respect_robots_txt`` defaults to on, so every ``fetch`` consults
+    ``/robots.txt`` at the host root before doing anything else. These tests
+    drive the module-level ``gopher_fetch``/``gemini_fetch`` tools, which build
+    their client inside the server's ``ClientManager`` -- out of reach of the
+    test, so the constructor cannot simply be passed
+    ``respect_robots_txt=False``.
+
+    Leaving the probe unstubbed does not merely add a network call: the probe
+    travels the *same* transport these tests mock for content, so it is served
+    the canned menu/gemtext as though it were a robots.txt and silently spends
+    one of the transport calls the caching and concurrency assertions count.
+    The gate resolves its fetcher late through ``self``, so replacing the method
+    on the class covers the client the manager builds later. An empty body
+    parses to an empty policy, which allows everything under both the
+    fail-open (Gopher) and fail-closed (Gemini) gates -- these tests are about
+    caching, TLS and protocol behaviour, not about robots.
+    """
+    probe = AsyncMock(return_value="")
+    with (
+        patch.object(GopherClient, "_fetch_robots", probe),
+        patch.object(GeminiClient, "_fetch_robots", probe),
+    ):
+        yield
 
 
 def patch_gopher(raw: bytes) -> Any:
@@ -44,7 +77,7 @@ class TestGopherIntegration:
         clear_client_manager()
 
         raw = b"0Test Document\t/test.txt\texample.com\t70\r\n.\r\n"
-        with patch_gopher(raw):
+        with offline_robots(), patch_gopher(raw):
             result = await gopher_fetch("gopher://example.com/1/")
 
             assert result["kind"] == "menu"
@@ -57,7 +90,7 @@ class TestGopherIntegration:
         """Test complete workflow for fetching Gopher text."""
         clear_client_manager()
 
-        with patch_gopher(b"Hello, Gopher!"):
+        with offline_robots(), patch_gopher(b"Hello, Gopher!"):
             result = await gopher_fetch("gopher://example.com/0/test.txt")
 
             assert result["kind"] == "text"
@@ -69,7 +102,7 @@ class TestGopherIntegration:
         """Test complete workflow for fetching Gopher binary content."""
         clear_client_manager()
 
-        with patch_gopher(b"x" * 1024):
+        with offline_robots(), patch_gopher(b"x" * 1024):
             result = await gopher_fetch("gopher://example.com/9/file.bin")
 
             assert result["kind"] == "binary"
@@ -80,7 +113,7 @@ class TestGopherIntegration:
         """Test that caching works across multiple requests."""
         clear_client_manager()
 
-        with patch_gopher(b"Cached content") as mock_fetch:
+        with offline_robots(), patch_gopher(b"Cached content") as mock_fetch:
             # First fetch - should hit the network
             result1 = await gopher_fetch("gopher://example.com/0/cached.txt")
             assert result1["kind"] == "text"
@@ -134,6 +167,7 @@ class TestGeminiIntegration:
         raw_response = b"20 text/gemini\r\n# Test Page\nHello, Gemini!"
 
         with (
+            offline_robots(),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data") as mock_send,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
@@ -169,6 +203,7 @@ class TestGeminiIntegration:
         raw_response = b"30 gemini://example.com/new-location\r\n"
 
         with (
+            offline_robots(),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
@@ -200,6 +235,7 @@ class TestGeminiIntegration:
         raw_response = b"40 Not Found\r\n"
 
         with (
+            offline_robots(),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
@@ -229,6 +265,7 @@ class TestGeminiIntegration:
         raw_response = b"20 text/gemini\r\n# Cached\nCached content"
 
         with (
+            offline_robots(),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
@@ -262,10 +299,15 @@ class TestErrorPaths:
 
         from gopher_mcp.gopher_transport import GopherProtocolError
 
-        with patch(
-            "gopher_mcp.gopher_client.fetch_gopher",
-            new=AsyncMock(
-                side_effect=GopherProtocolError("Request timed out after 30 seconds")
+        with (
+            offline_robots(),
+            patch(
+                "gopher_mcp.gopher_client.fetch_gopher",
+                new=AsyncMock(
+                    side_effect=GopherProtocolError(
+                        "Request timed out after 30 seconds"
+                    )
+                ),
             ),
         ):
             result = await gopher_fetch("gopher://timeout.example.com/1/")
@@ -280,10 +322,13 @@ class TestErrorPaths:
 
         from gopher_mcp.gopher_transport import GopherProtocolError
 
-        with patch(
-            "gopher_mcp.gopher_client.fetch_gopher",
-            new=AsyncMock(
-                side_effect=GopherProtocolError("Connection failed: refused")
+        with (
+            offline_robots(),
+            patch(
+                "gopher_mcp.gopher_client.fetch_gopher",
+                new=AsyncMock(
+                    side_effect=GopherProtocolError("Connection failed: refused")
+                ),
             ),
         ):
             result = await gopher_fetch("gopher://refused.example.com/1/")
@@ -298,7 +343,10 @@ class TestErrorPaths:
 
         # Malformed lines (too few fields) are skipped, yielding an empty menu
         # rather than raising; a genuinely empty directory looks the same.
-        with patch_gopher(b"garbage-with-no-tabs\r\nalso bad\r\n.\r\n"):
+        with (
+            offline_robots(),
+            patch_gopher(b"garbage-with-no-tabs\r\nalso bad\r\n.\r\n"),
+        ):
             result = await gopher_fetch("gopher://example.com/1/")
 
             assert result["kind"] == "menu"
@@ -309,7 +357,10 @@ class TestErrorPaths:
         """Test handling of TLS connection errors."""
         clear_client_manager()
 
-        with patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect:
+        with (
+            offline_robots(),
+            patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
+        ):
             from gopher_mcp.gemini_tls import TLSConnectionError
 
             mock_connect.side_effect = TLSConnectionError("TLS handshake failed")
@@ -332,6 +383,7 @@ class TestErrorPaths:
         }
 
         with (
+            offline_robots(),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
@@ -365,6 +417,7 @@ class TestErrorPaths:
         raw_response = b"20 text/gemini"
 
         with (
+            offline_robots(),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
@@ -402,7 +455,7 @@ class TestConcurrency:
         """Test multiple concurrent Gopher requests."""
         clear_client_manager()
 
-        with patch_gopher(b"Concurrent content"):
+        with offline_robots(), patch_gopher(b"Concurrent content"):
             # Make 10 concurrent requests
             tasks = [
                 gopher_fetch(f"gopher://example.com/0/file{i}.txt") for i in range(10)
@@ -429,6 +482,7 @@ class TestConcurrency:
         raw_response = b"20 text/gemini\r\n# Concurrent\nContent"
 
         with (
+            offline_robots(),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.receive_data") as mock_receive,
@@ -477,6 +531,7 @@ class TestConcurrency:
         raw_gemini_response = b"20 text/gemini\r\n# Gemini\nContent"
 
         with (
+            offline_robots(),
             patch_gopher(b"Gopher content"),
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.connect") as mock_connect,
             patch("gopher_mcp.gemini_tls.GeminiTLSClient.send_data"),

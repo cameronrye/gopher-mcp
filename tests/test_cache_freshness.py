@@ -39,7 +39,7 @@ class TestFreshResponsesAreMarkedFresh:
 
     @pytest.mark.asyncio
     async def test_gopher_fresh_response_has_no_cache_provenance(self):
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         with patch.object(client, "_fetch_content") as mock_fetch:
             mock_fetch.return_value = TextResult(text="fresh", bytes=5)
             result = await client.fetch("gopher://example.com/0/a.txt")
@@ -50,7 +50,11 @@ class TestFreshResponsesAreMarkedFresh:
 
     @pytest.mark.asyncio
     async def test_gemini_fresh_response_has_no_cache_provenance(self):
-        client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)
+        client = GeminiClient(
+            tofu_enabled=False,
+            client_certs_enabled=False,
+            respect_robots_txt=False,
+        )
         with patch.object(client, "_fetch_content") as mock_fetch:
             mock_fetch.return_value = _gemini_result()
             result = await client.fetch("gemini://example.org/")
@@ -65,7 +69,7 @@ class TestCachedResponsesAreMarkedCached:
 
     @pytest.mark.asyncio
     async def test_gopher_cache_hit_reports_when_the_copy_was_fetched(self):
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         url = "gopher://example.com/0/a.txt"
 
         with patch.object(client, "_fetch_content") as mock_fetch:
@@ -85,7 +89,11 @@ class TestCachedResponsesAreMarkedCached:
 
     @pytest.mark.asyncio
     async def test_gemini_cache_hit_reports_when_the_copy_was_fetched(self):
-        client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)
+        client = GeminiClient(
+            tofu_enabled=False,
+            client_certs_enabled=False,
+            respect_robots_txt=False,
+        )
         url = "gemini://example.org/"
 
         with patch.object(client, "_fetch_content") as mock_fetch:
@@ -101,7 +109,7 @@ class TestCachedResponsesAreMarkedCached:
     @pytest.mark.asyncio
     async def test_cache_age_grows_with_the_entry(self):
         """The age is measured from the entry, so a five-minute-old copy says so."""
-        client = GopherClient(cache_ttl_seconds=3600)
+        client = GopherClient(cache_ttl_seconds=3600, respect_robots_txt=False)
         url = "gopher://example.com/0/a.txt"
 
         with patch.object(client, "_fetch_content") as mock_fetch:
@@ -118,7 +126,7 @@ class TestCachedResponsesAreMarkedCached:
         """The cache hands back the instance it holds, so the marking has to be
         applied to a copy -- otherwise the entry (and every consumer still
         holding the original response) would be marked too."""
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         url = "gopher://example.com/1/"
 
         with patch.object(client, "_fetch_content") as mock_fetch:
@@ -145,7 +153,7 @@ class TestRefreshBypassesTheCache:
 
     @pytest.mark.asyncio
     async def test_gopher_refresh_refetches_and_repopulates(self):
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         url = "gopher://example.com/0/a.txt"
 
         with patch.object(client, "_fetch_content") as mock_fetch:
@@ -163,7 +171,11 @@ class TestRefreshBypassesTheCache:
 
     @pytest.mark.asyncio
     async def test_gemini_refresh_refetches_and_repopulates(self):
-        client = GeminiClient(tofu_enabled=False, client_certs_enabled=False)
+        client = GeminiClient(
+            tofu_enabled=False,
+            client_certs_enabled=False,
+            respect_robots_txt=False,
+        )
         url = "gemini://example.org/"
 
         with patch.object(client, "_fetch_content") as mock_fetch:

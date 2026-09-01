@@ -348,7 +348,7 @@ meaning; in single-field values such as a `META` they are dropped as noise.
 | `GEMINI_REQUESTS_PER_MINUTE` | Per-host request rate cap (0 = unlimited) | `60` | `30` |
 | `GEMINI_MAX_CONCURRENT_REQUESTS` | Cap on simultaneous in-flight fetches (0 = unlimited) | `5` | `2` |
 | `GEMINI_DENIED_MIME_TYPES` | MIME deny list, comma-separated or a JSON array (supports `type/*`) | Empty | `text/html,image/*` |
-| `GEMINI_RESPECT_ROBOTS_TXT` | Honour `/robots.txt` from the capsule root; an over-cap policy is truncated and parsed | `false` | `true` |
+| `GEMINI_RESPECT_ROBOTS_TXT` | Honour `/robots.txt` from the capsule root; an over-cap policy is truncated and parsed | `true` | `false` |
 | `GEMINI_ROBOTS_CACHE_TTL_SECONDS` | Lifetime of a cached robots policy, in seconds | `86400` | `3600` |
 | `GEMINI_ROBOTS_HONOR_AI_TOKENS` | Also honour rules naming AI crawler tokens | `true` | `false` |
 

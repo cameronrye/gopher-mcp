@@ -247,6 +247,93 @@ class TestGopherCandidatePaths:
         assert policy.is_allowed(paths, ("*",)) is False
 
 
+class TestRobotsUnavailableBackoff:
+    """An unreachable robots.txt must not be re-probed on every single fetch.
+
+    A failure is deliberately not cached for the full TTL (a temporary outage
+    should be retried), but with robots on by default that left every request to
+    a dead host -- including one that would otherwise be served from the content
+    cache -- paying a fresh connect timeout, and on Gopher failing open and
+    proceeding anyway. A short backoff keeps the retry without the per-request
+    cost.
+    """
+
+    async def test_failure_is_not_reprobed_within_the_backoff(self):
+        calls = []
+        now = [1000.0]
+
+        async def fetcher(host, port):
+            calls.append((host, port))
+            raise RobotsUnavailable("connect timeout")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=False,
+            clock=lambda: now[0],
+        )
+
+        assert (await gate.allows("dead.example", 70, ["/x"])).allowed is True
+        assert (await gate.allows("dead.example", 70, ["/y"])).allowed is True
+        assert (await gate.allows("dead.example", 70, ["/z"])).allowed is True
+        assert len(calls) == 1, "an unreachable host was re-probed within the backoff"
+
+    async def test_failure_is_retried_after_the_backoff(self):
+        calls = []
+        now = [1000.0]
+
+        async def fetcher(host, port):
+            calls.append((host, port))
+            raise RobotsUnavailable("connect timeout")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=False,
+            clock=lambda: now[0],
+        )
+
+        await gate.allows("dead.example", 70, ["/x"])
+        now[0] += RobotsGate.FAILURE_BACKOFF_SECONDS + 1
+        await gate.allows("dead.example", 70, ["/x"])
+        assert len(calls) == 2, "the backoff must expire, not pin the failure"
+
+    async def test_backoff_is_far_shorter_than_the_policy_ttl(self):
+        """The point is a retry, not a 24h cache of a transient outage."""
+        assert 0 < RobotsGate.FAILURE_BACKOFF_SECONDS <= 300
+
+    async def test_a_recovered_host_is_cached_normally(self):
+        state = {"fail": True}
+        calls = []
+        now = [1000.0]
+
+        async def fetcher(host, port):
+            calls.append(1)
+            if state["fail"]:
+                raise RobotsUnavailable("temporary")
+            return "User-agent: *\nDisallow: /private\n"
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=False,
+            clock=lambda: now[0],
+        )
+
+        await gate.allows("flaky.example", 70, ["/x"])
+        state["fail"] = False
+        now[0] += RobotsGate.FAILURE_BACKOFF_SECONDS + 1
+        assert (await gate.allows("flaky.example", 70, ["/private"])).allowed is False
+        # Recovered: the real policy is now cached for the full TTL, and the
+        # spent backoff entry must not force another probe.
+        now[0] += 1
+        assert (await gate.allows("flaky.example", 70, ["/private"])).allowed is False
+        assert len(calls) == 2
+
+
 class TestRobotsGate:
     async def test_allows_when_no_policy(self):
         async def fetcher(host, port):
@@ -384,9 +471,17 @@ class TestRobotsGate:
         assert (await gate.allows("example.com", 70, ["/ok"])).allowed is True
         assert (await gate.allows("example.com", 70, ["/no"])).allowed is False
 
-    async def test_transient_failure_is_not_cached(self):
+    async def test_transient_failure_is_not_cached_for_the_ttl(self):
+        """A blip must not disable robots checking for the whole TTL.
+
+        It is re-probed after FAILURE_BACKOFF_SECONDS, not on the very next
+        request -- see TestRobotsUnavailableBackoff for why the immediate retry
+        had to go. The TTL here is 600s and the backoff 60s, so a retry after
+        the backoff proves the failure was not pinned to the TTL.
+        """
         calls = []
         state = {"fail": True}
+        now = [1000.0]
 
         async def fetcher(host, port):
             calls.append(1)
@@ -395,23 +490,33 @@ class TestRobotsGate:
             return "User-agent: *\nDisallow:\n"
 
         gate = RobotsGate(
-            fetcher=fetcher, tokens=("*",), ttl_seconds=600, fail_closed=True
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=600,
+            fail_closed=True,
+            clock=lambda: now[0],
         )
         assert (await gate.allows("example.com", 70, ["/x"])).allowed is False
         state["fail"] = False
+        now[0] += RobotsGate.FAILURE_BACKOFF_SECONDS + 1
         assert (await gate.allows("example.com", 70, ["/x"])).allowed is True
         assert len(calls) == 2
+        assert RobotsGate.FAILURE_BACKOFF_SECONDS < 600
 
 
 class TestGopherClientIntegration:
-    async def test_disabled_by_default(self):
+    async def test_enabled_by_default(self):
+        """Flipped in 0.7.0: a bare client now consults robots.txt."""
         client = GopherClient()
-        assert client.respect_robots_txt is False
-        assert client._robots_gate is None
+        assert client.respect_robots_txt is True
+        assert client._robots_gate is not None
         await client.close()
 
     async def test_no_robots_fetch_when_disabled(self):
-        client = GopherClient(cache_enabled=False, requests_per_minute=0)
+        client = GopherClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=False
+        )
+        assert client._robots_gate is None
         with patch.object(client, "_fetch_robots") as robots:
             client._fetch_content = _fake_gopher_content()
             await client.fetch("gopher://example.com/0/page")
@@ -445,7 +550,12 @@ class TestGopherClientIntegration:
 
     async def test_gate_beats_the_content_cache(self):
         """A Disallow must withhold content cached from an earlier run."""
-        client = GopherClient(requests_per_minute=0)
+        # Robots off for the warm-up: the gate is switched on explicitly below,
+        # with a stubbed fetcher. Left at the 0.7.0 default it would be on for
+        # the warm-up too, and its unstubbed fetcher would make a real
+        # connection to example.com:70 that stalls for the full 30s timeout
+        # before failing open.
+        client = GopherClient(requests_per_minute=0, respect_robots_txt=False)
         client._fetch_content = _fake_gopher_content()
         url = "gopher://example.com/0/page"
 
@@ -537,10 +647,11 @@ class TestGopherClientIntegration:
 
 
 class TestGeminiClientIntegration:
-    async def test_disabled_by_default(self):
+    async def test_enabled_by_default(self):
+        """Flipped in 0.7.0: a bare client now consults robots.txt."""
         client = GeminiClient()
-        assert client.respect_robots_txt is False
-        assert client._robots_gate is None
+        assert client.respect_robots_txt is True
+        assert client._robots_gate is not None
         await client.close()
 
     async def test_disallow_blocks_the_fetch(self):
@@ -991,8 +1102,13 @@ class TestReviewRegressions:
                     await client.fetch("gopher://example.com/0/page"), TextResult
                 )
                 state["fail"] = False
-                # ...and the real policy applies as soon as it is reachable,
-                # rather than the failure being remembered for the whole TTL.
+                # ...and the real policy applies once the short retry backoff
+                # has passed, rather than the failure being remembered for the
+                # whole 24h TTL. (The backoff itself is what stops a dead host
+                # costing a connect timeout on every single request.)
+                gate = client._robots_gate
+                assert gate is not None
+                gate._retry_after.clear()
                 blocked = await client.fetch("gopher://example.com/0/page")
         assert isinstance(blocked, ErrorResult)
         assert blocked.error["code"] == "BLOCKED_BY_ROBOTS"

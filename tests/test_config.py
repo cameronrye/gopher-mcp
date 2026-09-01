@@ -54,11 +54,14 @@ class TestPolitenessDefaults:
         assert GopherConfig().max_concurrent_requests == 5
         assert GeminiConfig().max_concurrent_requests == 5
 
-    def test_robots_is_off_by_default(self):
+    def test_robots_is_on_by_default(self):
+        """Flipped in 0.7.0. Ignoring a server's stated policy is not a
+        defensible default for a tool an LLM drives unattended, and the probe
+        is cached per host so it costs one round-trip per host, not per fetch."""
         from gopher_mcp.config import GeminiConfig, GopherConfig
 
-        assert GopherConfig().respect_robots_txt is False
-        assert GeminiConfig().respect_robots_txt is False
+        assert GopherConfig().respect_robots_txt is True
+        assert GeminiConfig().respect_robots_txt is True
 
     def test_robots_defaults(self):
         from gopher_mcp.config import GeminiConfig, GopherConfig

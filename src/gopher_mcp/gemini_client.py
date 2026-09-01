@@ -132,7 +132,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         requests_per_minute: float = DEFAULT_REQUESTS_PER_MINUTE,
         max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
         denied_mime_types: list[str] | None = None,
-        respect_robots_txt: bool = False,
+        respect_robots_txt: bool = True,
         robots_cache_ttl_seconds: int = DEFAULT_ROBOTS_CACHE_TTL_SECONDS,
         robots_honor_ai_tokens: bool = True,
     ) -> None:

@@ -157,7 +157,7 @@ class TestGeminiClientFetch:
     @pytest.mark.asyncio
     async def test_fetch_success(self):
         """Test successful fetch operation."""
-        client = GeminiClient()
+        client = GeminiClient(respect_robots_txt=False)
 
         # Mock dependencies
         mock_parsed_url = Mock()
@@ -195,6 +195,7 @@ class TestGeminiClientFetch:
         from gopher_mcp.models import GeminiMimeType, GeminiSuccessResult
 
         client = GeminiClient(
+            respect_robots_txt=False,
             max_concurrent_requests=2,
             cache_enabled=False,
             tofu_enabled=False,
@@ -234,6 +235,7 @@ class TestGeminiClientFetch:
         import asyncio
 
         client = GeminiClient(
+            respect_robots_txt=False,
             timeout_seconds=0.05,
             cache_enabled=False,
             tofu_enabled=False,
@@ -259,7 +261,10 @@ class TestGeminiClientFetch:
     async def test_missing_fingerprint_fails_closed_without_sending(self):
         """The most security-critical TOFU branch: when TLS yields no certificate
         fingerprint, the request must NOT be sent to the unverified peer."""
-        client = GeminiClient(client_certs_enabled=False)  # TOFU on by default
+        client = GeminiClient(
+            client_certs_enabled=False,  # TOFU on by default
+            respect_robots_txt=False,
+        )
         assert client.tofu_manager is not None
 
         client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
@@ -290,6 +295,7 @@ class TestGeminiClientFetch:
 
         with tempfile.TemporaryDirectory() as d:
             client = GeminiClient(
+                respect_robots_txt=False,
                 client_certs_enabled=False,
                 tofu_reject_expired=True,
                 tofu_storage_path=str(_Path(d) / "tofu.json"),
@@ -323,7 +329,7 @@ class TestGeminiClientFetch:
     @pytest.mark.asyncio
     async def test_fetch_with_cache_hit(self):
         """Test fetch with cache hit."""
-        client = GeminiClient(cache_enabled=True)
+        client = GeminiClient(cache_enabled=True, respect_robots_txt=False)
 
         # Mock cached response
         cached_response = GeminiSuccessResult(
@@ -355,7 +361,7 @@ class TestGeminiClientFetch:
     @pytest.mark.asyncio
     async def test_fetch_error_handling(self):
         """Test fetch error handling."""
-        client = GeminiClient()
+        client = GeminiClient(respect_robots_txt=False)
 
         with patch("gopher_mcp.gemini_client.parse_gemini_url") as mock_parse:
             mock_parse.side_effect = ValueError("Invalid URL")
@@ -374,7 +380,7 @@ class TestGeminiClientFetch:
         tells the model its own URL was malformed."""
         from gopher_mcp.gemini_parse import GeminiProtocolError
 
-        client = GeminiClient()
+        client = GeminiClient(respect_robots_txt=False)
         mock_parsed_url = Mock()
         mock_parsed_url.host = "example.com"
         mock_parsed_url.port = 1965
@@ -399,7 +405,7 @@ class TestGeminiClientFetch:
     @pytest.mark.asyncio
     async def test_fetch_security_violation(self):
         """Test fetch with security violation."""
-        client = GeminiClient(allowed_hosts=["allowed.com"])
+        client = GeminiClient(allowed_hosts=["allowed.com"], respect_robots_txt=False)
 
         mock_parsed_url = Mock()
         mock_parsed_url.host = "forbidden.com"
@@ -417,7 +423,7 @@ class TestGeminiClientFetch:
     async def test_fetch_does_not_cache_error_result(self):
         """A transient error result must not be cached, or a momentary server
         failure would be served stale for the full cache TTL."""
-        client = GeminiClient(cache_enabled=True)
+        client = GeminiClient(cache_enabled=True, respect_robots_txt=False)
 
         mock_parsed_url = Mock()
         mock_parsed_url.host = "example.com"
@@ -446,7 +452,7 @@ class TestGeminiClientFetch:
     async def test_fetch_does_not_cache_redirect_result(self):
         """A redirect result must not be cached: the target can change and a
         stale redirect would keep sending the client to the old location."""
-        client = GeminiClient(cache_enabled=True)
+        client = GeminiClient(cache_enabled=True, respect_robots_txt=False)
 
         mock_parsed_url = Mock()
         mock_parsed_url.host = "example.com"
@@ -473,7 +479,7 @@ class TestGeminiClientFetch:
     @pytest.mark.asyncio
     async def test_fetch_caches_success_result(self):
         """A successful response is still cached."""
-        client = GeminiClient(cache_enabled=True)
+        client = GeminiClient(cache_enabled=True, respect_robots_txt=False)
 
         mock_parsed_url = Mock()
         mock_parsed_url.host = "example.com"
@@ -874,7 +880,7 @@ class TestGeminiClientAdvancedFeatures:
     @pytest.mark.asyncio
     async def test_fetch_with_non_standard_port(self):
         """Test fetching with non-standard port in URL."""
-        client = GeminiClient()
+        client = GeminiClient(respect_robots_txt=False)
 
         with patch.object(client, "_fetch_content") as mock_fetch:
             mock_response = GeminiSuccessResult(
@@ -902,7 +908,10 @@ class TestGeminiClientAdvancedFeatures:
         actually failed and the assertion only checked a mock.
         """
         client = GeminiClient(
-            tofu_enabled=False, client_certs_enabled=True, cache_enabled=False
+            tofu_enabled=False,
+            client_certs_enabled=True,
+            cache_enabled=False,
+            respect_robots_txt=False,
         )
         cert_path, key_path = client.generate_client_certificate(
             "example.com", 1965, "/test"
@@ -935,7 +944,11 @@ class TestGeminiClientAdvancedFeatures:
         Asserting only that the validator was called left the propagation itself
         unpinned: deleting it passed the whole suite.
         """
-        client = GeminiClient(tofu_enabled=True, cache_enabled=False)
+        client = GeminiClient(
+            tofu_enabled=True,
+            cache_enabled=False,
+            respect_robots_txt=False,
+        )
 
         with patch.object(client.tofu_manager, "validate_certificate") as mock_validate:
             mock_validate.return_value = (True, "Certificate changed")
@@ -959,7 +972,7 @@ class TestGeminiClientAdvancedFeatures:
     @pytest.mark.asyncio
     async def test_fetch_with_tofu_validation_error(self):
         """Test fetching with TOFU validation error."""
-        client = GeminiClient(tofu_enabled=True)
+        client = GeminiClient(tofu_enabled=True, respect_robots_txt=False)
 
         with patch.object(client.tofu_manager, "validate_certificate") as mock_validate:
             mock_validate.side_effect = TOFUValidationError(
@@ -988,7 +1001,11 @@ class TestSensitiveInputRedaction:
     SECRET = "hunter2-secret-answer"
 
     def _client(self, **kw):
-        defaults = {"tofu_enabled": False, "client_certs_enabled": False}
+        defaults = {
+            "tofu_enabled": False,
+            "client_certs_enabled": False,
+            "respect_robots_txt": False,
+        }
         defaults.update(kw)
         return GeminiClient(**defaults)
 
@@ -1112,6 +1129,7 @@ class TestOverallRequestDeadline:
         wait_for, so a tarpit answering every phase just under the limit held a
         tool call for several multiples of the configured timeout."""
         client = GeminiClient(
+            respect_robots_txt=False,
             timeout_seconds=0.3,
             cache_enabled=False,
             tofu_enabled=False,
@@ -1191,6 +1209,7 @@ class TestOverallRequestDeadline:
         """Only wire time is charged: a request that waited its turn behind the
         rate limiter must still get the full deadline for the exchange itself."""
         client = GeminiClient(
+            respect_robots_txt=False,
             timeout_seconds=0.5,
             cache_enabled=False,
             tofu_enabled=False,
@@ -1219,6 +1238,7 @@ class TestConnectFailureReporting:
         "TLS connection failed", steering the model toward certificate
         diagnostics instead of "host unreachable"."""
         client = GeminiClient(
+            respect_robots_txt=False,
             timeout_seconds=0.1,
             cache_enabled=False,
             tofu_enabled=False,
@@ -1241,6 +1261,7 @@ class TestConnectFailureReporting:
         over Gemini while the Gopher transport, which iterates, still reached
         it. Every address stays SSRF-vetted."""
         client = GeminiClient(
+            respect_robots_txt=False,
             cache_enabled=False,
             tofu_enabled=False,
             client_certs_enabled=False,
@@ -1273,6 +1294,7 @@ class TestConnectFailureReporting:
     @pytest.mark.asyncio
     async def test_all_addresses_failing_surfaces_the_last_error(self):
         client = GeminiClient(
+            respect_robots_txt=False,
             cache_enabled=False,
             tofu_enabled=False,
             client_certs_enabled=False,
@@ -1301,7 +1323,11 @@ class TestTofuOffTheEventLoop:
 
     @pytest.mark.asyncio
     async def test_blocking_validation_does_not_stall_the_loop(self):
-        client = GeminiClient(cache_enabled=False, client_certs_enabled=False)
+        client = GeminiClient(
+            cache_enabled=False,
+            client_certs_enabled=False,
+            respect_robots_txt=False,
+        )
         assert client.tofu_manager is not None
 
         def blocking_validate(*args, **kwargs):
@@ -1342,7 +1368,11 @@ class TestTofuOffTheEventLoop:
         question, the pin just could not be recorded."""
         from gopher_mcp.tofu import TOFUStorageError
 
-        client = GeminiClient(cache_enabled=False, client_certs_enabled=False)
+        client = GeminiClient(
+            cache_enabled=False,
+            client_certs_enabled=False,
+            respect_robots_txt=False,
+        )
         assert client.tofu_manager is not None
         client.tofu_manager.validate_certificate = Mock(  # type: ignore[method-assign]
             side_effect=TOFUStorageError("Could not lock the TOFU trust store at /x")

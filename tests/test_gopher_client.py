@@ -342,7 +342,8 @@ class TestFetchMethod:
     @pytest.mark.asyncio
     async def test_fetch_with_cache_hit(self):
         """Test fetch method with cache hit."""
-        client = GopherClient(cache_enabled=True)  # Explicitly enable cache
+        # Explicitly enable cache; robots is not what this test covers.
+        client = GopherClient(cache_enabled=True, respect_robots_txt=False)
         url = "gopher://example.com/1/"
         expected_result = MenuResult(items=[])
 
@@ -371,7 +372,7 @@ class TestFetchMethod:
     @pytest.mark.asyncio
     async def test_fetch_security_validation_error(self):
         """Test fetch method with security validation error."""
-        client = GopherClient(allowed_hosts=["allowed.com"])
+        client = GopherClient(allowed_hosts=["allowed.com"], respect_robots_txt=False)
         url = "gopher://forbidden.com/1/"
 
         with patch("gopher_mcp.utils.parse_gopher_url") as mock_parse:
@@ -391,7 +392,7 @@ class TestFetchMethod:
     @pytest.mark.asyncio
     async def test_fetch_parse_url_error(self):
         """Test fetch method with URL parsing error."""
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         url = "invalid://url"
 
         with patch("gopher_mcp.utils.parse_gopher_url") as mock_parse:
@@ -405,7 +406,7 @@ class TestFetchMethod:
     @pytest.mark.asyncio
     async def test_fetch_content_error(self):
         """Test fetch method with content fetching error."""
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         url = "gopher://example.com/1/"
 
         with (
@@ -427,7 +428,7 @@ class TestFetchMethod:
     @pytest.mark.asyncio
     async def test_fetch_successful_with_caching(self):
         """Test successful fetch with caching."""
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         url = "gopher://example.com/1/"
         expected_result = MenuResult(items=[])
 
@@ -453,7 +454,7 @@ class TestFetchMethod:
         """Hostnames are case-insensitive (RFC 3986), so a request that differs
         only in host case must hit the same cache entry rather than creating a
         duplicate and re-fetching."""
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         expected_result = MenuResult(items=[])
 
         with patch.object(client, "_fetch_content") as mock_fetch:
@@ -474,7 +475,7 @@ class TestFetchMethod:
         """An ErrorResult must not be cached: a transient failure would
         otherwise be served stale for the whole TTL. Matches the Gemini client,
         which already excludes error/redirect/input/certificate results."""
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         url = "gopher://example.com/1/"
 
         with (
@@ -883,7 +884,10 @@ class TestFetchContentMethod:
         from gopher_mcp.models import TextResult
 
         client = GopherClient(
-            cache_enabled=False, max_concurrent_requests=1, requests_per_minute=60
+            cache_enabled=False,
+            max_concurrent_requests=1,
+            requests_per_minute=60,
+            respect_robots_txt=False,
         )
         held = []
 
@@ -911,7 +915,7 @@ class TestFetchContentMethod:
     async def test_fetch_internal_host_is_blocked(self):
         """A URL resolving to an internal address yields a BLOCKED error (the
         SSRF guard is wired into the gopher client, not only end-to-end)."""
-        client = GopherClient()
+        client = GopherClient(respect_robots_txt=False)
         result = await client.fetch("gopher://db.internal/1/")
         assert isinstance(result, ErrorResult)
         assert result.error["code"] == "BLOCKED"
@@ -920,7 +924,7 @@ class TestFetchContentMethod:
     async def test_allow_local_hosts_permits_loopback(self):
         """With allow_local_hosts the guard is bypassed and the fetch proceeds to
         the (mocked) transport instead of being blocked."""
-        client = GopherClient(allow_local_hosts=True)
+        client = GopherClient(allow_local_hosts=True, respect_robots_txt=False)
         with patch(
             "gopher_mcp.gopher_client.fetch_gopher",
             new=AsyncMock(return_value=b"hi"),
@@ -956,7 +960,10 @@ class TestFetchContentMethod:
         # Rate limiting is on by default and would serialize same-host
         # requests to one per second, hiding the concurrency behaviour.
         client = GopherClient(
-            max_concurrent_requests=2, cache_enabled=False, requests_per_minute=0
+            max_concurrent_requests=2,
+            cache_enabled=False,
+            requests_per_minute=0,
+            respect_robots_txt=False,
         )
         inflight = 0
         peak = 0
@@ -986,7 +993,9 @@ class TestFetchContentMethod:
 
         # Rate limiting is also on by default and would serialize these to one
         # per second, hiding what this test measures; disable just that.
-        client = GopherClient(cache_enabled=False, requests_per_minute=0)
+        client = GopherClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=False
+        )
         inflight = 0
         peak = 0
 
@@ -1013,7 +1022,10 @@ class TestFetchContentMethod:
         from gopher_mcp.models import TextResult
 
         client = GopherClient(
-            cache_enabled=False, max_concurrent_requests=0, requests_per_minute=0
+            cache_enabled=False,
+            max_concurrent_requests=0,
+            requests_per_minute=0,
+            respect_robots_txt=False,
         )
         inflight = 0
         peak = 0
@@ -1040,7 +1052,9 @@ class TestFetchContentMethod:
         stall a worker far past timeout_seconds."""
         import asyncio
 
-        client = GopherClient(timeout_seconds=0.05, cache_enabled=False)
+        client = GopherClient(
+            timeout_seconds=0.05, cache_enabled=False, respect_robots_txt=False
+        )
 
         async def slow_validate(*args, **kwargs):
             await asyncio.sleep(5)

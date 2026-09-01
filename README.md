@@ -467,7 +467,7 @@ The server can be configured through environment variables for both protocols:
 | `GOPHER_ALLOW_LOCAL_HOSTS`       | Permit loopback/private hosts   | `false`         | `true`                 |
 | `GOPHER_REQUESTS_PER_MINUTE`     | Per-host request cap (0 = off)  | `60`            | `30`                   |
 | `GOPHER_MAX_CONCURRENT_REQUESTS` | Simultaneous fetches (0 = off)  | `5`             | `2`                    |
-| `GOPHER_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`            | `false`         | `true`                 |
+| `GOPHER_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`            | `true`          | `false`                |
 
 ### Gemini Configuration
 
@@ -485,7 +485,7 @@ The server can be configured through environment variables for both protocols:
 | `GEMINI_CLIENT_CERTS_ENABLED`    | Store and attach client certs      | `true`          | `false`                |
 | `GEMINI_REQUESTS_PER_MINUTE`     | Per-host request cap (0 = off)     | `60`            | `30`                   |
 | `GEMINI_MAX_CONCURRENT_REQUESTS` | Simultaneous fetches (0 = off)     | `5`             | `2`                    |
-| `GEMINI_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`               | `false`         | `true`                 |
+| `GEMINI_RESPECT_ROBOTS_TXT`      | Honour `/robots.txt`               | `true`          | `false`                |
 
 > **SSRF protection:** by default both tools reject targets that resolve to loopback,
 > link-local (including cloud metadata `169.254.169.254`), or private/RFC1918 addresses.
@@ -570,12 +570,18 @@ answering `44 SLOW_DOWN` is always honoured regardless of these settings.
 
 ### Robot exclusion (`robots.txt`)
 
-Set `GOPHER_RESPECT_ROBOTS_TXT=true` / `GEMINI_RESPECT_ROBOTS_TXT=true` to have
-the server fetch `/robots.txt` from the host root and honour it before
-retrieving anything. It is off by default because it costs an extra round-trip
-per host, and because a host serving a blanket `Disallow: /` would otherwise
-silently break an existing deployment. Policies are cached per host for 24 hours
-(`*_ROBOTS_CACHE_TTL_SECONDS`).
+The server fetches `/robots.txt` from the host root and honours it before
+retrieving anything. This is **on by default**: these are overwhelmingly
+hobbyist-run servers, and ignoring a stated policy is not a reasonable default
+for a tool an LLM drives unattended. Policies are cached per host for 24 hours
+(`*_ROBOTS_CACHE_TTL_SECONDS`), so the extra round-trip is paid once per host,
+not per fetch.
+
+Set `GOPHER_RESPECT_ROBOTS_TXT=false` / `GEMINI_RESPECT_ROBOTS_TXT=false` to
+turn it off — for example if you are fetching from a host you operate, or if a
+blanket `Disallow: /` is blocking a deployment that previously worked. A
+blocked fetch returns the `BLOCKED_BY_ROBOTS` error code rather than failing
+silently.
 
 Which convention applies depends on the protocol:
 

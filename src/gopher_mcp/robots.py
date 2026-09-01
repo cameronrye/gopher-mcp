@@ -382,12 +382,25 @@ class RobotsGate:
         # create a second lock for the same host -- two concurrent robots.txt
         # fetches at the very server the gate exists to spare.
         self._lock_users: dict[str, int] = {}
+        # When a probe fails, the host is not re-probed until this timestamp.
+        # See FAILURE_BACKOFF_SECONDS.
+        self._retry_after: dict[str, float] = {}
         # An open-world fetcher sees an unbounded number of distinct hosts, so
         # neither map may grow without limit (the rate limiter has the same
         # constraint and solves it the same way). Past this many entries, sweep
         # out expired policies and unheld locks -- both are reconstructible, so
         # dropping them is behaviour-preserving.
         self._sweep_threshold = 1024
+
+    #: How long an unreachable host is left alone before being probed again.
+    #: A failure is deliberately not cached for the full TTL -- a transient
+    #: outage should be retried -- but without any backoff, robots-on-by-default
+    #: made every request to a dead host pay a fresh connect timeout, including
+    #: requests that would otherwise be served entirely from the content cache
+    #: (the gate runs ahead of that lookup). On Gopher the gate then fails open
+    #: and proceeds anyway, so the wait bought nothing at all. Short enough to
+    #: still be a retry, long enough to stop the per-request cost.
+    FAILURE_BACKOFF_SECONDS = 60.0
 
     async def allows(self, host: str, port: int, paths: list[str]) -> RobotsDecision:
         """Return whether ``paths`` on ``host:port`` may be fetched."""
@@ -407,6 +420,12 @@ class RobotsGate:
         cached = self._cache.get(key)
         if cached is not None and cached.expires_at > self._clock():
             return cached.policy
+
+        # A recent probe failed: serve the stale policy if we have one, else
+        # stay undeterminable, but do not pay another connect timeout yet.
+        retry_after = self._retry_after.get(key)
+        if retry_after is not None and retry_after > self._clock():
+            return cached.policy if cached is not None else None
 
         if (
             len(self._cache) > self._sweep_threshold
@@ -436,10 +455,14 @@ class RobotsGate:
                     # retried, not pinned for the whole TTL. Fall back to the
                     # stale policy if we have one rather than throwing away a
                     # known-good answer.
+                    self._retry_after[key] = (
+                        self._clock() + self.FAILURE_BACKOFF_SECONDS
+                    )
                     stale = self._cache.get(key)
                     return stale.policy if stale is not None else None
 
                 policy = parse_robots(text) if text is not None else RobotsPolicy()
+                self._retry_after.pop(key, None)
                 self._cache[key] = _CachedPolicy(
                     policy=policy, expires_at=self._clock() + self._ttl_seconds
                 )
@@ -466,3 +489,4 @@ class RobotsGate:
         # caller create a fresh lock and start a duplicate fetch. An unused lock
         # is safe to recreate.
         self._locks = {k: v for k, v in self._locks.items() if k in self._lock_users}
+        self._retry_after = {k: v for k, v in self._retry_after.items() if v > now}

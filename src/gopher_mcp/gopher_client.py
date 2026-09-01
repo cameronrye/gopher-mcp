@@ -117,7 +117,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         max_menu_items: int = DEFAULT_MAX_MENU_ITEMS,
         requests_per_minute: float = DEFAULT_REQUESTS_PER_MINUTE,
         max_concurrent_requests: int = DEFAULT_MAX_CONCURRENT_REQUESTS,
-        respect_robots_txt: bool = False,
+        respect_robots_txt: bool = True,
         robots_cache_ttl_seconds: int = DEFAULT_ROBOTS_CACHE_TTL_SECONDS,
         robots_honor_ai_tokens: bool = True,
     ) -> None:
@@ -222,6 +222,14 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
 
             # Validate security constraints
             self._validate_security(parsed_url)
+
+            # Answer interactive types before the robots gate. The gate probes
+            # /robots.txt, which resolves DNS and dials the host -- exactly the
+            # pointless connection this item type is meant to avoid, for a
+            # resource that is never fetched over Gopher at all.
+            interactive = self._interactive_result(parsed_url)
+            if interactive is not None:
+                return interactive
 
             # Robot exclusion, before the cache lookup below: a Disallow must
             # also withhold content cached from an earlier, permitted run.
@@ -392,6 +400,26 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         text, _charset = decode_gopher_text(raw)
         return text
 
+    def _interactive_result(self, parsed_url: GopherURL) -> ErrorResult | None:
+        """The NOT_FETCHABLE answer for an interactive item, else ``None``.
+
+        Interactive types (telnet/tn3270/CSO) have no Gopher-fetchable body, so
+        the answer comes from the item type alone and no connection is needed.
+        """
+        if gopher_type_category(parsed_url.gopher_type) != "interactive":
+            return None
+        return ErrorResult(
+            error={
+                "code": "NOT_FETCHABLE",
+                "message": (
+                    f"Gopher item type '{parsed_url.gopher_type}' is interactive "
+                    f"(telnet/tn3270/CSO) and has no fetchable content; "
+                    f"connect to {parsed_url.host}:{parsed_url.port} with an "
+                    f"appropriate client."
+                ),
+            }
+        )
+
     async def _fetch_content(self, parsed_url: GopherURL) -> GopherFetchResponse:
         """Fetch content from a parsed Gopher URL over the native transport.
 
@@ -408,21 +436,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         gopher_type = parsed_url.gopher_type
         category = gopher_type_category(gopher_type)
 
-        # Interactive types (telnet/tn3270/CSO) have no Gopher-fetchable body;
-        # don't open a pointless connection (or resolve DNS) -- tell the caller
-        # how to reach the resource instead.
-        if category == "interactive":
-            return ErrorResult(
-                error={
-                    "code": "NOT_FETCHABLE",
-                    "message": (
-                        f"Gopher item type '{gopher_type}' is interactive "
-                        f"(telnet/tn3270/CSO) and has no fetchable content; "
-                        f"connect to {parsed_url.host}:{parsed_url.port} with an "
-                        f"appropriate client."
-                    ),
-                }
-            )
+        # Normally already handled in fetch(); kept so any other caller of
+        # _fetch_content still cannot dial an interactive item.
+        interactive = self._interactive_result(parsed_url)
+        if interactive is not None:
+            return interactive
 
         # SSRF guard: reject internal/loopback/link-local targets before
         # connecting, and pin the connection to the exact IPs we validated so

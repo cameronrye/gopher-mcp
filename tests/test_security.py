@@ -157,7 +157,12 @@ class TestResourceExhaustion:
 
         from gopher_mcp.gemini_tls import TLSConnection
 
-        client = GeminiClient(max_response_size=1024, tofu_enabled=False)
+        # Robots off: this test is about the receive_data size cap, not robot
+        # exclusion. With the 0.7.0 default on, the gate would spend the single
+        # mocked connection on /robots.txt before the request under test.
+        client = GeminiClient(
+            max_response_size=1024, tofu_enabled=False, respect_robots_txt=False
+        )
 
         reader = asyncio.StreamReader()
         reader.feed_data(b"A" * 2048)  # exceeds the 1 KB cap
@@ -189,6 +194,9 @@ class TestResourceExhaustion:
             timeout_seconds=0.1,
             tofu_enabled=False,
             client_certs_enabled=False,
+            # Robots off: the deadline under test covers the content read, and
+            # the gate would otherwise consume the mocked transport first.
+            respect_robots_txt=False,
         )
 
         async def slow_receive(*args, **kwargs):
@@ -313,8 +321,13 @@ class TestProtocolCompliance:
         must answer from the type alone rather than dialling the host."""
         from gopher_mcp.gopher_client import GopherClient
 
+        # Robots deliberately left at its default (on): the interactive check
+        # must run ahead of the gate, or a telnet item dials the host for a
+        # /robots.txt it will never use.
         client = GopherClient(
-            cache_enabled=False, requests_per_minute=0, timeout_seconds=1
+            cache_enabled=False,
+            requests_per_minute=0,
+            timeout_seconds=1,
         )
         with patch("gopher_mcp.gopher_client.validate_target") as validate:
             result = await client.fetch("gopher://example.com/8/login")

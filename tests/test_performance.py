@@ -299,7 +299,12 @@ class TestResourceLimits:
     @pytest.mark.asyncio
     async def test_connection_timeout_enforcement(self):
         """A connection timeout surfaces as a sanitized TLS error."""
-        client = GeminiClient(timeout_seconds=1, tofu_enabled=False)
+        # This test is about the TLS failure path, not robots: with the gate on,
+        # the robots.txt probe hits the same mocked connect failure first and
+        # the fail-closed gate would answer BLOCKED_BY_ROBOTS instead.
+        client = GeminiClient(
+            timeout_seconds=1, tofu_enabled=False, respect_robots_txt=False
+        )
 
         with patch.object(
             client.tls_client,
@@ -314,7 +319,11 @@ class TestResourceLimits:
     @pytest.mark.asyncio
     async def test_response_size_limit_enforcement(self):
         """The configured response-size cap actually rejects oversized data."""
-        client = GeminiClient(max_response_size=1024, tofu_enabled=False)
+        # Robots off: this test is about the size cap, and the gate's robots.txt
+        # probe would consume the scripted socket reads before the fetch runs.
+        client = GeminiClient(
+            max_response_size=1024, tofu_enabled=False, respect_robots_txt=False
+        )
 
         mock_sock = Mock()
         mock_sock.recv.side_effect = [b"A" * 1024, b"A"]  # cap, then over-limit probe

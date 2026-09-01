@@ -163,9 +163,9 @@ This document provides a comprehensive reference for all Gemini protocol configu
 #### `GEMINI_RESPECT_ROBOTS_TXT`
 
 - **Type**: Boolean
-- **Default**: `false`
-- **Description**: Fetch and honour `/robots.txt` from the capsule root before retrieving a resource, following the [Gemini companion specification](https://geminiprotocol.net/docs/companion/robots.gmi) (virtual agents `webproxy` and `indexer`, plus `*`, alongside `gopher-mcp`). Off by default because it adds a round-trip per host, and the probe spends from the same `GEMINI_TIMEOUT_SECONDS` budget as the fetch it guards. **Fails closed** on a temporary (4x) robots fetch failure; `51 NOT FOUND` means "no policy". A policy larger than the 500 KB read cap is truncated at the last complete line and parsed (RFC 9309 section 2.5) rather than treated as unavailable. A target the SSRF guard refuses is reported as `BLOCKED`, not as an unreachable robots.txt — disabling robots checking would not make it reachable.
-- **Example**: `GEMINI_RESPECT_ROBOTS_TXT=true`
+- **Default**: `true`
+- **Description**: Fetch and honour `/robots.txt` from the capsule root before retrieving a resource, following the [Gemini companion specification](https://geminiprotocol.net/docs/companion/robots.gmi) (virtual agents `webproxy` and `indexer`, plus `*`, alongside `gopher-mcp`). On by default; the policy is cached per host, but note the probe spends from the same `GEMINI_TIMEOUT_SECONDS` budget as the fetch it guards. **Fails closed** on a temporary (4x) robots fetch failure; `51 NOT FOUND` means "no policy". A policy larger than the 500 KB read cap is truncated at the last complete line and parsed (RFC 9309 section 2.5) rather than treated as unavailable. A target the SSRF guard refuses is reported as `BLOCKED`, not as an unreachable robots.txt — disabling robots checking would not make it reachable.
+- **Example**: `GEMINI_RESPECT_ROBOTS_TXT=false`
 
 #### `GEMINI_ROBOTS_CACHE_TTL_SECONDS`
 
