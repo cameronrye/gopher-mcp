@@ -17,6 +17,9 @@ jobs:
   validate-release:
     name: Validate release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read # Read ci.yml's result for the tagged commit (see the CI gate below)
     outputs:
       version: ${{ steps.get-version.outputs.version }}
       is-prerelease: ${{ steps.check-prerelease.outputs.is-prerelease }}
@@ -54,6 +57,45 @@ jobs:
             fi
             echo "✅ Releasing from main branch"
           fi
+
+      # ci.yml never triggers on tags, and this workflow's own test-and-build
+      # job runs a single ubuntu-latest/3.11 leg -- so without this step nothing
+      # in the release path ever sees the 9-way OS/Python matrix, and a
+      # Windows- or macOS-only regression can publish to PyPI with a fully
+      # green Release run. That nearly happened for 0.8.0: CI run 33590282556
+      # on b0c3c8b had all three windows-latest jobs red while every ubuntu job
+      # passed; only the maintainer eyeballing CI kept the tag off that commit.
+      # Do NOT drop this gate in favour of branch protection alone -- the "main"
+      # ruleset is disabled and its required-check list contains no Windows or
+      # macOS context.
+      #
+      # The poll exists because a tag pushed straight behind its main commit
+      # arrives while CI is still running; waiting is correct, false-failing is
+      # not. It fails fast once every run for the commit has finished.
+      - name: Require a green CI run for the tagged commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 45); do
+            RUNS=$(gh run list --commit "$GITHUB_SHA" --workflow ci.yml --limit 20 --json status,conclusion,databaseId)
+            if echo "$RUNS" | jq -e 'any(.[]; .status == "completed" and .conclusion == "success")' > /dev/null; then
+              echo "✅ CI passed for $GITHUB_SHA"
+              exit 0
+            fi
+            if echo "$RUNS" | jq -e '(length > 0) and all(.[]; .status == "completed")' > /dev/null; then
+              echo "❌ CI did not succeed for the tagged commit $GITHUB_SHA"
+              echo "$RUNS" | jq -r '.[] | "  run \(.databaseId): \(.conclusion)"'
+              echo "Push the tag at a commit whose CI matrix is green."
+              exit 1
+            fi
+            echo "⏳ Waiting for CI on $GITHUB_SHA (attempt ${attempt}/45)"
+            sleep 20
+          done
+          echo "❌ No completed CI run for $GITHUB_SHA after 15 minutes"
+          echo "CI must have run on this commit (push to main) before the tag is released."
+          exit 1
 
       - name: Get version from tag
         id: get-version
@@ -106,6 +148,50 @@ jobs:
             exit 1
           fi
           echo "✅ Version consistency validated (pyproject.toml + server.json)"
+
+      # The version lockstep above only proved the numbers match; it never
+      # looked at the manifest's shape. server.json sat on the 2025-07-09
+      # schema with snake_case `registry_type`/`registry_base_url` and a
+      # 128-character description through four releases -- the registry would
+      # have rejected every one of them, and nothing here noticed because
+      # nothing published it. Validate against the schema the manifest itself
+      # declares, so the next breaking registry schema change fails the tag
+      # instead of the publish (and cannot rot silently again).
+      - name: Validate server.json against the MCP registry schema
+        run: |
+          set -euo pipefail
+          SCHEMA_URL=$(jq -r '."$schema" // empty' server.json)
+          case "$SCHEMA_URL" in
+            https://static.modelcontextprotocol.io/schemas/*/server.schema.json) ;;
+            *)
+              echo "❌ server.json \$schema must be an official MCP registry schema URL"
+              echo "Found: ${SCHEMA_URL:-<missing>}"
+              exit 1
+              ;;
+          esac
+          curl --proto '=https' --tlsv1.2 -fsSL -o /tmp/server.schema.json "$SCHEMA_URL"
+          # Pinned: an unpinned jsonschema is one more thing that can turn a
+          # release red for reasons unrelated to this repo. Dependabot does not
+          # watch this line, so bump it deliberately.
+          python -m pip install --quiet --disable-pip-version-check 'jsonschema==4.25.1'
+          python - <<'PY'
+          import json
+          import sys
+
+          import jsonschema
+
+          schema = json.load(open("/tmp/server.schema.json"))
+          document = json.load(open("server.json"))
+          validator = jsonschema.validators.validator_for(schema)(schema)
+          errors = sorted(validator.iter_errors(document), key=lambda e: list(e.path))
+          for error in errors:
+              path = "/".join(str(p) for p in error.path) or "<root>"
+              print(f"::error file=server.json::{path}: {error.message}")
+          if errors:
+              sys.exit(1)
+          print("server.json validates against", schema.get("$id", "the declared schema"))
+          PY
+          echo "✅ server.json validates against its declared registry schema"
 
       - name: Validate changelog
         run: |
@@ -237,6 +323,189 @@ jobs:
         with:
           verbose: true
           attestations: true
+
+  # server.json has been version-locked by validate-release since v0.4.2, but
+  # it was never uploaded anywhere: the MCP registry returns 404 for
+  # io.github.cameronrye/gopher-mcp, so registry-driven clients cannot discover
+  # this server at all and a registry search for "gopher-mcp" surfaces an
+  # unrelated npm package instead. Publish from CI, not by hand: the GitHub
+  # OIDC token proves ownership of the io.github.cameronrye/* namespace, so
+  # there is no device-code login to forget -- advancing a registry entry by
+  # hand is how the sibling openzim-mcp entry silently fell five releases
+  # behind PyPI before it was automated.
+  #
+  # Ownership of the PyPI package is verified separately: the registry reads
+  # the LIVE PyPI long description for packages[0].version and requires it to
+  # contain the marker `mcp-name: io.github.cameronrye/gopher-mcp`. That marker
+  # lives in README.md (which is the project's long_description) -- if it is
+  # ever removed, this job fails with a namespace/ownership error.
+  #
+  # Deliberately NOT a dependency of create-github-release: a registry outage
+  # must never block or empty a GitHub release.
+  publish-registry:
+    name: Publish to MCP Registry
+    needs: [validate-release, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # GitHub OIDC login to the registry (io.github.* namespace)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSL -o mcp-publisher.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v1.8.1/mcp-publisher_linux_amd64.tar.gz"
+          # Checksum-pinned: this binary is handed an OIDC token that can write
+          # to the whole io.github.cameronrye/* namespace.
+          echo "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc  mcp-publisher.tar.gz" | sha256sum -c -
+          tar -xzf mcp-publisher.tar.gz
+          test -x ./mcp-publisher
+          ./mcp-publisher --version
+
+      # The registry reads the PyPI description of packages[0].version, and
+      # PyPI can take a minute to serve a freshly uploaded release. Wait for it
+      # rather than racing it.
+      - name: Wait for PyPI to serve the released version
+        env:
+          VERSION: ${{ needs.validate-release.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do
+            if curl --proto '=https' --tlsv1.2 -fsS "https://pypi.org/pypi/gopher-mcp/${VERSION}/json" > /dev/null; then
+              echo "✅ PyPI serves gopher-mcp ${VERSION}"
+              exit 0
+            fi
+            echo "⏳ PyPI does not serve ${VERSION} yet (attempt ${attempt}/30)"
+            sleep 10
+          done
+          echo "::error::gopher-mcp ${VERSION} never appeared on PyPI"
+          exit 1
+
+      # Skipped when the registry already serves this version, so re-running
+      # the workflow for an old tag (backfilling the registry) does not
+      # re-publish something that is already live. The verification step below
+      # still runs, so a skipped publish is proved rather than assumed.
+      - name: Publish server.json
+        run: |
+          set -euo pipefail
+          SERVER_NAME=$(jq -r '.name' server.json)
+          VERSION=$(jq -r '.version' server.json)
+          if curl --proto '=https' --tlsv1.2 -fsS \
+            "https://registry.modelcontextprotocol.io/v0/servers?search=${SERVER_NAME}&version=${VERSION}" \
+            | jq -e --arg n "$SERVER_NAME" --arg v "$VERSION" \
+              'any(.servers[]; .server.name == $n and .server.version == $v)' > /dev/null; then
+            echo "Registry already serves ${SERVER_NAME} ${VERSION} - nothing to publish"
+            exit 0
+          fi
+          ./mcp-publisher validate
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
+
+      # `mcp-publisher status` is NOT a post-publish check -- it MUTATES a
+      # version's lifecycle state and exits 1 without `--status`. Read the entry
+      # back from the public search endpoint instead: that is what registry
+      # clients actually query, so a green job means the release is live rather
+      # than merely uploaded.
+      - name: Verify the registry serves the published version
+        run: |
+          set -euo pipefail
+          SERVER_NAME=$(jq -r '.name' server.json)
+          VERSION=$(jq -r '.version' server.json)
+          for attempt in $(seq 1 12); do
+            if curl --proto '=https' --tlsv1.2 -fsS \
+              "https://registry.modelcontextprotocol.io/v0/servers?search=${SERVER_NAME}&version=${VERSION}" \
+              | jq -e --arg n "$SERVER_NAME" --arg v "$VERSION" \
+                'any(.servers[]; .server.name == $n and .server.version == $v)' > /dev/null; then
+              echo "✅ Registry serves ${SERVER_NAME} ${VERSION}"
+              exit 0
+            fi
+            echo "⏳ Registry does not serve ${VERSION} yet (attempt ${attempt}/12)"
+            sleep 10
+          done
+          echo "::error::${SERVER_NAME} ${VERSION} never appeared in the MCP Registry"
+          exit 1
+
+  # ci.yml builds and smoke-tests this image on every push and PR and then
+  # throws it away, which is why README and docs/installation had to tell users
+  # to clone the repo and build it themselves. Publish the same image the CI
+  # job proves works, on tagged releases only.
+  #
+  # Not a dependency of create-github-release, for the same reason as
+  # publish-registry: a GHCR outage must not block the release. server.json
+  # deliberately does NOT advertise an `oci` package yet -- the registry
+  # verifies OCI ownership by pulling the image and reading its
+  # io.modelcontextprotocol.server.name annotation, which requires the GHCR
+  # package to be public; add that entry only after the first push has been
+  # made public in the repository's package settings.
+  publish-image:
+    name: Publish container image
+    needs: [validate-release, test-and-build, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write # Push to ghcr.io/cameronrye/gopher-mcp
+      id-token: write # Provenance attestation for the pushed digest
+      attestations: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      # `latest` moves only for stable releases: a pre-release tag must never
+      # become what `docker run ghcr.io/cameronrye/gopher-mcp` pulls.
+      - name: Compute image tags
+        id: image
+        env:
+          VERSION: ${{ needs.validate-release.outputs.version }}
+          IS_PRERELEASE: ${{ needs.validate-release.outputs.is-prerelease }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          TAGS="${IMAGE}:${VERSION}"
+          if [[ "$IS_PRERELEASE" != "true" ]]; then
+            TAGS="${TAGS}"$'\n'"${IMAGE}:latest"
+          fi
+          echo "name=${IMAGE}" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "$TAGS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          # Standard OCI source/version labels so `docker inspect` on a pulled
+          # image points back at the exact tag it was built from.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.validate-release.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=MIT
+          # Buildx's inline provenance attestation is redundant here (and GHCR
+          # shows it as an extra unknown/unknown manifest entry); the signed
+          # attestation below is the one users can verify with `gh attestation`.
+          provenance: false
+
+      - name: Generate image attestation
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.image.outputs.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
 
   create-github-release:
     name: Create GitHub Release

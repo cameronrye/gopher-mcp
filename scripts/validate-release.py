@@ -63,18 +63,16 @@ class ReleaseValidator:
         print("\n📋 TESTING VALIDATION")
         print("=" * 50)
 
-        # Run test suite
-        success, _ = self.run_command(
-            "python -m pytest tests/ -v --tb=short", "Test suite execution"
-        )
-
-        # Check test coverage
+        # One run, not two: pyproject.toml's addopts already turn on coverage,
+        # so the previous bare `pytest tests/` run executed the identical suite
+        # and could only fail where this run also fails -- it just doubled the
+        # slowest part of release validation.
         coverage_success, _coverage_output = self.run_command(
             "python -m pytest --cov=src --cov-report=term-missing --cov-fail-under=85",
-            "Test coverage check",
+            "Test suite and coverage",
         )
 
-        return success and coverage_success
+        return coverage_success
 
     def validate_code_quality(self) -> bool:
         """Validate code quality."""

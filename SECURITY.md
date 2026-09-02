@@ -41,14 +41,16 @@ how to report vulnerabilities, and the measures we take to protect users.
 
 ## 🚨 Supported Versions
 
-We provide security updates for the following versions:
+<!-- Deliberately version-independent prose, not a table. The table that used to
+be here named 0.4.x as the only supported line and was still saying so at
+0.8.0, four minor releases later, because nothing in the release path touches
+this file. If a table is ever wanted back, add a check to
+scripts/validate-release.py that asserts it names the current minor from
+pyproject.toml -- otherwise it will go stale again. -->
 
-| Version | Supported |
-| ------- | --------- |
-| 0.4.x   | ✅ Yes    |
-| < 0.4   | ❌ No     |
-
-As a pre-1.0 project, security fixes are released on the latest minor version.
+Only the latest release on PyPI receives security fixes. As a pre-1.0 project,
+those fixes ship on the latest minor version; there are no maintained
+backport branches for older lines.
 
 ## 📢 Reporting a Vulnerability
 

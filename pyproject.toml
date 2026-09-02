@@ -14,7 +14,19 @@ readme = "README.md"
 license = "MIT"
 authors = [{ name = "Cameron Rye", email = "c@meron.io" }]
 maintainers = [{ name = "Cameron Rye", email = "c@meron.io" }]
-keywords = ["mcp", "gopher", "protocol", "llm", "model-context-protocol"]
+# Gemini and gemtext are here because half the package is the Gemini client
+# (gemini_client.py, gemini_tls.py, gemtext.py, tofu.py, client_certs.py); a
+# PyPI or registry search for "gemini" matched nothing before, since only the
+# free-text summary mentioned it.
+keywords = [
+    "mcp",
+    "gopher",
+    "gemini",
+    "gemtext",
+    "protocol",
+    "llm",
+    "model-context-protocol",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -41,33 +53,67 @@ dependencies = [
     # plain `pip install gopher-mcp` resolves the newest mcp and would crash on
     # startup. Lift the cap only together with the migration.
     #
-    # The floor is the real minimum, not a guess: 1.10.0 is the first release
-    # whose `FastMCP.tool()` accepts `title=`, which every tool here passes.
-    # Below it the failures are import-time and resolver-invisible (<1.2 has no
-    # mcp.server.fastmcp at all, <1.7 no ToolAnnotations). Keep all three
-    # components -- Dependabot derives the current version by scraping
-    # \d+\.\d+\.\d+ from this string, and a two-part floor like >=1.10 makes
-    # the `ignore` rule that holds the cap silently inert.
-    "mcp>=1.10.0,<2",
-    "pydantic>=2.5.0",
+    # The floor is the real minimum, not a guess. It started at 1.10.0, the
+    # first release whose `FastMCP.tool()` accepts `title=`, which every tool
+    # here passes; below that the failures are import-time and
+    # resolver-invisible (<1.2 has no mcp.server.fastmcp at all, <1.7 no
+    # ToolAnnotations). It is now set by security instead: 1.28.1 is the first
+    # release clear of four high advisories the old `>=1.10.0` range admitted --
+    # GHSA-9h52-p55h-vw2f (DNS-rebinding protection off by default),
+    # GHSA-jpw9-pfvf-9f58, GHSA-hvrp-rf83-w775 and GHSA-vj7q-gjh5-988w.
+    # The rebinding one is not theoretical here: server.py builds FastMCP
+    # without `transport_security`, so the SDK default is the only protection,
+    # and the Dockerfile's default CMD serves streamable-http on 0.0.0.0.
+    # A fresh `pip install` resolves the newest mcp and was always safe; this
+    # floor is what stops the server running inside an agent venv that already
+    # pins an old SDK -- the case the minimum-versions CI job exercises.
+    # Keep all three components -- Dependabot derives the current version by
+    # scraping \d+\.\d+\.\d+ from this string, and a two-part floor like
+    # >=1.28 makes the `ignore` rule that holds the cap silently inert.
+    "mcp>=1.28.1,<2",
+    # Floor governed by mcp, not by anything this code needs: mcp 1.28.1
+    # requires pydantic>=2.11.0, so any lower number here is unreachable and
+    # only pretends to be a tested minimum. Move it whenever the mcp floor
+    # moves.
+    "pydantic>=2.11.0",
     # config.py imports NoDecode, which landed in 2.7.0. The mcp cap gives no
     # cover here: mcp itself only asks for >=2.5.2, so 2.5.2-2.6.1 resolve
     # cleanly next to the newest permitted mcp and then fail at import.
     "pydantic-settings>=2.7.0",
     "structlog>=23.2.0",
-    "anyio>=4.0.0",
-    # Floor kept reasonably recent: a fresh `pip install` resolves the newest
-    # cryptography anyway, but this refuses to run against a years-old version
-    # (with known CVEs) that an end user might already have pinned.
-    "cryptography>=43.0.0",
+    # No anyio here on purpose: nothing in src/ imports it (the code is stdlib
+    # asyncio throughout), and mcp already requires anyio>=4.5, so declaring it
+    # only widened the surface this project claims to own and audit while its
+    # >=4.0.0 floor could never bind.
+    #
+    # Floor is a real CVE line, not a round number: a fresh `pip install`
+    # resolves the newest cryptography anyway, but this refuses to run against
+    # an older version an end user might already have pinned. 43.0.0 no longer
+    # qualified -- it still admitted GHSA-537c-gmf6-5ccf, GHSA-r6ph-v2qm-q3c2,
+    # GHSA-jwv3-5hgf-82ww and GHSA-g6cj-pr64-35w5. 50.0.0 is the first release
+    # clear of all four (48.0.1 clears only the first two), so the promise this
+    # comment makes is true again. If you lower it, the promise goes with it.
+    "cryptography>=50.0.0",
 ]
 
-[project.optional-dependencies]
+# Tooling lives in PEP 735 [dependency-groups], NOT [project.optional-dependencies].
+# Extras are published metadata: as extras these were a permanent, versioned
+# `pip install gopher-mcp[dev]` surface on PyPI that nothing in README.md,
+# CONTRIBUTING.md or docs/ ever asked anyone to use, and that we would then owe
+# support for. Groups are local to this repo and never reach the wheel.
+#
+# Consequence for anything that installs this project: it is `uv sync
+# --all-groups` (not `--all-extras`), `uv sync --group docs` (not
+# `--extra docs`) and `uv sync --resolution lowest-direct --group test` (not
+# `--extra test`). A named `--extra docs` now errors out, but `--all-extras`
+# does NOT -- it succeeds and installs no tooling at all, so a workflow left on
+# the old flag goes green while running its checks against nothing. Grep for
+# `--all-extras` before assuming it is gone.
+[dependency-groups]
+# `dev` includes `test` rather than restating it: the two lists used to repeat
+# five entries verbatim, so a floor bumped in one quietly drifted from the other.
 dev = [
-    "pytest>=7.4.0",
-    "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.1.0",
-    "pytest-mock>=3.11.0",
+    { include-group = "test" },
     "mypy>=1.7.0",
     "ruff>=0.14.5",
     "pre-commit>=3.5.0",
@@ -76,7 +122,7 @@ dev = [
     # 6.x caps core metadata at 2.4 (it monkeypatches packaging), which
     # rejects the 2.5 metadata hatchling >=1.32 emits.
     "twine>=7.0.0",
-    "hypothesis>=6.100.0",
+    "taskipy>=1.14.1",
 ]
 docs = [
     "mkdocs>=1.5.0",
@@ -85,6 +131,8 @@ docs = [
     "mkdocstrings[python]>=0.24.0",
     "pymdown-extensions>=10.0.0",
 ]
+# Kept as its own group so the minimum-versions CI job can install exactly the
+# test tooling against the declared floors.
 test = [
     "pytest>=7.4.0",
     "pytest-asyncio>=0.21.0",
@@ -194,7 +242,11 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=85",
+    # Set just under what the suite actually measures (97%), not at a round
+    # aspirational number. At 85 the gate had ~350 statements of slack: a
+    # ten-point regression could land green. Raise this when the real figure
+    # rises; lowering it to make a red build pass is how the slack came back.
+    "--cov-fail-under=95",
 ]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -208,7 +260,11 @@ markers = [
 [tool.coverage.run]
 source = ["src/gopher_mcp"]
 branch = true
-omit = ["*/tests/*", "*/test_*", "*/__main__.py"]
+# __main__.py is deliberately NOT omitted: tests/test_server.py imports and
+# calls its main(), so omitting it hid a file the suite already exercises --
+# including the Ctrl-C shutdown path (KeyboardInterrupt -> cleanup()) that every
+# operator hits and that had no coverage signal at all.
+omit = ["*/tests/*", "*/test_*"]
 
 [tool.coverage.report]
 exclude_lines = [
@@ -224,14 +280,30 @@ exclude_lines = [
     "@(abc\\.)?abstractmethod",
 ]
 
-# Task runner configuration
+# Task runner configuration.
+#
+# This is the ONLY task table. task.py used to hold a hand-maintained copy of
+# it that nothing compared, and the two had already drifted (the `ruff check .`
+# fix in e2d70fe had to be applied twice); composite tasks like `check` shelled
+# out to `uv run task`, so the copies were reachable only via `python task.py
+# <name>` and could behave differently from the same-named task here. task.py
+# is gone and the Makefile is a thin catch-all onto `uv run task`. Add a task
+# here and it is available from `uv run task <name>` and `make <name>` at once.
 [tool.taskipy.tasks]
+# `make` with no target lands here (Makefile .DEFAULT_GOAL), and it is also the
+# discovery command task.py's help screen used to be.
+help = "task --list"
+
 # Development setup
 dev-setup = "bash scripts/dev-setup.sh"
+# Windows has no bash; this is the counterpart of `clean`/`clean-win`. Ported
+# from task.py, which picked the platform at runtime -- taskipy cannot, so the
+# platform is in the task name.
+dev-setup-win = "scripts\\dev-setup.bat"
 install-hooks = "pre-commit install"
 
 # Code quality (whole-repo to match CI's `ruff check .`; scoping to src/tests
-# hides violations in task.py/scripts/ that CI would still fail on)
+# hides violations in scripts/ and other top-level Python that CI still fails on)
 lint = "ruff check ."
 format = "ruff format ."
 # Match CI's `mypy src` exactly: --ignore-missing-imports globally suppresses
@@ -272,8 +344,5 @@ directory = "htmlcov"
 [tool.bandit]
 exclude_dirs = ["tests"]
 skips = ["B101"]         # Skip assert_used test
-
-[dependency-groups]
-dev = ["taskipy>=1.14.1"]
 
 # Additional tool configurations can be added here as needed

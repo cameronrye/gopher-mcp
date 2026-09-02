@@ -1,15 +1,24 @@
 version: 2
 updates:
-  # Python dependencies
-  - package-ecosystem: "pip"
+  # Python dependencies. The ecosystem must stay "uv", not "pip": the pip
+  # ecosystem edits only the version ranges in pyproject.toml, and those ranges
+  # are deliberately open floors (`pydantic>=2.5.0`, `anyio>=4.0.0`, ...), so it
+  # had nothing to propose -- six range-edit PRs in a year, the group below
+  # never firing once -- while uv.lock, the file every CI job installs via
+  # `uv sync --locked`, never moved on a schedule at all. Only the "uv"
+  # ecosystem updates uv.lock. Reverting to "pip" turns the Monday run back
+  # into a no-op and leaves lock bumps arriving only as security advisories,
+  # which is exactly what security-audit.yml tells the reader to wait for.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
       day: "monday"
       time: "09:00"
     open-pull-requests-limit: 10
-    reviewers:
-      - "cameronrye"
+    # No `reviewers:` here or in the blocks below: GitHub removed the option on
+    # 2025-05-20 and now ignores it. .github/CODEOWNERS (`* @cameronrye`) is
+    # what actually requests review on Dependabot PRs. `assignees` still works.
     assignees:
       - "cameronrye"
     commit-message:
@@ -44,8 +53,6 @@ updates:
       day: "monday"
       time: "09:00"
     open-pull-requests-limit: 5
-    reviewers:
-      - "cameronrye"
     assignees:
       - "cameronrye"
     commit-message:
@@ -65,8 +72,6 @@ updates:
       day: "monday"
       time: "09:00"
     open-pull-requests-limit: 5
-    reviewers:
-      - "cameronrye"
     assignees:
       - "cameronrye"
     commit-message:

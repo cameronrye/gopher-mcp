@@ -61,7 +61,11 @@ main() {
 
     # Install dependencies
     log_info "Installing project dependencies..."
-    uv sync --all-extras
+    # --all-groups, not --all-extras: dev/docs/test are PEP 735 dependency
+    # groups now (they were extras, which published a gopher-mcp[dev] install
+    # surface to PyPI). There are no extras left, so --all-extras would
+    # silently install nothing but the runtime dependencies.
+    uv sync --all-groups
     log_success "Dependencies installed"
 
     # Install pre-commit hooks

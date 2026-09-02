@@ -25,6 +25,11 @@ jobs:
   audit:
     name: Audit locked dependencies
     runs-on: ubuntu-latest
+    # GitHub's default is six hours. This job installs the lock and makes one
+    # set of advisory-database lookups; if pip-audit or the gh calls stall on
+    # the network, failing fast files the tracking issue on the next nightly
+    # run instead of leaving a scheduled job parked on a runner.
+    timeout-minutes: 20
     permissions:
       contents: read
       issues: write

@@ -80,12 +80,17 @@ class SetupVerifier:
     def _check_workflows(self) -> None:
         """Check GitHub workflows."""
         workflow_dir = self.project_root / ".github" / "workflows"
+        # This list must be pruned whenever a workflow is deleted. pr-check.yml
+        # was removed in ec0e565 but left here, so every run of this script
+        # exited 1 on a phantom file -- a setup verifier that is red by default
+        # teaches people to ignore it. Keep it to workflows that must exist for
+        # the project to be releasable.
         required_workflows = [
             "ci.yml",
             "docs.yml",
             "publish.yml",
             "release.yml",
-            "pr-check.yml",
+            "security-audit.yml",
             "validate-pr.yml",
         ]
 

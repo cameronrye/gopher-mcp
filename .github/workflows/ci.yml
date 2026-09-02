@@ -24,11 +24,21 @@ jobs:
   test:
     name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Six hours is GitHub's default; the whole workflow finishes in 2-3
+    # minutes, and these tests drive real sockets and TLS handshakes. A cap
+    # this loose can only fire on a genuine hang, and turns one into a fast
+    # red run instead of a runner parked for the rest of the afternoon.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        # 3.14 is here because the Docker base image and the trove classifiers
+        # are gated on it: dependabot.yml holds python:3.x-slim to "an
+        # interpreter the CI matrix covers", and the 3.14 image was rolled back
+        # once (CHANGELOG "outside the tested matrix") for exactly that reason.
+        # Dropping a version from this list re-freezes those.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Checkout code
@@ -51,69 +61,10 @@ jobs:
       - name: Run tests
         run: uv run pytest
 
-  gemini-tests:
-    name: Gemini Protocol Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Install dependencies
-        run: uv sync --locked --all-extras
-
-      - name: Run Gemini-specific tests
-        # --no-cov: this runs only the Gemini subset, so it cannot meet the
-        # project-wide --cov-fail-under gate in addopts. The full matrix job
-        # enforces coverage; here we only care that the subset passes.
-        run: |
-          uv run pytest tests/test_gemini_client.py tests/test_gemini_models.py tests/test_gemini_status.py tests/test_gemini_tls.py tests/test_gemini_utils.py tests/test_security.py tests/test_performance.py -v --tb=short -m "not slow" --no-cov
-
-      - name: Test Gemini client functionality
-        run: |
-          uv run python -c "
-          import asyncio
-          from src.gopher_mcp.server import get_client_manager
-
-          async def test_gemini():
-              manager = await get_client_manager()
-              client = await manager.get_gemini_client()
-              print('Gemini client created successfully')
-              await client.close()
-
-          asyncio.run(test_gemini())
-          "
-
-      - name: Validate Gemini configuration
-        run: |
-          export GEMINI_TOFU_ENABLED=true
-          export GEMINI_CLIENT_CERTS_ENABLED=true
-          uv run python -c "
-          import asyncio
-          from src.gopher_mcp.server import get_client_manager
-
-          async def test_config():
-              manager = await get_client_manager()
-              client = await manager.get_gemini_client()
-              print('Gemini configuration validated')
-              await client.close()
-
-          asyncio.run(test_config())
-          "
-
   lint:
     name: Lint and type check
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -144,6 +95,7 @@ jobs:
   security:
     name: Security checks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -196,6 +148,7 @@ jobs:
   minimum-versions:
     name: Declared minimum dependencies
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -235,6 +188,7 @@ jobs:
   docker:
     name: Build Docker image
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -254,6 +208,7 @@ jobs:
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7

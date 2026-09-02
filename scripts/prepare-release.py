@@ -328,23 +328,10 @@ class ReleasePreparation:
             # Check for specific test categories
             test_results = []
 
-            # Unit tests
-            unit_result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "pytest",
-                    "tests/",
-                    "-v",
-                    "-m",
-                    "not integration and not slow",
-                ],
-                check=False,
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-            )
-            test_results.append(("Unit tests", unit_result.returncode == 0))
+            # There is deliberately no separate "unit tests" run here: the full
+            # run above already executes every non-integration test, so a third
+            # pytest invocation only tripled the wall-clock cost of preparing a
+            # release without being able to fail on anything new.
 
             # Integration tests (if any). --no-cov because this is a SUBSET of
             # the suite: the 85% gate in pyproject.toml is a whole-suite figure,
@@ -386,18 +373,21 @@ class ReleasePreparation:
     def _check_code_quality(self) -> bool:
         """Check code quality with linting and formatting."""
         try:
-            # Run ruff linting
+            # Whole-repo scope, matching ci.yml's `ruff check .` and the
+            # rationale in pyproject.toml: scoping to src/tests hides
+            # violations in task.py and scripts/ that CI still fails on, so a
+            # release could pass here and go red the moment the tag lands.
             lint_result = subprocess.run(
-                [sys.executable, "-m", "ruff", "check", "src/", "tests/"],
+                [sys.executable, "-m", "ruff", "check", "."],
                 check=False,
                 cwd=self.project_root,
                 capture_output=True,
                 text=True,
             )
 
-            # Run ruff formatting check
+            # Run ruff formatting check (same whole-repo scope as CI)
             format_result = subprocess.run(
-                [sys.executable, "-m", "ruff", "format", "--check", "src/", "tests/"],
+                [sys.executable, "-m", "ruff", "format", "--check", "."],
                 check=False,
                 cwd=self.project_root,
                 capture_output=True,
@@ -484,17 +474,10 @@ class ReleasePreparation:
     def _check_dependencies(self) -> bool:
         """Check dependency status and security."""
         try:
-            # Check for outdated dependencies
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "list", "--outdated"],
-                check=False,
-                cwd=self.project_root,
-                capture_output=True,
-                text=True,
-            )
-
-            if result.stdout.strip():
-                self.warnings.append("Some dependencies may be outdated")
+            # No `pip list --outdated` here: it warns on every transitive
+            # package the lockfile deliberately pins, so it fired on every
+            # release and meant nothing. Dependabot and the nightly
+            # security-audit workflow own dependency freshness.
 
             # Check pyproject.toml for version consistency
             pyproject_path = self.project_root / "pyproject.toml"
@@ -517,17 +500,14 @@ class ReleasePreparation:
     def _build_package(self) -> bool:
         """Build the package to verify it can be built."""
         try:
-            # Clean previous builds
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--upgrade", "build"],
-                check=False,
-                cwd=self.project_root,
-                capture_output=True,
-            )
-
-            # Build package
+            # `uv build`, not `pip install --upgrade build` + `python -m build`:
+            # `build` is not a declared dependency, so the old code silently
+            # mutated the developer's virtualenv with an undeclared package --
+            # and it built with a different frontend than CI, releasing.md and
+            # scripts/validate-release.py, all of which use `uv build`. A
+            # release check must exercise the path that actually ships.
             result = subprocess.run(
-                [sys.executable, "-m", "build"],
+                ["uv", "build"],
                 check=False,
                 cwd=self.project_root,
                 capture_output=True,
