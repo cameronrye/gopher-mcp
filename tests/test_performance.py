@@ -503,8 +503,15 @@ class TestGopherTimeoutIsOneBudget:
         assert seen, "the transport was never reached"
         # The 0.2s spent in DNS came out of the 1.0s budget, so the transport
         # must be granted strictly less than the full deadline.
-        assert seen[0] < 1.0, f"transport got a fresh full timeout: {seen[0]}"
-        assert seen[0] == pytest.approx(0.8, abs=0.15)
+        #
+        # Bounded rather than pinned to ~0.8: a loaded runner can overshoot the
+        # sleep, which only charges MORE to the budget and leaves less here. So
+        # assert the direction (at least the sleep was charged) and that the
+        # budget is not exhausted -- both of which a fresh full timeout, the bug
+        # this guards, would violate.
+        assert 0 < seen[0] <= 1.0 - 0.15, (
+            f"transport did not draw down the shared budget: {seen[0]}"
+        )
 
     @pytest.mark.asyncio
     async def test_the_robots_probe_spends_from_the_same_budget(self, monkeypatch):

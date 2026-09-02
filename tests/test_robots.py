@@ -1630,7 +1630,12 @@ class TestReviewRegressions:
             # 180, not 60: an unparseable meta must fall through to the
             # CONFIGURED backoff, not to the invented slow-down default. A
             # weaker bound here passed while that bug was live.
-            assert remaining == pytest.approx(180.0), (
+            #
+            # abs=1.0, not the pytest.approx default: that default is a
+            # RELATIVE 1e-6, i.e. +/-0.18ms at this magnitude, and real time
+            # elapses between the gate storing clock() + 180 and this read. A
+            # second of slack still separates 180 from 60 and from 0 by a mile.
+            assert remaining == pytest.approx(180.0, abs=1.0), (
                 f"{meta!r} did not fall through to the configured backoff"
             )
             await client.close()
