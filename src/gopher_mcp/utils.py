@@ -13,11 +13,6 @@ package's own import graph -- and so a reader looking for the bottom of that
 graph finds ``helpers`` rather than the identically generic-sounding ``utils``.
 """
 
-# ``os`` stays importable from this module so the suite can keep patching
-# ``gopher_mcp.utils.os.fsync`` -- the durability fsync used by
-# ``atomic_write_json``, which now lives in ``helpers``.
-import os  # noqa: F401
-
 from .gemini_parse import (
     format_gemini_url,
     parse_gemini_response,

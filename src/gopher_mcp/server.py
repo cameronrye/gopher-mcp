@@ -11,10 +11,12 @@ from typing import Annotated, Any, Literal, NamedTuple, Optional
 from urllib.parse import quote
 
 import structlog
+import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field, ValidationError
 from pydantic_core import to_json
+from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -48,7 +50,9 @@ from .models import (
     GeminiClientCertificateEntry,
     GeminiClientCertListResult,
     GeminiClientCertUpdateResult,
+    GeminiFetchOutput,
     GeminiFetchRequest,
+    GopherFetchOutput,
     GopherFetchRequest,
     TOFUTrustEntry,
     TOFUTrustListResult,
@@ -72,7 +76,10 @@ SERVER_INSTRUCTIONS = (
     "bodies are returned as metadata only (no raw bytes). On a Gemini status-10 "
     "or status-11 (input) response, call gemini_fetch again with the `input` "
     "argument set to the user's answer rather than building a query string by "
-    "hand. To query a Gopher type-7 search server, pass the terms in "
+    "hand. A result marked `truncated` carries a `next_offset`: call the same "
+    "tool again with `offset` set to it to read the rest, rather than treating "
+    "the first window as the whole resource. To query a Gopher type-7 search "
+    "server, pass the terms in "
     "gopher_fetch's `search` argument rather than appending them to the URL "
     "yourself: `search` percent-encodes them, so terms containing #, + or "
     "non-ASCII survive intact (a gopher://host/7/selector?terms URL is still "
@@ -237,6 +244,24 @@ _Refresh = Annotated[
         ),
     ),
 ]
+_Offset = Annotated[
+    int,
+    Field(
+        ge=0,
+        description=(
+            "Where to start reading, for a resource that came back truncated. "
+            "Pass the `next_offset` of the previous result -- it counts menu "
+            "items for a Gopher menu and characters for a page body -- to get "
+            "the next window; leave it 0 (the default) to read from the "
+            "beginning. A result with `truncated: true` and a `next_offset` is "
+            "the signal that there is more: continue from it rather than "
+            "presenting a partial page as the whole one, and stop when "
+            "`next_offset` comes back null. Each window is a fresh request to "
+            "the server, so read on because the content is needed, not by "
+            "reflex."
+        ),
+    ),
+]
 
 # Trust-store parameters. As with the URL parameters above, constraints are
 # described rather than declared (no ge/le on the port, no pattern on the
@@ -365,8 +390,52 @@ _CertFingerprint = Annotated[
     ),
 ]
 
+
+class _GopherMCP(FastMCP):
+    """FastMCP whose HTTP runners leave logging configuration to us.
+
+    The SDK's ``run_streamable_http_async``/``run_sse_async`` build
+    ``uvicorn.Config(...)`` with no ``log_config``, so uvicorn applies its own
+    ``dictConfig``: the ``uvicorn`` loggers get handlers of their own with
+    ``propagate = False``. Those handlers never see the one ``configure_logging``
+    installs, so on the HTTP transports every startup line bypassed the JSON
+    renderer and the ``GOPHER_MCP_LOG_FILE_PATH`` tee, and the access log went to
+    **stdout** -- contradicting the "logs always go to stderr, never stdout"
+    guarantee (docs/configuration.md), which exists because the stdio transport
+    puts the MCP protocol stream on stdout.
+
+    Passing ``log_config=None`` is the documented way to skip that dictConfig
+    entirely: uvicorn's loggers keep their default ``propagate``, so their
+    records reach the root handler like any other stdlib record. ``log_level`` is
+    left unset for the same reason -- passing it would pin uvicorn's loggers to
+    FastMCP's own ``FASTMCP_LOG_LEVEL``, where inheriting the root level makes
+    the documented ``GOPHER_MCP_LOG_LEVEL`` govern every line the process emits.
+
+    Overridden here, rather than by serving the app from ``__main__``, so
+    ``mcp.run(transport=...)`` remains the one way this server is started.
+    """
+
+    async def run_streamable_http_async(self) -> None:
+        """Serve the streamable-http app under our logging configuration."""
+        await self._serve_http(self.streamable_http_app())
+
+    async def run_sse_async(self, mount_path: str | None = None) -> None:
+        """Serve the SSE app under our logging configuration."""
+        await self._serve_http(self.sse_app(mount_path))
+
+    async def _serve_http(self, app: Starlette) -> None:
+        """Run ``app`` on the configured host/port with uvicorn's logging left alone."""
+        config = uvicorn.Config(
+            app,
+            host=self.settings.host,
+            port=self.settings.port,
+            log_config=None,
+        )
+        await uvicorn.Server(config).serve()
+
+
 # Initialize FastMCP server
-mcp = FastMCP("gopher-mcp", instructions=SERVER_INSTRUCTIONS)
+mcp = _GopherMCP("gopher-mcp", instructions=SERVER_INSTRUCTIONS)
 
 # Advertise our own version in the initialize handshake. FastMCP exposes no
 # `version` argument, and when the lowlevel server has none it falls back to
@@ -391,6 +460,19 @@ BATCH_CONCURRENCY = 5
 # `input` path below, where that message would quote the answer.)
 _GENERIC_FETCH_ERROR = "An unexpected error occurred while fetching the resource."
 _GENERIC_SETUP_ERROR = "Failed to initialize the fetch client."
+# The trust and client-certificate tools reach the client for one reason: to
+# read or write a store on disk. When construction fails there, "failed to
+# initialize the fetch client" sends the reader looking at the network or the
+# capsule, when the fault is a directory that could not be created or written --
+# a read-only container, or a HOME the process cannot write. Name the settings
+# that choose the location; the concrete path stays in the log, per the same
+# choice the client makes for CERTIFICATE_STORE_UNAVAILABLE.
+_STORE_SETUP_ERROR = (
+    "The Gemini trust/certificate store could not be opened, so this call has "
+    "nothing to read or change. This is a local problem, not a problem with any "
+    "capsule: check GEMINI_TOFU_STORAGE_PATH, GEMINI_CLIENT_CERTS_STORAGE_PATH "
+    "and the HOME they default under, rather than retrying."
+)
 
 # A status-10/11 answer may be a password, and it is percent-encoded into the
 # query string of the URL that gets validated. Pydantic's error string embeds an
@@ -439,11 +521,18 @@ _CLIENT_CERT_WRITE_LOCK = asyncio.Lock()
 # from the payload's own `kind`, which is the same fact the body already
 # carries. It changes nothing about the no-raise contract: nothing is raised,
 # and the structured body is still there.
+# The second half of the annotation is the payload model FastMCP builds the
+# tool's `outputSchema` from -- and, because the wrapper below returns a
+# CallToolResult, the model it validates our `structuredContent` against rather
+# than re-serializing it. `dict[str, Any]` is the honest default for the tools
+# whose payload is a hand-built dict; the fetch tools pass their result union
+# instead, so what they advertise is the real set of `kind`s.
 _TOOL_OUTPUT = Annotated[CallToolResult, dict[str, Any]]
 
 
 def _flag_errors(
     fn: Callable[..., Awaitable[dict[str, Any]]],
+    output: Any = _TOOL_OUTPUT,
 ) -> Callable[..., Awaitable[CallToolResult]]:
     """Wrap a dict-returning tool so a `kind: error` payload sets ``isError``.
 
@@ -456,6 +545,7 @@ def _flag_errors(
 
     Args:
         fn: The tool implementation, returning the payload to send.
+        output: The ``Annotated[CallToolResult, <payload model>]`` to advertise.
 
     Returns:
         A coroutine function returning the same payload as a CallToolResult.
@@ -481,7 +571,7 @@ def _flag_errors(
     setattr(  # noqa: B010 - a function attribute mypy will not let us assign
         flagged,
         "__signature__",
-        inspect.signature(fn).replace(return_annotation=_TOOL_OUTPUT),
+        inspect.signature(fn).replace(return_annotation=output),
     )
     return flagged
 
@@ -491,6 +581,7 @@ def _tool(
     title: str,
     annotations: ToolAnnotations,
     flag_errors: bool = True,
+    output: Any = _TOOL_OUTPUT,
 ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Register a function as an MCP tool, leaving the function itself alone.
 
@@ -505,6 +596,8 @@ def _tool(
         flag_errors: False for the batch tools, whose failures are per item:
             some URLs can fail while the call as a whole succeeded, so there is
             no single flag to set honestly.
+        output: The payload model to advertise as this tool's outputSchema,
+            wrapped in ``Annotated[CallToolResult, ...]``.
 
     Returns:
         A decorator registering the function and returning it unchanged.
@@ -513,7 +606,7 @@ def _tool(
 
     def register(fn: Callable[..., Any]) -> Callable[..., Any]:
         mcp.add_tool(
-            _flag_errors(fn) if flag_errors else fn,
+            _flag_errors(fn, output) if flag_errors else fn,
             title=title,
             annotations=annotations,
         )
@@ -635,7 +728,7 @@ def _error(code: str, message: str, **request_info: Any) -> dict[str, Any]:
     """
     return ErrorResult(
         error={"code": code, "message": message},
-        requestInfo=request_info,
+        request_info=request_info,
     ).model_dump()
 
 
@@ -681,6 +774,7 @@ async def _fetch_one(
     display_url: str | None = None,
     invalid_message: str | None = None,
     refresh: bool = False,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """Validate one URL, fetch it, and serialize the result.
 
@@ -702,6 +796,8 @@ async def _fetch_one(
         invalid_message: Replaces the validation message when surfacing it
             would quote a sensitive value.
         refresh: Bypass the cached copy of this URL for this read.
+        offset: Where the render window starts, for continuing a truncated
+            result (menu item index / character position).
 
     Returns:
         The serialized response or error, as the tool returns it.
@@ -722,18 +818,28 @@ async def _fetch_one(
 
     try:
         client = await resolve_client()
-        response = await client.fetch(request.url, refresh=refresh)
+        # ``offset`` is sent only when the caller is actually paging, so an
+        # ordinary fetch makes the same two-argument call it always has -- the
+        # parameter is a continuation of a truncated read, not part of every
+        # request.
+        window = {"offset": offset} if offset else {}
+        response = await client.fetch(request.url, refresh=refresh, **window)
         return response.model_dump()
     except Exception as e:  # defensive: client.fetch normally returns ErrorResult
         logger.error(f"{label} fetch failed", url=display, error=str(e))
         return _error("FETCH_ERROR", _GENERIC_FETCH_ERROR, url=display)
 
 
-@_tool(title="Fetch Gopher resource", annotations=_FETCH_ANNOTATIONS)
+@_tool(
+    title="Fetch Gopher resource",
+    annotations=_FETCH_ANNOTATIONS,
+    output=Annotated[CallToolResult, GopherFetchOutput],
+)
 async def gopher_fetch(
     url: _GopherUrl,
     search: _GopherSearch = None,
     refresh: _Refresh = False,
+    offset: _Offset = 0,
 ) -> dict[str, Any]:
     """Fetch Gopher menus or text by URL.
 
@@ -747,6 +853,12 @@ async def gopher_fetch(
       more entries than the render limit.
     - `text` -- a body in `text`, with `truncated` telling you whether it was
       cut at the render limit.
+
+    A `truncated` result is not a dead end: it carries `next_offset` (and, when
+    it is known, `total_items` or `total_chars`). Call again with `offset` set
+    to that value to read the next window, and keep going until `next_offset`
+    is null. Do that when the answer needs what was cut -- and say the view was
+    partial rather than presenting the first window as the whole resource.
     - `binary` -- metadata only: `bytes` and `mime_type`, never the content.
     - `error` -- `error.code` and `error.message`; nothing was fetched.
 
@@ -774,12 +886,20 @@ async def gopher_fetch(
         resolve_client=_gopher_client,
         label="Gopher",
         refresh=refresh,
+        offset=offset,
     )
 
 
-@_tool(title="Fetch Gemini resource", annotations=_FETCH_ANNOTATIONS)
+@_tool(
+    title="Fetch Gemini resource",
+    annotations=_FETCH_ANNOTATIONS,
+    output=Annotated[CallToolResult, GeminiFetchOutput],
+)
 async def gemini_fetch(
-    url: _GeminiUrl, input: _GeminiInput = None, refresh: _Refresh = False
+    url: _GeminiUrl,
+    input: _GeminiInput = None,
+    refresh: _Refresh = False,
+    offset: _Offset = 0,
 ) -> dict[str, Any]:
     """Fetch Gemini content by URL.
 
@@ -798,6 +918,12 @@ async def gemini_fetch(
       yourself if it is right to, and see the redirect rules below first.
     - `certificate` -- a client-identity status (60/61/62), described next.
     - `error` -- `error.code` and `error.message`; nothing was fetched.
+
+    A `gemtext` or `success` result cut at the render limit is not a dead end:
+    it carries `total_chars` and `next_offset`. Call again with `offset` set to
+    that value to read the next window, and keep going until `next_offset` is
+    null. Do that when the answer needs what was cut -- and say the view was
+    partial rather than presenting the first window as the whole page.
 
     Redirects are yours to follow, so they are also yours to bound: follow at
     most five in a row, and stop if a URL you have already fetched comes back,
@@ -849,6 +975,7 @@ async def gemini_fetch(
         display_url=safe_url,
         invalid_message=(_INVALID_INPUT_URL_ERROR if input is not None else None),
         refresh=refresh,
+        offset=offset,
     )
 
 
@@ -892,6 +1019,10 @@ async def _batch_fetch(
     async def fetch_one(url: str) -> dict[str, Any]:
         # Bounded concurrency: at most BATCH_CONCURRENCY in-flight at once.
         async with semaphore:
+            # No `offset` here on purpose: a batch is for breadth (several
+            # resources at once), and one offset cannot mean anything sensible
+            # across a list of different URLs. Continue a truncated item with
+            # the single-URL tool, which is where `next_offset` is answerable.
             return await _fetch_one(
                 url,
                 request_cls=request_cls,
@@ -994,7 +1125,9 @@ async def _tofu_manager_client(
         client = await _gemini_client()
     except Exception as e:
         logger.error("Gemini trust store unavailable", error=str(e))
-        return _error("FETCH_ERROR", _GENERIC_SETUP_ERROR, **request_info)
+        return _error(
+            "CERTIFICATE_STORE_UNAVAILABLE", _STORE_SETUP_ERROR, **request_info
+        )
     if client.tofu_manager is None:
         return _error("TOFU_DISABLED", _TOFU_DISABLED_MESSAGE, **request_info)
     return client
@@ -1049,7 +1182,7 @@ async def gemini_trust_list(host: _TrustHostFilter = None) -> dict[str, Any]:
     # the type checker to see that the two agree.
     return TOFUTrustListResult(
         entries=[TOFUTrustEntry.from_entry(entry) for entry in matched],
-        requestInfo=request_info,
+        request_info=request_info,
     ).model_dump()
 
 
@@ -1204,7 +1337,7 @@ async def gemini_trust_update(
         port=port,
         changed=changed,
         message=message,
-        requestInfo=request_info,
+        request_info=request_info,
     ).model_dump()
 
 
@@ -1222,7 +1355,9 @@ async def _client_cert_manager_client(
         client = await _gemini_client()
     except Exception as e:
         logger.error("Gemini certificate store unavailable", error=str(e))
-        return _error("FETCH_ERROR", _GENERIC_SETUP_ERROR, **request_info)
+        return _error(
+            "CERTIFICATE_STORE_UNAVAILABLE", _STORE_SETUP_ERROR, **request_info
+        )
     if client.client_cert_manager is None:
         return _error(
             "CLIENT_CERTS_DISABLED", _CLIENT_CERTS_DISABLED_MESSAGE, **request_info
@@ -1301,7 +1436,7 @@ async def gemini_client_cert_list(host: _CertHostFilter = None) -> dict[str, Any
             )
             for cert in matched
         ],
-        requestInfo=request_info,
+        request_info=request_info,
     ).model_dump()
 
 
@@ -1674,7 +1809,7 @@ async def gemini_client_cert_update(
         expires=outcome.expires,
         changed=outcome.changed,
         message=outcome.message,
-        requestInfo=request_info,
+        request_info=request_info,
     ).model_dump()
 
 
@@ -1821,6 +1956,8 @@ async def cleanup() -> None:
 
 def main() -> None:
     """Main entry point for the server."""
-    from . import __main__
+    # Lazy on purpose: ``__main__`` imports ``mcp``/``cleanup`` from this module,
+    # so a module-level import here would be a genuine import cycle.
+    from . import __main__  # noqa: PLC0415
 
     __main__.main()

@@ -10,7 +10,12 @@ import pytest
 from gopher_mcp.gemini_client import GeminiClient
 from gopher_mcp.gemini_tls import TLSConnectionError
 from gopher_mcp.gopher_client import GopherClient
-from gopher_mcp.models import GeminiErrorResult, GeminiSuccessResult, TextResult
+from gopher_mcp.models import (
+    GeminiErrorResult,
+    GeminiSuccessResult,
+    TextResult,
+    iso_utc,
+)
 
 
 @pytest.mark.slow
@@ -19,8 +24,15 @@ class TestPerformanceBaselines:
 
     @pytest.mark.asyncio
     async def test_gemini_client_response_time(self):
-        """Test Gemini client response time baseline."""
-        client = GeminiClient(tofu_enabled=False)
+        """Per-request client overhead, with nothing else in the measurement.
+
+        Politeness throttling is on by default, and a baseline that leaves it on
+        is really timing ``asyncio.sleep`` -- the number moves when the limiter
+        changes and not when the client gets slower, which is the opposite of
+        what this test is for. Disabled here the way the throughput tests below
+        already do it; the limiter has its own tests.
+        """
+        client = GeminiClient(tofu_enabled=False, requests_per_minute=0)
 
         # Mock fast response
         mock_response = b"20 text/plain\r\nTest content"
@@ -37,14 +49,17 @@ class TestPerformanceBaselines:
 
                         response_time = end_time - start_time
 
-                        # Should complete within reasonable time (< 100ms for mocked response)
-                        assert response_time < 2.0
+                        # A mocked exchange is microseconds of real work; the
+                        # ceiling bounds client overhead with room for a loaded
+                        # CI runner, not a hidden one-second sleep.
+                        assert response_time < 0.5
                         assert isinstance(result, GeminiSuccessResult)
 
     @pytest.mark.asyncio
     async def test_gopher_client_response_time(self):
-        """Test Gopher client response time baseline."""
-        client = GopherClient()
+        """Per-request client overhead; see the Gemini baseline above for why
+        the rate limiter is disabled rather than measured."""
+        client = GopherClient(requests_per_minute=0)
 
         # Mock fast response
         mock_response = b"Test content line 1\r\nTest content line 2\r\n.\r\n"
@@ -59,8 +74,8 @@ class TestPerformanceBaselines:
 
             response_time = end_time - start_time
 
-            # Should complete within reasonable time
-            assert response_time < 2.0
+            # Bounds client overhead, not a rate-limiter sleep.
+            assert response_time < 0.5
             assert isinstance(result, TextResult)
 
     def test_cache_performance(self):
@@ -77,7 +92,7 @@ class TestPerformanceBaselines:
                 content="Test content",
                 mimeType=GeminiMimeType(type="text", subtype="gemini", lang=None),
                 size=12,
-                requestInfo={"url": url, "timestamp": time.time()},
+                requestInfo={"url": url, "timestamp": iso_utc(time.time())},
             )
             client._cache_response(url, mock_response)
         end_time = time.time()
@@ -108,8 +123,14 @@ class TestConcurrentLoad:
 
     @pytest.mark.asyncio
     async def test_concurrent_gemini_requests(self):
-        """Test handling multiple concurrent Gemini requests."""
-        client = GeminiClient(tofu_enabled=False)
+        """Ten concurrent fetches really do overlap.
+
+        The URLs are ten distinct hosts, so per-host throttling would not fire
+        today -- but it is disabled explicitly all the same, so that pointing
+        this test at one host later cannot turn it into a measurement of the
+        limiter without anyone noticing.
+        """
+        client = GeminiClient(tofu_enabled=False, requests_per_minute=0)
 
         # Mock responses
         mock_response = b"20 text/plain\r\nTest content"
@@ -142,13 +163,15 @@ class TestConcurrentLoad:
         assert len(results) == 10
         assert all(isinstance(result, GeminiSuccessResult) for result in results)
 
-        # Concurrent execution should complete promptly (generous CI ceiling).
-        assert total_time < 5.0
+        # Ten mocked exchanges gathered together: this bounds the client, and
+        # is far below the ten seconds ten serialized 1/s requests would cost.
+        assert total_time < 1.0
 
     @pytest.mark.asyncio
     async def test_concurrent_gopher_requests(self):
-        """Test handling multiple concurrent Gopher requests."""
-        client = GopherClient()
+        """Ten concurrent fetches really do overlap; see the Gemini twin above
+        for why throttling is disabled rather than measured."""
+        client = GopherClient(requests_per_minute=0)
 
         # Mock responses
         mock_response = b"Test content\r\n.\r\n"
@@ -170,8 +193,8 @@ class TestConcurrentLoad:
         assert len(results) == 10
         assert all(isinstance(result, TextResult) for result in results)
 
-        # Should complete reasonably quickly
-        assert total_time < 2.0
+        # Bounds the client, not the limiter.
+        assert total_time < 1.0
 
 
 @pytest.mark.slow
@@ -228,7 +251,7 @@ class TestMemoryUsage:
                 content="A" * 1000,
                 mimeType=GeminiMimeType(type="text", subtype="gemini", lang=None),
                 size=1000,
-                requestInfo={"url": url, "timestamp": time.time()},
+                requestInfo={"url": url, "timestamp": iso_utc(time.time())},
             )
             client._cache_response(url, mock_response)
 
@@ -352,7 +375,7 @@ class TestResourceLimits:
                 content="Test content",
                 mimeType=GeminiMimeType(type="text", subtype="gemini", lang=None),
                 size=12,
-                requestInfo={"url": url, "timestamp": time.time()},
+                requestInfo={"url": url, "timestamp": iso_utc(time.time())},
             )
             client._cache_response(url, mock_response)
 
@@ -456,7 +479,7 @@ class TestLoadTesting:
                 content="Test content",
                 mimeType=GeminiMimeType(type="text", subtype="gemini", lang=None),
                 size=12,
-                requestInfo={"url": url, "timestamp": time.time()},
+                requestInfo={"url": url, "timestamp": iso_utc(time.time())},
             )
             client._cache_response(url, mock_response)
         end_time = time.time()

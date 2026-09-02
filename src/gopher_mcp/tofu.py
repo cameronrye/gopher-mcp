@@ -15,9 +15,9 @@ from typing import Any
 
 import structlog
 
+from .helpers import atomic_write_json, get_home_directory
 from .models import TOFUEntry
 from .ssrf import normalize_host
-from .utils import atomic_write_json, get_home_directory
 
 # fcntl is POSIX-only. The explicit ``ModuleType | None`` annotation keeps the
 # ``is None`` guard reachable under mypy's warn_unreachable (the import always

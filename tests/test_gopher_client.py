@@ -1,12 +1,17 @@
 """Tests for gopher_mcp.gopher_client module."""
 
+import socket
 import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from gopher_mcp.gopher_client import GopherClient
-from gopher_mcp.gopher_transport import GopherProtocolError, GopherTimeoutError
+from gopher_mcp.gopher_transport import (
+    GopherProtocolError,
+    GopherTimeoutError,
+    fetch_gopher,
+)
 from gopher_mcp.models import (
     BinaryResult,
     CacheEntry,
@@ -375,7 +380,7 @@ class TestFetchMethod:
         client = GopherClient(allowed_hosts=["allowed.com"], respect_robots_txt=False)
         url = "gopher://forbidden.com/1/"
 
-        with patch("gopher_mcp.utils.parse_gopher_url") as mock_parse:
+        with patch("gopher_mcp.gopher_client.parse_gopher_url") as mock_parse:
             mock_parse.return_value = GopherURL(
                 host="forbidden.com",
                 port=70,
@@ -391,17 +396,36 @@ class TestFetchMethod:
 
     @pytest.mark.asyncio
     async def test_fetch_parse_url_error(self):
-        """Test fetch method with URL parsing error."""
+        """A parser ValueError becomes INVALID_REQUEST with its text intact.
+
+        The patch target is ``gopher_mcp.gopher_client.parse_gopher_url``, the
+        name the client actually calls: patching ``gopher_mcp.utils`` (the
+        compat facade) was inert, because the client binds its own reference at
+        import time -- the assertion below only ever saw the *real* parser's
+        message. Validation errors are deliberately surfaced verbatim
+        (gopher_client.py: "Validation errors ... are safe to surface"), so the
+        injected text is what the caller must see.
+        """
         client = GopherClient(respect_robots_txt=False)
         url = "invalid://url"
 
-        with patch("gopher_mcp.utils.parse_gopher_url") as mock_parse:
+        with patch("gopher_mcp.gopher_client.parse_gopher_url") as mock_parse:
             mock_parse.side_effect = ValueError("Invalid URL")
 
             result = await client.fetch(url)
             assert isinstance(result, ErrorResult)
             assert result.error["code"] == "INVALID_REQUEST"
-            assert "URL must start with 'gopher://'" in result.error["message"]
+            assert result.error["message"] == "Invalid URL"
+
+    @pytest.mark.asyncio
+    async def test_fetch_rejects_non_gopher_scheme(self):
+        """The unpatched parser still rejects a non-gopher scheme."""
+        client = GopherClient(respect_robots_txt=False)
+
+        result = await client.fetch("invalid://url")
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "INVALID_REQUEST"
+        assert "URL must start with 'gopher://'" in result.error["message"]
 
     @pytest.mark.asyncio
     async def test_fetch_content_error(self):
@@ -410,7 +434,7 @@ class TestFetchMethod:
         url = "gopher://example.com/1/"
 
         with (
-            patch("gopher_mcp.utils.parse_gopher_url") as mock_parse,
+            patch("gopher_mcp.gopher_client.parse_gopher_url") as mock_parse,
             patch.object(client, "_fetch_content") as mock_fetch,
         ):
             mock_parse.return_value = GopherURL(
@@ -433,7 +457,7 @@ class TestFetchMethod:
         expected_result = MenuResult(items=[])
 
         with (
-            patch("gopher_mcp.utils.parse_gopher_url") as mock_parse,
+            patch("gopher_mcp.gopher_client.parse_gopher_url") as mock_parse,
             patch.object(client, "_fetch_content") as mock_fetch,
         ):
             mock_parse.return_value = GopherURL(
@@ -479,7 +503,7 @@ class TestFetchMethod:
         url = "gopher://example.com/1/"
 
         with (
-            patch("gopher_mcp.utils.parse_gopher_url") as mock_parse,
+            patch("gopher_mcp.gopher_client.parse_gopher_url") as mock_parse,
             patch.object(client, "_fetch_content") as mock_fetch,
         ):
             mock_parse.return_value = GopherURL(
@@ -1349,7 +1373,12 @@ class TestIgnoredSearchIsVisible:
 
     @pytest.mark.asyncio
     async def test_search_type_and_query_less_urls_carry_no_flag(self):
-        client = GopherClient(respect_robots_txt=False, cache_enabled=False)
+        # Two uncached reads of one host: without the robots probe to inherit a
+        # slot from, the second would wait a full politeness interval, and the
+        # flag is what is under test here rather than the spacing.
+        client = GopherClient(
+            respect_robots_txt=False, cache_enabled=False, requests_per_minute=0
+        )
         with patch(
             "gopher_mcp.gopher_client.fetch_gopher",
             new=AsyncMock(return_value=b".\r\n"),
@@ -1474,3 +1503,194 @@ class TestRobotsProbeSharesOneRequestsWorthOfBudget:
         # alone -- and pays for its own slot and its own lookup.
         assert client._rate_limiter.acquire.await_count == 2
         assert resolved == ["example.com", "example.com"]
+
+
+class TestConnectFailureDoesNotEchoTheAddress:
+    """A failed connect must not report which IP was actually tried."""
+
+    @pytest.mark.asyncio
+    async def test_refused_connect_omits_the_resolved_ip(self):
+        """The transport is handed the IPs the SSRF guard vetted; echoing one
+        back in the error turns a failed fetch into an internal-reachability
+        oracle. asyncio hides the sockaddr *inside* ``strerror``
+        (``OSError(err, f"Connect call failed {address}")``), so reporting
+        ``e.strerror`` -- as this code used to -- leaked it anyway.
+        """
+        # Bind and release a port so the connect is refused rather than filtered.
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            closed_port = probe.getsockname()[1]
+
+        with pytest.raises(GopherProtocolError) as exc_info:
+            await fetch_gopher(
+                "example.com",
+                closed_port,
+                "/",
+                max_bytes=1024,
+                timeout=5.0,
+                connect_addresses=["127.0.0.1"],
+            )
+
+        message = str(exc_info.value)
+        assert "127.0.0.1" not in message
+        assert str(closed_port) not in message
+        assert message.startswith("Connection failed: ")
+
+
+class TestResponseSizeAccessor:
+    """One concept, two wire names -- resolved in one place, not at every caller."""
+
+    def test_gopher_reads_the_bytes_field(self):
+        client = GopherClient()
+        assert client._response_size(TextResult(bytes=42, text="x")) == 42
+
+    def test_bodiless_results_report_zero(self):
+        """A menu carries no content length at all; 0 is the honest answer."""
+        client = GopherClient()
+        assert client._response_size(MenuResult(items=[])) == 0
+
+
+class TestOffsetContinuation:
+    """A truncated result must be continuable, not a dead end.
+
+    The render caps used to cut and discard: `truncated: true` told the model
+    something was missing but no call could retrieve it, and a menu did not
+    even say how much was gone.
+    """
+
+    MENU = (
+        "".join(f"1Item {i}\t/item{i}\texample.com\t70\r\n" for i in range(20))
+        + ".\r\n"
+    ).encode()
+    TEXT = "".join(f"line {i}\n" for i in range(40)).encode()
+
+    def _client(self, **kwargs):
+        defaults = {
+            "respect_robots_txt": False,
+            "requests_per_minute": 0,
+            "cache_enabled": False,
+        }
+        return GopherClient(**{**defaults, **kwargs})
+
+    @pytest.mark.asyncio
+    async def test_a_truncated_menu_says_where_the_rest_starts(self):
+        client = self._client(max_menu_items=3)
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=self.MENU),
+        ):
+            first = await client.fetch("gopher://example.com/1/")
+            second = await client.fetch("gopher://example.com/1/", offset=3)
+
+        assert [i.title for i in first.items] == ["Item 0", "Item 1", "Item 2"]
+        assert first.truncated is True
+        assert first.next_offset == 3
+        # The cap was hit, so the true total is not known -- and a made-up
+        # number would be worse than none. next_offset is what makes the rest
+        # reachable.
+        assert first.total_items is None
+        assert [i.title for i in second.items] == ["Item 3", "Item 4", "Item 5"]
+        assert second.next_offset == 6
+
+    @pytest.mark.asyncio
+    async def test_a_complete_menu_reports_its_total_and_no_next_offset(self):
+        client = self._client(max_menu_items=100)
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=self.MENU),
+        ):
+            result = await client.fetch("gopher://example.com/1/")
+
+        assert result.truncated is False
+        assert result.total_items == 20
+        assert result.next_offset is None
+
+    @pytest.mark.asyncio
+    async def test_an_uncapped_menu_still_honours_the_offset(self):
+        """max_menu_items=0 means no render cap, so nothing is ever truncated --
+        but an offset the caller asks for is still where the window starts."""
+        client = self._client(max_menu_items=0)
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=self.MENU),
+        ):
+            result = await client.fetch("gopher://example.com/1/", offset=18)
+
+        assert [i.title for i in result.items] == ["Item 18", "Item 19"]
+        assert result.truncated is False
+        assert result.total_items == 20
+        assert result.next_offset is None
+
+    @pytest.mark.asyncio
+    async def test_text_windows_reassemble_into_the_whole_body(self):
+        client = self._client(max_rendered_chars=40)
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=self.TEXT),
+        ):
+            result = await client.fetch("gopher://example.com/0/a.txt")
+            assert result.total_chars == len(self.TEXT.decode())
+            # `bytes` is still the full body, and is NOT an offset: it counts
+            # bytes where next_offset counts characters.
+            assert result.bytes == len(self.TEXT)
+
+            seen = result.text
+            offset = result.next_offset
+            while offset is not None:
+                window = await client.fetch(
+                    "gopher://example.com/0/a.txt", offset=offset
+                )
+                seen += window.text
+                offset = window.next_offset
+
+        assert seen == self.TEXT.decode()
+
+    @pytest.mark.asyncio
+    async def test_an_offset_past_the_end_is_empty_not_an_error(self):
+        client = self._client(max_rendered_chars=40)
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=self.TEXT),
+        ):
+            result = await client.fetch("gopher://example.com/0/a.txt", offset=10_000)
+
+        assert isinstance(result, TextResult)
+        assert result.text == ""
+        assert result.truncated is False
+        assert result.next_offset is None
+
+    @pytest.mark.asyncio
+    async def test_a_negative_offset_is_rejected(self):
+        client = self._client()
+
+        result = await client.fetch("gopher://example.com/0/a.txt", offset=-1)
+
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
+    async def test_the_cache_does_not_serve_one_window_for_another(self):
+        """The cache stores the rendered window, not the body, so the offset is
+        part of the key -- otherwise a request for the second window would be
+        answered with the first one, silently."""
+        client = self._client(cache_enabled=True, max_rendered_chars=40)
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=self.TEXT),
+        ) as mock_fetch:
+            first = await client.fetch("gopher://example.com/0/a.txt")
+            second = await client.fetch("gopher://example.com/0/a.txt", offset=40)
+            replay = await client.fetch("gopher://example.com/0/a.txt")
+
+        assert second.text != first.text
+        assert second.text == self.TEXT.decode()[40:80]
+        # Each window is fetched once; the repeat of window 0 is served cached.
+        assert mock_fetch.await_count == 2
+        assert replay.cached is True
+        assert replay.text == first.text

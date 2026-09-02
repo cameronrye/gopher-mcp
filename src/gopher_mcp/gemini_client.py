@@ -10,7 +10,13 @@ import structlog
 
 from .client_base import FetchClientBase
 from .client_certs import ClientCertificateManager
-from .gemini_parse import GeminiProtocolError, format_gemini_url
+from .gemini_parse import (
+    GeminiProtocolError,
+    format_gemini_url,
+    parse_gemini_response,
+    parse_gemini_url,
+    process_gemini_response,
+)
 from .gemini_tls import (
     GeminiConnectionError,
     GeminiResponseTooLargeError,
@@ -39,14 +45,10 @@ from .ssrf import HostResolutionError, SSRFError, validate_target
 from .tofu import (
     TOFUExpiredError,
     TOFUManager,
+    TOFUNotYetValidError,
     TOFUStorageError,
     TOFUUnavailableError,
     TOFUValidationError,
-)
-from .utils import (
-    parse_gemini_response,
-    parse_gemini_url,
-    process_gemini_response,
 )
 
 logger = structlog.get_logger(__name__)
@@ -140,6 +142,15 @@ _PROBE_CREDIT: ContextVar[_ProbeCredit | None] = ContextVar(
 )
 
 
+# Where the render window starts for the fetch running in this task: menu item
+# index / character position, 0 for the beginning. A ContextVar for the same
+# reason as the budget above -- it has to reach the render step across
+# ``_bounded_fetch``/``_fetch_content``, the seam subclasses and test doubles
+# implement, and each task's own copy keeps concurrent fetches from reading each
+# other's window (a value parked on the shared client instance would not).
+_RENDER_OFFSET: ContextVar[int] = ContextVar("gemini_render_offset", default=0)
+
+
 def _ipv4_first(addresses: list[str]) -> list[str]:
     """Order vetted connect addresses IPv4 first, keeping every one of them.
 
@@ -166,6 +177,8 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
 
     _log_label = "Gemini"
     _cache_entry_cls = GeminiCacheEntry
+    # Gemini results spell the content length ``size`` (Gopher says ``bytes``).
+    _response_size_field = "size"
     _robots_tokens = GEMINI_TOKENS
     # Unlike Gopher this fails *closed* on a temporary failure (RFC 9309
     # s2.3.1.4), which Gemini can express because it has status codes -- see
@@ -324,7 +337,9 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         if not 1 <= parsed_url.port <= 65535:
             raise ValueError(f"Invalid port number: {parsed_url.port}")
 
-    async def fetch(self, url: str, *, refresh: bool = False) -> GeminiFetchResponse:
+    async def fetch(
+        self, url: str, *, refresh: bool = False, offset: int = 0
+    ) -> GeminiFetchResponse:
         """Fetch content from a Gemini URL.
 
         Args:
@@ -332,6 +347,10 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             refresh: Skip the cache lookup and go to the server. The fresh
                 response still replaces the cached one, so this bypasses the
                 cache for this read rather than disabling it.
+            offset: Character position the returned body window starts at. Pass
+                back the ``next_offset`` of a truncated result to read the part
+                that was cut; 0 is the beginning. Offsets past the end return an
+                empty window, not an error.
 
         Returns:
             Structured response based on status code
@@ -346,7 +365,20 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         # same task would otherwise inherit the first one's rate-limit slot and
         # its already-resolved addresses.
         credit_token = _PROBE_CREDIT.set(None)
+        # Set here rather than passed down through ``_bounded_fetch``: that
+        # method and ``_fetch_content`` are the seam a subclass (and the robots
+        # gate's own fetcher) implement, and widening it for a value only the
+        # render path reads would push the parameter through code with no use
+        # for it. Same lifecycle as the budget above, and each task's copy keeps
+        # concurrent fetches from reading each other's window.
+        offset_token = _RENDER_OFFSET.set(offset)
         try:
+            # Rejected rather than clamped: a negative offset is a caller
+            # mistake, and silently reading from 0 would answer a question that
+            # was not asked.
+            if offset < 0:
+                raise ValueError("offset must not be negative")
+
             # Parse the URL
             parsed_url = parse_gemini_url(url)
 
@@ -375,6 +407,16 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             cache_key = format_gemini_url(
                 parsed_url.host, parsed_url.port, parsed_url.path, parsed_url.query
             )
+            if offset:
+                # What the cache stores is the RENDERED WINDOW, not the body, so
+                # two windows of one page are two entries -- serving window 0 to
+                # a request for window 50000 would silently answer the wrong
+                # question. Caching the whole body instead would put full-size
+                # bodies in a cache whose entry cap exists to bound its memory,
+                # so the offset goes in the key and a continuation pays for its
+                # own fetch. NUL cannot appear in a URL, so this can never
+                # collide with the key another URL formats to.
+                cache_key = f"{cache_key}\x00offset={offset}"
 
             # Check cache first, unless the caller asked for the current state.
             if self.cache_enabled and not refresh:
@@ -396,7 +438,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                         # so a rename or a typo must fail mypy rather than
                         # silently logging "unknown" forever.
                         response_type=cached_response.kind,
-                        response_size=getattr(cached_response, "size", 0),
+                        response_size=self._response_size(cached_response),
                     )
                     return cached_response
 
@@ -461,7 +503,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 path=parsed_url.path,
                 has_query=parsed_url.query is not None,
                 response_type=response.kind,
-                response_size=getattr(response, "size", 0),
+                response_size=self._response_size(response),
                 cached=False,
             )
 
@@ -475,6 +517,12 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         except SSRFError as e:
             # Policy messages name a host/category only (no internal detail).
             return self._error_result(url, "BLOCKED", str(e), e)
+        except TOFUNotYetValidError as e:
+            # A subclass of TOFUExpiredError, so it MUST precede that handler:
+            # otherwise a certificate presented before its notBefore is reported
+            # as CERTIFICATE_EXPIRED, which inverts the diagnosis and sends the
+            # reader looking for a renewal that is not the problem.
+            return self._error_result(url, "CERTIFICATE_NOT_YET_VALID", str(e), e)
         except TOFUExpiredError as e:
             # Distinct from a fingerprint change: the cert MATCHES the pin but is
             # outside its validity window. Report it accurately (must precede the
@@ -505,8 +553,12 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             return self._error_result(
                 url,
                 "CERTIFICATE_STORE_UNAVAILABLE",
-                "The TOFU trust store is locked by another process, so the "
-                "server certificate could not be recorded",
+                "The TOFU trust store could not be written -- it is locked by "
+                "another process, or the location is not writable -- so the "
+                "server certificate could not be recorded. This is a local "
+                "problem, not a problem with the capsule: check "
+                "GEMINI_TOFU_STORAGE_PATH (and the HOME it defaults under) "
+                "rather than retrying.",
                 e,
             )
         except RateLimited as e:
@@ -557,6 +609,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         finally:
             _FETCH_BUDGET.reset(budget_token)
             _PROBE_CREDIT.reset(credit_token)
+            _RENDER_OFFSET.reset(offset_token)
 
     async def _bounded_fetch(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
         """Run the guarded fetch, spending what the robots probe already paid.
@@ -599,7 +652,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 ),
                 "retry_after_seconds": retry_after,
             },
-            requestInfo={"url": safe_url, "timestamp": iso_utc(time.time())},
+            request_info={"url": safe_url, "timestamp": iso_utc(time.time())},
         )
 
     def _safe_error_url(self, url: str) -> str:
@@ -718,7 +771,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return GeminiErrorResult(
             error={"code": code, "message": message},
-            requestInfo={
+            request_info={
                 "url": _safe_display_url(parsed_url),
                 "host": parsed_url.host,
                 "port": parsed_url.port,
@@ -1083,6 +1136,12 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                     parsed_response,
                     request_url,
                     time.time(),
+                    # Where the caller asked the render window to start. Gemini
+                    # has no range request, so the whole body was still
+                    # transferred; this windows what is handed to the model.
+                    # A robots.txt probe never pages -- it runs with the
+                    # default 0 because the gate calls it outside a fetch.
+                    offset=_RENDER_OFFSET.get() if apply_content_policy else 0,
                     max_rendered_chars=(
                         self.max_rendered_chars if apply_content_policy else 0
                     ),

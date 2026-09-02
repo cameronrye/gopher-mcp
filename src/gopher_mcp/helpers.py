@@ -11,7 +11,7 @@ import os
 import tempfile
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 # Whitespace that carries meaning in a multi-line body and therefore survives
@@ -235,3 +235,59 @@ def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
     if max_chars and len(text) > max_chars:
         return text[:max_chars], True
     return text, False
+
+
+def describe_oserror(exc: OSError) -> str:
+    """Describe an ``OSError`` without echoing any address it carries.
+
+    ``exc.strerror`` looks like the safe choice but is not: asyncio raises every
+    deferred connect failure as ``OSError(err, f"Connect call failed {address}")``
+    (a single construction site in ``asyncio/selector_events.py``), so the
+    connect sockaddr -- for us, the SSRF-vetted *resolved IP* -- is embedded in
+    ``strerror`` itself. Echoing it back to the caller would turn a failed fetch
+    into an internal-reachability/DNS-resolution oracle. ``os.strerror(errno)``
+    is the platform's canonical text for the same failure and contains no
+    address, so it is what callers report.
+    """
+    if exc.errno is not None:
+        with contextlib.suppress(ValueError, OverflowError):
+            return os.strerror(exc.errno)
+    return "unable to connect"
+
+
+class TextWindow(NamedTuple):
+    """One render-limited slice of a longer body, and where the rest starts.
+
+    The render caps used to be one-way: a body was cut to ``max_chars`` and the
+    remainder was simply gone, so a model could see that something was missing
+    but had no call that would retrieve it. A window carries the two facts that
+    make a cut result continuable -- how long the whole body is, and the offset
+    the next slice begins at.
+    """
+
+    #: The characters in this window.
+    text: str
+    #: Character offset this window starts at (the caller's ``offset``, clamped).
+    start: int
+    #: Length of the whole body, in characters, before any cut.
+    total: int
+
+    @property
+    def next_offset(self) -> int | None:
+        """Offset of the first character after this window, or None at the end."""
+        end = self.start + len(self.text)
+        return end if end < self.total else None
+
+
+def window_text(text: str, offset: int, max_chars: int) -> TextWindow:
+    """Return the ``max_chars`` window of ``text`` starting at ``offset``.
+
+    Counted in characters, not bytes: the byte counts a result reports
+    (``bytes``/``size``) cannot be used as an offset without the risk of
+    splitting a UTF-8 sequence. ``max_chars`` of 0 means unlimited, matching
+    :func:`truncate_text`, and an ``offset`` past the end yields an empty window
+    rather than an error -- there is simply nothing left to show.
+    """
+    start = min(max(offset, 0), len(text))
+    window = text[start:] if not max_chars else text[start : start + max_chars]
+    return TextWindow(window, start, len(text))

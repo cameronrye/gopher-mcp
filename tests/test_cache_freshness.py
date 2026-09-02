@@ -251,7 +251,10 @@ class TestRefreshBypassesTheCache:
 
     @pytest.mark.asyncio
     async def test_gopher_refresh_refetches_and_repopulates(self):
-        client = GopherClient(respect_robots_txt=False)
+        # Three reads of one URL. Robots is off, so there is no probe whose
+        # rate-limit slot the fetch could inherit and each read would wait a
+        # full politeness interval; this test is about the cache, not spacing.
+        client = GopherClient(respect_robots_txt=False, requests_per_minute=0)
         url = "gopher://example.com/0/a.txt"
 
         with patch.object(client, "_fetch_content") as mock_fetch:
@@ -275,10 +278,13 @@ class TestRefreshBypassesTheCache:
 
     @pytest.mark.asyncio
     async def test_gemini_refresh_refetches_and_repopulates(self):
+        # See the Gopher twin above: three reads of one URL, and spacing them is
+        # not what is under test.
         client = GeminiClient(
             tofu_enabled=False,
             client_certs_enabled=False,
             respect_robots_txt=False,
+            requests_per_minute=0,
         )
         url = "gemini://example.org/"
 

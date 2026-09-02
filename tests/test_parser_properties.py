@@ -300,17 +300,85 @@ def test_menu_item_fields_never_carry_control_characters(line: str) -> None:
     assert not _CONTROL_RE.search(item.next_url)
 
 
+# Gemtext dispatches on a line's leading marker, and each branch builds its
+# line differently -- the marker-stripped `text` of a heading/list/quote, the
+# split URL and label of a link, the alt text carried on a preformat toggle.
+# Generating bare ``st.text()`` exercises only the plain-text branch (the
+# markers are three-in-a-million as a random prefix), so an escape sequence
+# surviving in, say, a list item's stripped text would go unnoticed: every line
+# type has to be *generated*, not merely reachable in principle.
+_GEMTEXT_MARKERS = ["", "* ", "> ", "# ", "## ", "### ", "=> ", "```", "=>"]
+
+# A line's body carries no newline of its own -- the marker is only meaningful
+# at the start of a line, so an embedded newline would silently produce a
+# different document than the one the strategy describes.
+_free_bodies = st.text(alphabet=st.characters(exclude_characters="\r\n"), max_size=60)
+
+# Link lines are two tokens, and the second is optional -- free text almost
+# never lands on that shape, so a link's URL/label split would otherwise be
+# generated only by accident. The control-character tokens are here because a
+# `=>` line whose URL is nothing but an escape sequence must degrade to plain
+# text rather than emit an empty link; note that `parse_gemtext` sanitizes the
+# whole document *before* splitting it, so what reaches the link parser is
+# already the stripped remainder (`\x1b[2J` arrives as `[2J`, a usable URL).
+_hostile_tokens = st.sampled_from(["\x1b", "\x1b[2J", "\x07\x07", "\x00"])
+_link_bodies = st.builds(
+    lambda url, label: f"{url} {label}".rstrip(),
+    st.one_of(_hostile_tokens, st.just("/page.gmi"), st.just("gemini://example.org/")),
+    st.one_of(_hostile_tokens, st.just("Label"), st.just("")),
+)
+
+_line_bodies = st.one_of(_free_bodies, _link_bodies)
+
+gemtext_lines = st.builds(
+    lambda marker, body: marker + body,
+    marker=st.sampled_from(_GEMTEXT_MARKERS),
+    body=_line_bodies,
+)
+
+gemtext_documents = st.one_of(
+    st.text(max_size=500),
+    st.lists(gemtext_lines, max_size=12).map("\n".join),
+)
+
+
 @PROPERTY
-@given(content=st.text(max_size=500))
+@given(content=gemtext_documents)
 def test_gemtext_lines_never_carry_control_characters(content: str) -> None:
     document = parse_gemtext(content)
     for line in document.lines:
         # TAB is meaningful inside a line (notably in preformatted blocks) and
         # is deliberately kept; nothing else in the control range is.
         assert not _CONTROL_RE_KEEPING_TAB.search(line.content)
+        # The marker-stripped text and a preformat block's alt-text are
+        # separately built strings, so sanitizing ``content`` alone would not
+        # cover them.
+        assert line.text is None or not _CONTROL_RE_KEEPING_TAB.search(line.text)
+        assert line.alt_text is None or not _CONTROL_RE_KEEPING_TAB.search(
+            line.alt_text
+        )
     for link in document.links:
         assert not _CONTROL_RE.search(link.url)
         assert link.text is None or not _CONTROL_RE.search(link.text)
+
+
+@PROPERTY
+@given(lines=st.lists(gemtext_lines, min_size=1, max_size=12))
+def test_every_gemtext_line_is_accounted_for(lines: list[str]) -> None:
+    """No line type is silently dropped.
+
+    Every input line yields exactly one output line, whatever its marker -- in
+    particular a link line with no usable URL degrades to a text line rather
+    than vanishing, which is the one branch that could plausibly lose content.
+
+    The sentinel line is not decoration: the parser drops one trailing empty
+    line as the document's final newline, and a generated last line can *become*
+    empty (a body of nothing but control characters sanitizes away), so counting
+    without it would be asserting the trailing-newline rule rather than this
+    one.
+    """
+    document = parse_gemtext("\n".join([*lines, "end"]))
+    assert len(document.lines) == len(lines) + 1
 
 
 @PROPERTY

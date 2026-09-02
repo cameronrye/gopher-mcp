@@ -133,6 +133,17 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
     _robots_tokens: ClassVar[tuple[str, ...]]
     #: What the robots gate does when a policy cannot be retrieved.
     _robots_fail_closed: ClassVar[bool]
+    #: Field on this protocol's results that carries the content length.
+    #:
+    #: One concept, two wire names: Gopher results call it ``bytes``
+    #: (``TextResult``/``BinaryResult``) and Gemini results call it ``size``
+    #: (``GeminiSuccessResult``/``GeminiBinaryResult``/``GeminiGemtextResult``).
+    #: The names are part of the published tool output that
+    #: ``docs/api-reference.md`` documents, so they are NOT unified on the wire
+    #: -- renaming either would break every consumer. This indirection keeps the
+    #: divergence in one place instead of making every protocol-agnostic caller
+    #: know which protocol says which.
+    _response_size_field: ClassVar[str]
 
     def __init__(
         self,
@@ -255,6 +266,16 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
             # inherit whatever the first one had left.
             _FETCH_BUDGET.reset(token)
 
+    def _response_size(self, response: ResponseT) -> int:
+        """Return ``response``'s content length, whatever this protocol calls it.
+
+        Defaults to 0 for the members of the response union that carry no body
+        at all (menus, errors, redirects, input prompts), which is what the log
+        lines want: "no bytes of content", not "unknown".
+        """
+        size = getattr(response, self._response_size_field, 0)
+        return size if isinstance(size, int) else 0
+
     def _host_is_allowed(self, host: str) -> bool:
         """Return whether ``host`` passes the configured allowlist.
 
@@ -281,7 +302,7 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
         )
         return ErrorResult(
             error={"code": code, "message": message},
-            requestInfo={"url": safe_url, "timestamp": iso_utc(time.time())},
+            request_info={"url": safe_url, "timestamp": iso_utc(time.time())},
         )
 
     async def _bounded_fetch(self, parsed_url: UrlT) -> ResponseT:

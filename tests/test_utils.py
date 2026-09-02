@@ -1,11 +1,17 @@
 """Tests for gopher_mcp.utils module."""
 
+import errno
+import os
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import gopher_mcp
+import gopher_mcp.utils
+from gopher_mcp.helpers import describe_oserror, window_text
 from gopher_mcp.utils import (
     atomic_write_json,
     format_gemini_url,
@@ -33,7 +39,7 @@ class TestAtomicWriteJson:
         with tempfile.TemporaryDirectory() as d:
             target = str(Path(d) / "store.json")
             with (
-                patch("gopher_mcp.utils.os.fsync", side_effect=OSError("ENOSPC")),
+                patch("gopher_mcp.helpers.os.fsync", side_effect=OSError("ENOSPC")),
                 pytest.raises(OSError),
             ):
                 atomic_write_json(target, {"a": 1})
@@ -531,3 +537,87 @@ class TestGopherUrlPortAndSelectorHandling:
         """A control char in the type-7 search field must be rejected."""
         with pytest.raises(ValueError, match=r"control character"):
             parse_gopher_url("gopher://example.com/7sel%09a%0db")
+
+
+class TestDescribeOSError:
+    """The address an OSError carries must never reach the caller-facing text."""
+
+    def test_asyncio_connect_failure_text_is_dropped(self):
+        """asyncio raises ``OSError(err, f"Connect call failed {address}")``, so
+        ``strerror`` itself carries the sockaddr -- the resolved IP the SSRF
+        guard vetted. Only the errno's canonical text may survive."""
+        exc = OSError(errno.ECONNREFUSED, "Connect call failed ('127.0.0.1', 1)")
+
+        described = describe_oserror(exc)
+
+        assert "127.0.0.1" not in described
+        assert described == os.strerror(errno.ECONNREFUSED)
+
+    def test_errnoless_oserror_gets_a_generic_description(self):
+        assert describe_oserror(OSError("boom")) == "unable to connect"
+
+
+class TestWindowText:
+    """The render cap has to be continuable, not just a cut."""
+
+    def test_first_window_reports_where_the_rest_starts(self):
+        window = window_text("abcdefghij", 0, 4)
+
+        assert window.text == "abcd"
+        assert window.start == 0
+        assert window.total == 10
+        assert window.next_offset == 4
+
+    def test_windows_chain_to_the_exact_original(self):
+        text = "".join(f"line {i}\n" for i in range(50))
+        seen = ""
+        offset = 0
+        while offset is not None:
+            window = window_text(text, offset, 37)
+            seen += window.text
+            offset = window.next_offset
+
+        assert seen == text
+
+    def test_last_window_has_no_next_offset(self):
+        assert window_text("abcdefghij", 8, 4).next_offset is None
+
+    def test_zero_means_unlimited(self):
+        window = window_text("abcdefghij", 2, 0)
+
+        assert window.text == "cdefghij"
+        assert window.next_offset is None
+
+    def test_offset_past_the_end_is_empty_not_an_error(self):
+        window = window_text("abc", 99, 4)
+
+        assert window.text == ""
+        assert window.start == 3
+        assert window.next_offset is None
+
+
+class TestUtilsFacadeIsExternalCompatOnly:
+    """The facade re-exports names for importers OUTSIDE the package.
+
+    While the package's own modules imported through it, it could never be
+    retired -- and a new reader looking for the bottom of the import graph
+    found the generically named `utils` instead of `helpers`, which is where
+    the implementations actually live.
+    """
+
+    def test_no_module_in_the_package_imports_it(self):
+        package = Path(gopher_mcp.__file__).parent
+        offenders = [
+            path.name
+            for path in sorted(package.glob("*.py"))
+            if path.name != "utils.py"
+            and re.search(
+                r"^from \.utils import|^from \. import utils", path.read_text(), re.M
+            )
+        ]
+
+        assert offenders == []
+
+    def test_it_still_re_exports_every_name_it_promises(self):
+        for name in gopher_mcp.utils.__all__:
+            assert hasattr(gopher_mcp.utils, name), name

@@ -91,7 +91,10 @@ class SetupVerifier:
             "publish.yml",
             "release.yml",
             "security-audit.yml",
-            "validate-pr.yml",
+            # validate-pr.yml is deliberately absent: its only remaining work
+            # (`uv build` + `twine check`) moved into ci.yml's lint job, which
+            # runs on push as well as pull_request, and the workflow was
+            # deleted. Per the note above, this list is pruned with the file.
         ]
 
         for workflow in required_workflows:

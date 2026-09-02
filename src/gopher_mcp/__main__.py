@@ -209,7 +209,9 @@ def main() -> None:
         )
 
     try:
-        # FastMCP handles its own event loop.
+        # FastMCP handles its own event loop. For the HTTP transports it reaches
+        # this package's own uvicorn runner (see ``server._GopherMCP``), which is
+        # what keeps uvicorn's records on the configured logging pipeline.
         mcp.run(transport=args.transport)
     except KeyboardInterrupt:
         pass

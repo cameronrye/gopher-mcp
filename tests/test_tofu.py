@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,8 @@ from gopher_mcp.tofu import (
     TOFUNotYetValidError,
     TOFUStorageError,
     TOFUValidationError,
+    _parse_expiry,
+    _parse_not_before,
 )
 
 
@@ -1141,3 +1144,82 @@ class TestTOFUStoreWriteFailures:
             store_dir.chmod(0o700)
 
         assert "example.com:1965" in manager._entries
+
+
+class TestCertInfoParsingFallbacks:
+    """``cert_info`` comes off the wire, so both expiry fields must degrade to
+    "unknown" rather than raising.
+
+    A live connection supplies the DER-derived ``not_after_timestamp`` /
+    ``not_before_timestamp``; the ``notAfter`` / ``notBefore`` *strings* are the
+    getpeercert()-shaped fallback kept for compatibility. Every one of these
+    arms returns None on bad input on purpose: an unreadable expiry must leave
+    the pin unstamped, never break the handshake.
+    """
+
+    def test_a_non_numeric_not_after_timestamp_reads_as_unknown(self):
+        assert _parse_expiry({"not_after_timestamp": "soon"}) is None
+
+    def test_a_non_numeric_not_before_timestamp_reads_as_unknown(self):
+        assert _parse_not_before({"not_before_timestamp": "yesterday"}) is None
+
+    def test_the_not_before_string_fallback_is_parsed(self):
+        """The getpeercert() spelling, for a peer whose DER we never parsed."""
+        parsed = _parse_not_before({"notBefore": "Jan  1 00:00:00 2020 GMT"})
+        assert parsed == datetime(2020, 1, 1, tzinfo=UTC).timestamp()
+
+    def test_an_unparseable_not_before_string_reads_as_unknown(self):
+        assert _parse_not_before({"notBefore": "whenever"}) is None
+
+    def test_a_not_yet_valid_certificate_is_refused_from_the_string_form(self):
+        """The fallback must reach the fail-closed check, not just parse: a
+        certificate dated in the future is refused however its notBefore was
+        spelled."""
+        future = datetime.now(UTC) + timedelta(days=30)
+        cert_info = {"notBefore": future.strftime("%b %d %H:%M:%S %Y GMT")}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = TOFUManager(str(Path(temp_dir) / "tofu.json"))
+            with pytest.raises(TOFUNotYetValidError):
+                manager.validate_certificate("example.com", 1965, "ab" * 32, cert_info)
+
+
+class TestUnreadableStoreDoesNotLoseInMemoryPins:
+    """``_read_disk_entries`` deliberately does NOT fail closed.
+
+    It exists only to merge concurrent on-disk changes before an atomic write.
+    Failing closed there would let a transiently corrupt file block persisting
+    good in-memory state forever; instead the bad file is ignored and the next
+    write repairs it. (Startup, in ``_load_entries``, still fails closed -- that
+    is the arm where trusting a damaged store would matter.)
+    """
+
+    def test_a_corrupt_store_is_ignored_and_rewritten(self, tmp_path):
+        store = tmp_path / "tofu.json"
+        manager = TOFUManager(str(store))
+        manager.update_certificate("first.example", 1965, "aa" * 32, force=True)
+        assert json.loads(store.read_text())["first.example:1965"]
+
+        # Something outside this process mangles the file between our writes.
+        store.write_text("{not json at all")
+
+        manager.update_certificate("second.example", 1965, "bb" * 32, force=True)
+
+        on_disk = json.loads(store.read_text())
+        # Both pins survive: the unreadable disk copy contributed nothing to the
+        # merge, and our own entries were written over it.
+        assert on_disk["first.example:1965"]["fingerprint"] == "aa" * 32
+        assert on_disk["second.example:1965"]["fingerprint"] == "bb" * 32
+
+    def test_an_entry_the_file_cannot_model_is_ignored_too(self, tmp_path):
+        """Valid JSON whose values are not TOFU entries takes the same arm --
+        the ``TOFUEntry(**val)`` construction is inside the guarded block."""
+        store = tmp_path / "tofu.json"
+        manager = TOFUManager(str(store))
+        manager.update_certificate("first.example", 1965, "aa" * 32, force=True)
+
+        store.write_text(json.dumps({"first.example:1965": {"nonsense": True}}))
+        manager.update_certificate("second.example", 1965, "bb" * 32, force=True)
+
+        on_disk = json.loads(store.read_text())
+        assert on_disk["first.example:1965"]["fingerprint"] == "aa" * 32
+        assert on_disk["second.example:1965"]["fingerprint"] == "bb" * 32

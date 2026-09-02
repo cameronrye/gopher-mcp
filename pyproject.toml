@@ -37,6 +37,10 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    # 3.14 is claimed because ci.yml runs the full suite on it across
+    # ubuntu/windows/macos. Every version listed here must have a matrix leg;
+    # this list is a promise to PyPI, not an aspiration.
+    "Programming Language :: Python :: 3.14",
     "Topic :: Internet :: WWW/HTTP",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Networking",
@@ -94,6 +98,17 @@ dependencies = [
     # clear of all four (48.0.1 clears only the first two), so the promise this
     # comment makes is true again. If you lower it, the promise goes with it.
     "cryptography>=50.0.0",
+    # Declared because src/ imports it directly: server.py's FastMCP subclass
+    # serves the sse/streamable-http transports itself (with log_config
+    # disabled, so uvicorn's records reach our handler instead of the ones its
+    # own dictConfig would install). That is the same test the anyio note above
+    # applies -- anyio stays undeclared precisely because nothing in src/
+    # imports it. Floor is governed by mcp, which
+    # already requires uvicorn>=0.31.1 off emscripten, so anything lower is
+    # unreachable and would only pretend to be a tested minimum; no ceiling,
+    # since the two settings used here (host/port and log_config) are the
+    # oldest, most stable part of uvicorn's API.
+    "uvicorn>=0.31.1",
 ]
 
 # Tooling lives in PEP 735 [dependency-groups], NOT [project.optional-dependencies].
@@ -103,19 +118,42 @@ dependencies = [
 # support for. Groups are local to this repo and never reach the wheel.
 #
 # Consequence for anything that installs this project: it is `uv sync
-# --all-groups` (not `--all-extras`), `uv sync --group docs` (not
-# `--extra docs`) and `uv sync --resolution lowest-direct --group test` (not
-# `--extra test`). A named `--extra docs` now errors out, but `--all-extras`
-# does NOT -- it succeeds and installs no tooling at all, so a workflow left on
-# the old flag goes green while running its checks against nothing. Grep for
-# `--all-extras` before assuming it is gone.
+# --all-groups` (not `--all-extras`), `uv sync --no-default-groups --group
+# docs` (not `--extra docs`) and `uv sync --resolution lowest-direct
+# --no-default-groups --group test` (not `--extra test`). A named `--extra
+# docs` now errors out, but `--all-extras` does NOT -- it succeeds and
+# installs no tooling at all, so a workflow left on the old flag goes green
+# while running its checks against nothing. Grep for `--all-extras` before
+# assuming it is gone.
+#
+# `--no-default-groups` in those two is not decoration: `dev` is uv's default
+# group and now includes `test`, so a bare `--group docs` or `--group test`
+# installs every linter as well. The floors job in ci.yml would then resolve
+# ruff/mypy/twine to their oldest permitted releases and fail on tooling that
+# has nothing to do with the runtime floors it exists to test.
 [dependency-groups]
 # `dev` includes `test` rather than restating it: the two lists used to repeat
 # five entries verbatim, so a floor bumped in one quietly drifted from the other.
 dev = [
     { include-group = "test" },
-    "mypy>=1.7.0",
-    "ruff>=0.14.5",
+    # Both ceilings exist to keep a `uv lock --upgrade` from turning the repo
+    # red on a day nobody changed any code; both are meant to be lifted by a
+    # deliberate commit that also does the work the new release asks for.
+    #
+    # mypy 1.19 started reporting `untyped-decorator` separately from `misc`,
+    # so the SDK-driven ignore on the `@mcp.custom_route("/health")` decorator
+    # in server.py becomes both "unused" and insufficient at once. Lifting the
+    # cap is a two-token edit to that comment
+    # (`# type: ignore[misc, untyped-decorator]`) plus a re-run of `mypy src`.
+    "mypy>=1.7.0,<1.19",
+    # ruff 0.15 stabilises PLW0108 (unnecessary lambda) and UP042 (StrEnum);
+    # 0.16 adds PLR0917 and RUF036 on top and starts formatting Python inside
+    # Markdown fences, which would rewrite CONTRIBUTING.md, SECURITY.md and
+    # five files under docs/. None of that is a defect in a dependency bump;
+    # lifting the cap means deciding on each new rule (fix or ignore, the way
+    # the PLR ignores above were decided) and re-formatting the docs in the
+    # same commit.
+    "ruff>=0.14.5,<0.15",
     "pre-commit>=3.5.0",
     "bandit>=1.7.5",
     "pip-audit>=2.7.0",
@@ -138,6 +176,10 @@ test = [
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.1.0",
     "pytest-mock>=3.11.0",
+    # Required, not optional tooling: [tool.pytest.ini_options] sets `timeout`,
+    # and --strict-config turns an unknown ini key into a hard error, so a
+    # pytest run without this plugin does not start.
+    "pytest-timeout>=2.3.0",
     "coverage[toml]>=7.3.0",
     "hypothesis>=6.100.0",
 ]
@@ -189,7 +231,6 @@ ignore = [
     "PLR0913", # too many arguments
     "PLR0915", # too many statements
     "PLR2004", # magic value in comparison (noisy in protocol/status-code code)
-    "PLC0415", # import outside top-level (deliberate lazy imports to break cycles)
     "PLW0603", # use of global statement (intentional module-level singletons)
 ]
 
@@ -199,7 +240,10 @@ ignore = [
     "ARG",     # unused fixture args are common
     "SIM117",  # nested `with` is fine for stacked mock patches
     "PTH123",  # tests open fixture files directly
+    "PLC0415", # function-local imports keep a test's setup next to its assertions
 ] # Allow assert/magic values and pragmatic patterns in tests
+# Release scripts import lazily inside the step that needs the module.
+"scripts/**/*" = ["PLC0415"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["gopher_mcp"]
@@ -249,6 +293,20 @@ addopts = [
     "--cov-fail-under=95",
 ]
 testpaths = ["tests"]
+# A per-test ceiling, on top of the per-job `timeout-minutes` in the workflows.
+# Those cap a hung job at 20 minutes but say nothing about which test hung;
+# this fails the individual test and names it. 60s is ~6x the slowest test in
+# the suite (the whole suite runs in well under two minutes), so it can only
+# fire on a genuine hang -- a socket read that stops honouring its deadline, a
+# TLS handshake stalled on a runner. Raise it if a legitimately slow test
+# appears; do not lower it towards the observed maximum, or ordinary
+# runner-side jitter starts failing builds.
+timeout = 60
+# "thread" rather than "signal": the signal method needs SIGALRM, which does
+# not exist on the Windows matrix leg, and the thread method dumps every
+# thread's stack on expiry -- which is the whole point, since a hang here is
+# usually parked in asyncio or a socket read.
+timeout_method = "thread"
 asyncio_mode = "auto"
 markers = [
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

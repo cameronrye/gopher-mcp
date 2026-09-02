@@ -15,9 +15,10 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
+from .helpers import atomic_write_json
 from .models import GeminiCertificateInfo
+from .ssrf import normalize_host
 from .tofu import default_state_directory, legacy_state_path
-from .utils import atomic_write_json
 
 logger = structlog.get_logger(__name__)
 
@@ -119,8 +120,6 @@ class ClientCertificateManager:
         so a case/trailing-dot variant resolves to the same stored identity,
         matching the TOFU and SSRF/allowlist host handling.
         """
-        from .ssrf import normalize_host
-
         return f"{normalize_host(host)}:{port}{path}"
 
     def _load_registry(self) -> None:
@@ -420,8 +419,6 @@ class ClientCertificateManager:
             return cert_info
 
         # Try to find a certificate for a parent path
-        from .ssrf import normalize_host
-
         norm_host = normalize_host(host)
         best_match = None
         best_path_len = 0

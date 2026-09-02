@@ -1190,3 +1190,64 @@ class TestGemtextLinkResolution:
 
         assert isinstance(result, GeminiGemtextResult)
         assert result.document.links[0].text == "Cli[31mck"
+
+
+class TestMetaThatParsesButFailsValidation:
+    """A ``<META>`` can be well-formed and still not be a usable MIME type.
+
+    ``parse_gemini_mime_type`` only splits the header; ``validate_gemini_mime_type``
+    is what rejects an empty component, a text type with no charset or a
+    malformed language tag. That second gate has its own fall-through to the
+    spec's default (text/gemini, sniffing the body first), and it is reachable
+    only by a meta that parses -- ``20 text/`` raises inside the parser and
+    never gets here.
+    """
+
+    def test_a_malformed_lang_tag_falls_back_to_the_gemtext_default(self):
+        """``lang=en_US`` uses an underscore, which BCP47 does not permit, so
+        validation fails on a header that parsed cleanly. The body is textual,
+        so the sniff finds nothing and the spec default applies -- the page is
+        still shown to the model rather than withheld as binary."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini; lang=en_US; charset=utf-8",
+            body=b"# Title\nStill readable\n",
+        )
+        result = process_gemini_response(response, "gemini://example.org/")
+
+        assert isinstance(result, GeminiGemtextResult)
+        assert [line.content for line in result.document.lines] == [
+            "# Title",
+            "Still readable",
+        ]
+
+    def test_a_malformed_lang_tag_still_lets_the_body_sniff_win(self):
+        """The fallback sniffs before defaulting, so genuinely binary content
+        served under an unusable header is still reported as binary rather than
+        decoded as gemtext."""
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="text/gemini; lang=en_US; charset=utf-8",
+            body=b"\x1f\x8b\x08\x00" + b"\x00" * 16,  # gzip magic
+        )
+        result = process_gemini_response(response, "gemini://example.org/")
+
+        assert isinstance(result, GeminiBinaryResult)
+        assert result.mime_type.full_type == "application/gzip"
+
+    def test_an_unparseable_sniff_result_falls_back_to_the_default(self, monkeypatch):
+        """Defence in depth: the sniffer's answer is fed straight back into the
+        MIME parser, so a sniffer that ever returned a non-MIME string must not
+        take the whole response down with it."""
+        monkeypatch.setattr(
+            "gopher_mcp.gemini_parse.detect_binary_mime_type",
+            lambda body: "not-a-mime-type",
+        )
+        response = GeminiResponse(
+            status=GeminiStatusCode.SUCCESS,
+            meta="garbage-no-slash",
+            body=b"# Title\nbody\n",
+        )
+        result = process_gemini_response(response, "gemini://example.org/")
+
+        assert isinstance(result, GeminiGemtextResult)

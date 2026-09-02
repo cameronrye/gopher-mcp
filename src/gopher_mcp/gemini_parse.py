@@ -8,6 +8,7 @@ modules.
 
 import contextlib
 import re
+import time
 from typing import Any, Union
 from urllib.parse import quote, urlparse
 
@@ -16,7 +17,7 @@ from .helpers import (
     bracket_host,
     resolve_gemini_reference,
     sanitize_display_text,
-    truncate_text,
+    window_text,
 )
 from .mime import (
     detect_binary_mime_type,
@@ -410,6 +411,7 @@ def process_gemini_response(
     request_url: str,
     request_time: float | None = None,
     *,
+    offset: int = 0,
     max_rendered_chars: int = 0,
     denied_mime_types: "frozenset[str] | None" = None,
 ) -> "GeminiFetchResponse":
@@ -419,6 +421,9 @@ def process_gemini_response(
         response: Parsed Gemini response
         request_url: Original request URL
         request_time: Request timestamp (defaults to current time)
+        offset: Character position the rendered body window starts at, so a
+            body longer than ``max_rendered_chars`` is not a dead end. Only
+            applies to textual success bodies.
         max_rendered_chars: LLM-facing cap on returned text characters
             (0 = unlimited). Only applies to textual success bodies.
         denied_mime_types: MIME types (or ``type/*`` wildcards) to reject on a
@@ -430,8 +435,6 @@ def process_gemini_response(
     Raises:
         ValueError: If status code is unsupported or response is invalid
     """
-    import time
-
     if request_time is None:
         request_time = time.time()
 
@@ -460,6 +463,7 @@ def process_gemini_response(
             meta,
             body,
             request_info,
+            offset=offset,
             max_rendered_chars=max_rendered_chars,
             denied_mime_types=denied_mime_types,
         )
@@ -488,7 +492,7 @@ def process_gemini_response(
                 "message": f"Invalid status code: {status_code}",
                 "status": status_code,
             },
-            requestInfo=request_info,
+            request_info=request_info,
         )
 
 
@@ -511,7 +515,7 @@ def _process_input_response(
     return GeminiInputResult(
         prompt=sanitize_display_text(meta, keep_whitespace=False),
         sensitive=sensitive,
-        requestInfo=request_info,
+        request_info=request_info,
     )
 
 
@@ -520,6 +524,7 @@ def _process_success_response(
     body: bytes | None,
     request_info: dict[str, Any],
     *,
+    offset: int = 0,
     max_rendered_chars: int = 0,
     denied_mime_types: "frozenset[str] | None" = None,
 ) -> Union[
@@ -534,6 +539,7 @@ def _process_success_response(
         meta: MIME type string
         body: Response body bytes
         request_info: Request information
+        offset: Character position the rendered window starts at (0 = start).
         max_rendered_chars: LLM-facing cap on returned text characters
             (0 = unlimited); applies to textual bodies only, never binary.
         denied_mime_types: MIME types (or ``type/*``) to reject as filtered.
@@ -600,7 +606,7 @@ def _process_success_response(
                 f"the configured content filter",
                 "mimeType": mime_type.full_type,
             },
-            requestInfo=request_info,
+            request_info=request_info,
         )
 
     # Handle gemtext content specially
@@ -617,7 +623,10 @@ def _process_success_response(
         # text/* would not protect the common case: a 1 MB gemtext page (well
         # under the byte limit) is ~250k tokens. `size` still reports the full
         # original byte length.
-        content, truncated = truncate_text(content, max_rendered_chars)
+        window = window_text(content, offset, max_rendered_chars)
+        content = window.text
+        truncated = window.next_offset is not None
+        next_offset = window.next_offset
         if truncated:
             # Drop the trailing partial line before parsing -- the same rule the
             # robots.txt reader applies, and for the same reason. A cut landing
@@ -628,8 +637,14 @@ def _process_success_response(
             #
             # A cut before the first newline leaves nothing: that is a single
             # line longer than the entire character budget, and there is no
-            # complete line to show. ``truncated`` still reports why.
-            content = content[: content.rfind("\n") + 1]
+            # complete line to show. ``truncated`` still reports why -- and
+            # ``next_offset`` then stays at the window's own end rather than at
+            # the (nonexistent) line break, so a continuation still moves
+            # forward instead of asking for this same window forever.
+            cut = content.rfind("\n") + 1
+            content = content[:cut]
+            if cut:
+                next_offset = window.start + cut
         # Parse gemtext into structured format, resolving each link against the
         # request URL: relative references are the norm in gemtext, and an
         # unresolved one is not fetchable by the caller.
@@ -637,12 +652,16 @@ def _process_success_response(
 
         return GeminiGemtextResult(
             document=document,
-            rawContent=content,
+            raw_content=content,
             charset=used_charset,
             lang=mime_type.lang,
             size=size,
             truncated=truncated,
-            requestInfo=request_info,
+            # Characters, not bytes: `size` is the body's byte length, which an
+            # offset cannot be expressed in without splitting a UTF-8 sequence.
+            total_chars=window.total,
+            next_offset=next_offset,
+            request_info=request_info,
         )
 
     # Handle text content
@@ -651,13 +670,17 @@ def _process_success_response(
         mime_type.charset = used_charset
         content = sanitize_display_text(content)
         # Cap the text handed to the LLM; `size` still reports the full bytes.
-        rendered, truncated = truncate_text(content, max_rendered_chars)
+        window = window_text(content, offset, max_rendered_chars)
         return GeminiSuccessResult(
-            mimeType=mime_type,
-            content=rendered,
+            mime_type=mime_type,
+            content=window.text,
             size=size,
-            truncated=truncated,
-            requestInfo=request_info,
+            truncated=window.next_offset is not None,
+            # Characters, not bytes: `size` is the body's byte length, which an
+            # offset cannot be expressed in without splitting a UTF-8 sequence.
+            total_chars=window.total,
+            next_offset=window.next_offset,
+            request_info=request_info,
         )
 
     # Handle binary content
@@ -676,9 +699,9 @@ def _process_success_response(
         # can't render -- mirror the Gopher binary path and return size + type.
         # `size` still reports the full original byte length.
         return GeminiBinaryResult(
-            mimeType=mime_type,
+            mime_type=mime_type,
             size=size,
-            requestInfo=request_info,
+            request_info=request_info,
         )
 
 
@@ -743,7 +766,7 @@ def _process_redirect_response(
                 "message": "Server sent a redirect (3x) with an empty target URL",
                 "status": status_code,
             },
-            requestInfo=request_info,
+            request_info=request_info,
         )
 
     # ``newUrl`` is the one field the model is told to follow, so a control
@@ -762,7 +785,7 @@ def _process_redirect_response(
                 ),
                 "status": status_code,
             },
-            requestInfo=request_info,
+            request_info=request_info,
         )
 
     base_url = str(request_info.get("url", ""))
@@ -780,7 +803,7 @@ def _process_redirect_response(
                 "message": f"Server sent a redirect (3x) to an unparseable URL: {e}",
                 "status": status_code,
             },
-            requestInfo=request_info,
+            request_info=request_info,
         )
 
     # Guard against a redirect to the same URL (a one-hop loop) so a single
@@ -792,13 +815,13 @@ def _process_redirect_response(
                 "message": "Server redirected to the same URL (redirect loop)",
                 "status": status_code,
             },
-            requestInfo=request_info,
+            request_info=request_info,
         )
 
     return GeminiRedirectResult(
-        newUrl=resolved,
+        new_url=resolved,
         permanent=permanent,
-        requestInfo=request_info,
+        request_info=request_info,
     )
 
 
@@ -893,7 +916,7 @@ def _process_error_response(
         error["next_step"] = _TEMPORARY_NEXT_STEPS.get(
             status_code, _GENERIC_TEMPORARY_NEXT_STEP
         )
-    return GeminiErrorResult(error=error, requestInfo=request_info)
+    return GeminiErrorResult(error=error, request_info=request_info)
 
 
 # The remedy for each certificate subcode, in the payload the caller actually
@@ -970,5 +993,5 @@ def _process_certificate_response(
         next_step=_CERTIFICATE_NEXT_STEPS.get(
             status_code, _UNASSIGNED_CERTIFICATE_STEP
         ),
-        requestInfo=request_info,
+        request_info=request_info,
     )

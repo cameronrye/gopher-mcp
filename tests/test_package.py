@@ -73,3 +73,22 @@ class TestLazyServerExports:
 
         with pytest.raises(AttributeError, match="no attribute 'not_a_tool'"):
             getattr(gopher_mcp, "not_a_tool")  # noqa: B009 - the lookup is the test
+
+
+def test_py_typed_marker_ships_with_the_package():
+    """PEP 561: the ``Typing :: Typed`` classifier is a promise about the wheel.
+
+    ``pyproject.toml`` advertises the classifier, but a type checker looking at
+    an *installed* gopher_mcp believes it only if the package directory itself
+    contains a ``py.typed`` marker. Without the file, `mypy` on any consumer
+    reports "module is installed, but missing library stubs or py.typed marker"
+    and treats the whole package as ``Any`` -- which is what the published 0.8.0
+    wheel did while claiming otherwise.
+
+    Asserted through ``importlib.resources`` rather than by looking next to the
+    source tree, so it fails if the marker is ever excluded from the build
+    rather than merely deleted from the repo.
+    """
+    from importlib.resources import files
+
+    assert files("gopher_mcp").joinpath("py.typed").is_file()

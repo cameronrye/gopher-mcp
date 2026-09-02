@@ -1,8 +1,17 @@
 # syntax=docker/dockerfile:1
 
-# Both stages pin the top of the CI test matrix (pyproject supports 3.11-3.13).
-# Do not bump past a version the matrix covers: an interpreter the locked
-# dependencies have no wheels for breaks only the container, never a test run.
+# Both stages sit one minor behind the top of the CI test matrix, which now
+# covers 3.11-3.14. Do not bump past a version the matrix covers: an
+# interpreter the locked dependencies have no wheels for breaks only the
+# container, never a test run.
+#
+# 3.13, not 3.14, on purpose. The 3.14 matrix leg is new and has not yet been
+# seen green on GitHub's runners -- only locally, on macOS/arm64. This image
+# was already rolled back from python:3.14-slim once (CHANGELOG: "outside the
+# tested matrix"), and the whole point of the rule above is that the container
+# is the one artifact whose breakage no test run can catch. Bump both FROM
+# lines to python:3.14-slim once the `Test Python 3.14 on ubuntu-latest` leg
+# has passed on CI; nothing else is blocking it.
 
 # --- build stage: produce a wheel from the source tree ---
 FROM python:3.13-slim AS build

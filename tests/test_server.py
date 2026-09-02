@@ -13,11 +13,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from mcp.types import CallToolResult
 
-from gopher_mcp import __version__
+from gopher_mcp import __version__, server
 from gopher_mcp.config import GeminiConfig, GopherConfig, reset_config
 from gopher_mcp.gemini_client import GeminiClient
 from gopher_mcp.gopher_client import GopherClient
 from gopher_mcp.gopher_parse import parse_gopher_url
+from gopher_mcp.models import GopherMenuItem, MenuResult, TextResult
 from gopher_mcp.server import (
     ClientManager,
     cleanup,
@@ -94,11 +95,12 @@ class TestGetGopherClient:
         leave the gate silently on its defaults with the whole suite green.
 
         ``clear=True`` drops the ``HOME``/``USERPROFILE`` the autouse
-        ``isolated_home`` fixture sets, so the Gemini client's TOFU and
-        certificate stores are pointed at a temp dir explicitly -- the same
-        thing ``TestGetGeminiClient`` does. Without it POSIX silently falls back
-        to the *real* home (the isolation this suite is meant to guarantee) and
-        Windows, which has no such fallback, raises outright.
+        ``isolated_home`` fixture sets, which used to need a per-test workaround
+        here so the Gemini client's TOFU and certificate stores did not land in
+        the developer's real home. It no longer does: the fixture also replaces
+        ``Path.home`` itself, precisely because remembering the workaround in
+        every ``clear=True`` test is not a guarantee. See
+        ``tests/test_home_isolation.py``.
         """
         clear_client_manager()
 
@@ -109,23 +111,17 @@ class TestGetGopherClient:
             "GEMINI_ROBOTS_CACHE_TTL_SECONDS": "2400",
         }
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            with (
-                patch.dict(os.environ, env_vars, clear=True),
-                patch("gopher_mcp.tofu.get_home_directory") as mock_home,
-            ):
-                mock_home.return_value = Path(temp_dir)
+        with patch.dict(os.environ, env_vars, clear=True):
+            manager = await get_client_manager()
+            gopher = await manager.get_gopher_client()
+            gemini = await manager.get_gemini_client()
 
-                manager = await get_client_manager()
-                gopher = await manager.get_gopher_client()
-                gemini = await manager.get_gemini_client()
-
-                assert gopher._robots_gate is not None
-                assert gopher._robots_gate._failure_backoff_seconds == 7.5
-                assert gopher._robots_gate._ttl_seconds == 1200
-                assert gemini._robots_gate is not None
-                assert gemini._robots_gate._failure_backoff_seconds == 12.5
-                assert gemini._robots_gate._ttl_seconds == 2400
+            assert gopher._robots_gate is not None
+            assert gopher._robots_gate._failure_backoff_seconds == 7.5
+            assert gopher._robots_gate._ttl_seconds == 1200
+            assert gemini._robots_gate is not None
+            assert gemini._robots_gate._failure_backoff_seconds == 12.5
+            assert gemini._robots_gate._ttl_seconds == 2400
 
     @pytest.mark.asyncio
     async def test_get_gopher_client_singleton(self):
@@ -335,8 +331,15 @@ class TestGeminiBatchFetch:
         mock_response1 = MagicMock()
         mock_response1.model_dump.return_value = {
             "kind": "gemtext",
-            "document": {"lines": [], "links": []},
-            "raw_content": "# Page 1",
+            # What a real payload looks like: the body reaches the caller once,
+            # as the parsed document. `raw_content` is still held on the model
+            # for server-side readers (the robots.txt parser) but is excluded
+            # from serialization, so a mock carrying it pins a shape the code no
+            # longer produces.
+            "document": {
+                "lines": [{"type": "heading", "content": "# Page 1", "level": 1}],
+                "links": [],
+            },
             "charset": "utf-8",
             "size": 8,
         }
@@ -344,8 +347,10 @@ class TestGeminiBatchFetch:
         mock_response2 = MagicMock()
         mock_response2.model_dump.return_value = {
             "kind": "gemtext",
-            "document": {"lines": [], "links": []},
-            "raw_content": "# Page 2",
+            "document": {
+                "lines": [{"type": "heading", "content": "# Page 2", "level": 1}],
+                "links": [],
+            },
             "charset": "utf-8",
             "size": 8,
         }
@@ -361,8 +366,8 @@ class TestGeminiBatchFetch:
             results = await gemini_batch_fetch(urls)
 
             assert len(results) == 2
-            assert results[0]["raw_content"] == "# Page 1"
-            assert results[1]["raw_content"] == "# Page 2"
+            assert results[0]["document"]["lines"][0]["content"] == "# Page 1"
+            assert results[1]["document"]["lines"][0]["content"] == "# Page 2"
 
     @pytest.mark.asyncio
     async def test_gemini_batch_fetch_with_errors(self):
@@ -372,8 +377,10 @@ class TestGeminiBatchFetch:
         mock_response = MagicMock()
         mock_response.model_dump.return_value = {
             "kind": "gemtext",
-            "document": {"lines": [], "links": []},
-            "raw_content": "# Success",
+            "document": {
+                "lines": [{"type": "heading", "content": "# Success", "level": 1}],
+                "links": [],
+            },
             "charset": "utf-8",
             "size": 9,
         }
@@ -390,7 +397,7 @@ class TestGeminiBatchFetch:
             results = await gemini_batch_fetch(urls)
 
             assert len(results) == 2
-            assert results[0]["raw_content"] == "# Success"
+            assert results[0]["document"]["lines"][0]["content"] == "# Success"
             # Second result should be an error
             assert "error" in results[1]
 
@@ -474,13 +481,26 @@ class TestMCPServer:
         assert mcp is not None
         assert hasattr(mcp, "name")
 
-    def test_mcp_server_has_tools(self):
-        """Test that MCP server has the expected tools."""
-        # The gopher_fetch function should be registered as a tool
-        # This is a basic check that the server is properly configured
-        assert mcp is not None
-        # Note: Detailed tool inspection would require accessing FastMCP internals
-        # which may not be stable API, so we keep this test simple
+    @pytest.mark.asyncio
+    async def test_mcp_server_registers_every_tool(self):
+        """The registered tool names, in full.
+
+        (Was `assert mcp is not None` with a note that detailed inspection would
+        need FastMCP internals. It does not: `mcp.list_tools()` is public, and
+        tests/test_mcp_protocol.py goes further and drives the whole surface
+        over the wire.)
+        """
+        names = {tool.name for tool in await mcp.list_tools()}
+        assert names == {
+            "gopher_fetch",
+            "gemini_fetch",
+            "gopher_batch_fetch",
+            "gemini_batch_fetch",
+            "gemini_trust_list",
+            "gemini_trust_update",
+            "gemini_client_cert_list",
+            "gemini_client_cert_update",
+        }
 
     def test_server_has_instructions(self):
         """FastMCP is given an instructions string surfaced to the model."""
@@ -720,9 +740,76 @@ class TestEntrypointTransportArgs:
         ):
             entry.main()
 
-        mock_run.assert_called_once()
+        mock_run.assert_called_once_with(transport="streamable-http")
         assert server_mcp.settings.host == "0.0.0.0"
         assert server_mcp.settings.port == 9999
+
+
+class TestHttpTransportLogging:
+    """The HTTP transports must not take uvicorn's logging with them.
+
+    FastMCP's own runners build ``uvicorn.Config`` with no ``log_config``, so
+    uvicorn dictConfigs handlers of its own onto the ``uvicorn.*`` loggers with
+    ``propagate = False``: its startup lines then bypassed the JSON renderer and
+    the log-file tee, and its access log went to **stdout** -- which the "logs
+    go to stderr, never stdout" guarantee forbids, because stdio's MCP protocol
+    stream lives there. ``server._GopherMCP`` overrides both runners to pass
+    ``log_config=None``.
+    """
+
+    @pytest.mark.parametrize(
+        ("runner", "expected_path"),
+        [
+            ("run_streamable_http_async", "/mcp"),
+            ("run_sse_async", "/sse"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_uvicorn_is_configured_without_its_own_logging(
+        self, runner, expected_path
+    ):
+        import logging
+
+        import uvicorn
+
+        from gopher_mcp.server import mcp as server_mcp
+
+        configs: list[uvicorn.Config] = []
+        real_config = uvicorn.Config
+
+        def capture(*args, **kwargs):
+            # The REAL Config: constructing it is what applies -- or here, skips
+            # -- uvicorn's logging setup, which is the half worth asserting.
+            config = real_config(*args, **kwargs)
+            configs.append(config)
+            return config
+
+        # Give uvicorn's access logger a handler first, so the assertion below
+        # distinguishes "uvicorn was left alone" from "uvicorn never ran here".
+        access_logger = logging.getLogger("uvicorn.access")
+        access_logger.addHandler(logging.NullHandler())
+        try:
+            with (
+                patch.object(uvicorn, "Config", side_effect=capture),
+                patch.object(uvicorn.Server, "serve", new=AsyncMock()) as mock_serve,
+            ):
+                await getattr(server_mcp, runner)()
+        finally:
+            access_logger.handlers.clear()
+
+        mock_serve.assert_awaited_once()
+        assert len(configs) == 1
+        assert configs[0].log_config is None
+        # No dictConfig ran, so uvicorn's records still propagate to the root
+        # handler that configure_logging installed.
+        assert access_logger.propagate is True
+        # Still the app FastMCP would have served, on the settings it holds.
+        assert configs[0].host == server_mcp.settings.host
+        assert configs[0].port == server_mcp.settings.port
+        assert any(
+            getattr(route, "path", None) == expected_path
+            for route in configs[0].app.routes
+        )
 
 
 class TestEnvironmentVariables:
@@ -871,11 +958,20 @@ class TestGeminiFetch:
         mock_response = MagicMock()
         mock_response.model_dump.return_value = {
             "kind": "gemtext",
-            "document": {"lines": [], "links": []},
-            "raw_content": "# Test",
+            # As a real payload serializes: the parsed document only (the
+            # `raw_content` copy is excluded), and an ISO-8601 UTC instant
+            # rather than an epoch float -- every instant a result reports goes
+            # through `iso_utc`.
+            "document": {
+                "lines": [{"type": "heading", "content": "# Test", "level": 1}],
+                "links": [],
+            },
             "charset": "utf-8",
             "size": 6,
-            "request_info": {"url": "gemini://example.org/", "timestamp": 1234567890},
+            "request_info": {
+                "url": "gemini://example.org/",
+                "timestamp": "2026-09-02T12:00:00+00:00",
+            },
         }
 
         mock_client = AsyncMock()
@@ -888,7 +984,7 @@ class TestGeminiFetch:
             result = await gemini_fetch("gemini://example.org/")
 
             assert result["kind"] == "gemtext"
-            assert result["raw_content"] == "# Test"
+            assert result["document"]["lines"][0]["content"] == "# Test"
             mock_client.fetch.assert_called_once_with(
                 "gemini://example.org/", refresh=False
             )
@@ -1154,6 +1250,164 @@ class TestBatchFetchHonoursRefresh:
         assert "refresh" in tools[name].inputSchema["properties"]
 
 
+class TestStoreSetupFailureNamesTheStore:
+    """A store that cannot be opened is a local fault, and must read as one.
+
+    The trust and certificate tools reach the client only to read or write a
+    file on disk, so reporting "failed to initialize the fetch client" as a
+    FETCH_ERROR sent the model looking at the network -- and, in a read-only
+    container or with a misconfigured path, nothing in the reply hinted at the
+    store at all.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "tool_name", ["gemini_trust_list", "gemini_client_cert_list"]
+    )
+    async def test_it_reports_the_store_not_the_network(self, tool_name):
+        with patch(
+            "gopher_mcp.server._gemini_client",
+            side_effect=PermissionError("[Errno 13] '/ro/.gemini'"),
+        ):
+            result = await getattr(server, tool_name)()
+
+        assert result["error"]["code"] == "CERTIFICATE_STORE_UNAVAILABLE"
+        message = result["error"]["message"]
+        assert "GEMINI_TOFU_STORAGE_PATH" in message
+        # The concrete path stays in the log, not in the reply.
+        assert "/ro/.gemini" not in message
+
+
+class TestOffsetReachesTheClientFromTheTools:
+    """`truncated` was a dead end: the model could see something was missing
+    but had no call that retrieved it, and no number to report. The tools now
+    take the `next_offset` a truncated result carries."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", ["gopher_fetch", "gemini_fetch"])
+    async def test_the_schema_offers_it(self, tool_name):
+        tools = {t.name: t for t in await mcp.list_tools()}
+        schema = tools[tool_name].inputSchema["properties"]["offset"]
+
+        assert schema["type"] == "integer"
+        # A negative offset is refused by the schema before a call is made.
+        assert schema["minimum"] == 0
+        assert "next_offset" in schema["description"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("tool_name", "url", "getter"),
+        [
+            ("gopher_fetch", "gopher://example.com/0/a.txt", "get_gopher_client"),
+            ("gemini_fetch", "gemini://example.org/a.gmi", "get_gemini_client"),
+        ],
+    )
+    async def test_it_reaches_the_client(self, tool_name, url, getter):
+        mock_client = AsyncMock()
+        mock_client.fetch.return_value = TextResult(text="rest", bytes=4)
+        manager = AsyncMock()
+        getattr(manager, getter).return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=manager):
+            await getattr(server, tool_name)(url, offset=120)
+
+        assert mock_client.fetch.await_args.kwargs["offset"] == 120
+
+    @pytest.mark.asyncio
+    async def test_a_plain_fetch_does_not_send_one(self):
+        """A read that is not a continuation makes the call it always made."""
+        mock_client = AsyncMock()
+        mock_client.fetch.return_value = TextResult(text="hi", bytes=2)
+        manager = AsyncMock()
+        manager.get_gopher_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=manager):
+            await gopher_fetch("gopher://example.com/0/a.txt")
+
+        assert "offset" not in mock_client.fetch.await_args.kwargs
+
+
+class TestFetchToolsAdvertiseTheirResultShape:
+    """The fetch tools must publish the `kind`s a caller has to branch on.
+
+    Annotated `-> dict[str, Any]`, they advertised
+    `{"additionalProperties": true}` -- an open object a client can validate
+    nothing against, and which named none of menu/text/binary/error. The
+    RootModel wrappers in models.py give them a real discriminated schema, and
+    the aliases were reconciled first so the advertised property names are the
+    snake_case ones the payload has always used.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("name", "kinds"),
+        [
+            ("gopher_fetch", {"menu", "text", "binary", "error"}),
+            (
+                "gemini_fetch",
+                {
+                    "gemtext",
+                    "success",
+                    "binary",
+                    "input",
+                    "redirect",
+                    "certificate",
+                    "error",
+                },
+            ),
+        ],
+    )
+    async def test_the_schema_names_every_kind(self, name, kinds):
+        tools = {t.name: t for t in await mcp.list_tools()}
+        schema = tools[name].outputSchema
+
+        assert schema is not None
+        assert schema.get("additionalProperties") is not True
+        assert schema["discriminator"]["propertyName"] == "kind"
+        assert set(schema["discriminator"]["mapping"]) == kinds
+
+    @pytest.mark.asyncio
+    async def test_the_schema_names_the_fields_the_payload_uses(self):
+        """The models carry camelCase aliases, and a JSON schema is generated
+        by alias by default -- so before those were reconciled the schema would
+        have advertised `nextUrl`/`requestInfo` for a payload that says
+        `next_url`/`request_info`."""
+        tools = {t.name: t for t in await mcp.list_tools()}
+        defs = tools["gopher_fetch"].outputSchema["$defs"]
+
+        assert "next_url" in defs["GopherMenuItem"]["properties"]
+        assert "nextUrl" not in defs["GopherMenuItem"]["properties"]
+        assert "request_info" in defs["MenuResult"]["properties"]
+        assert "requestInfo" not in defs["MenuResult"]["properties"]
+
+    @pytest.mark.asyncio
+    async def test_a_real_payload_validates_against_the_advertised_model(self):
+        """FastMCP validates a self-built CallToolResult's structuredContent
+        against the output model, so this is not decoration: a result the tool
+        can actually return has to pass, aliases and all."""
+        item = GopherMenuItem(
+            type="1",
+            title="Docs",
+            selector="/docs",
+            host="example.com",
+            port=70,
+            next_url="gopher://example.com/1/docs",
+        )
+        payload = MenuResult(items=[item]).model_dump()
+        mock_client = AsyncMock()
+        response = MagicMock()
+        response.model_dump.return_value = payload
+        mock_client.fetch.return_value = response
+        manager = AsyncMock()
+        manager.get_gopher_client.return_value = mock_client
+
+        with patch("gopher_mcp.server.get_client_manager", return_value=manager):
+            result = await mcp.call_tool("gopher_fetch", {"url": "gopher://x/1/"})
+
+        assert result.structuredContent["items"][0]["next_url"] == item.next_url
+        assert result.structuredContent == payload
+
+
 class TestFailuresCarryTheProtocolErrorFlag:
     """The MCP spec reports a tool's own failures with `isError: true`. Every
     tool here returns a structured error instead of raising, which left the
@@ -1170,9 +1424,14 @@ class TestFailuresCarryTheProtocolErrorFlag:
 
     @pytest.mark.asyncio
     async def test_a_success_does_not(self):
+        """The payload is a real TextResult dump, not a hand-written fragment:
+        gopher_fetch now advertises an outputSchema, and FastMCP validates the
+        structuredContent of a self-built CallToolResult against it, so a
+        payload that is not a member of the result union fails the call."""
         mock_client = AsyncMock()
+        payload = TextResult(text="hi", bytes=2).model_dump()
         response = MagicMock()
-        response.model_dump.return_value = {"kind": "text", "text": "hi"}
+        response.model_dump.return_value = payload
         mock_client.fetch.return_value = response
         manager = AsyncMock()
         manager.get_gopher_client.return_value = mock_client
@@ -1183,7 +1442,8 @@ class TestFailuresCarryTheProtocolErrorFlag:
             )
 
         assert result.isError is False
-        assert result.structuredContent == {"kind": "text", "text": "hi"}
+        assert result.structuredContent == payload
+        assert result.structuredContent["kind"] == "text"
 
     @pytest.mark.asyncio
     async def test_the_text_block_still_carries_the_same_json(self):

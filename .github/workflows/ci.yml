@@ -56,13 +56,24 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --locked --all-extras
+        run: uv sync --locked --all-groups
 
       - name: Run tests
         run: uv run pytest
 
   lint:
-    name: Lint and type check
+    # This job also builds the distribution and runs `twine check`, which used
+    # to live in a separate Packaging workflow. Folding them in here costs
+    # nothing -- `--all-groups` already installs twine, and the two commands
+    # take seconds -- where the separate workflow spent a whole extra runner on
+    # its own checkout, Python, uv and full `uv sync` to run them. The trigger
+    # matters more than the file: both `push` and `pull_request` reach this
+    # workflow, so packaging is checked on direct pushes to main too, which is
+    # how most of this repo's commits actually land (main is unprotected). A
+    # packaging break used to first surface mid-publish in release.yml; the
+    # repo has been bitten by exactly that (see the hatchling pin comment in
+    # pyproject.toml and 3ace3de "fix(deps): unbreak twine check").
+    name: Lint, type check and package
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -81,7 +92,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --locked --all-extras
+        run: uv sync --locked --all-groups
 
       - name: Run ruff linting
         run: uv run ruff check .
@@ -91,6 +102,16 @@ jobs:
 
       - name: Run mypy type checking
         run: uv run mypy src
+
+      # Runs after the linters so a `dist/` tree never exists while ruff and
+      # mypy walk the repo.
+      - name: Build distribution
+        run: uv build
+
+      # The check that catches broken sdist/wheel metadata and a README
+      # long_description PyPI would refuse to render.
+      - name: Check distribution metadata
+        run: uv run python -m twine check dist/*
 
   security:
     name: Security checks
@@ -112,7 +133,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --locked --all-extras
+        run: uv sync --locked --all-groups
 
       - name: Run bandit security linting
         run: uv run bandit -r src/ -f json -o bandit-report.json
@@ -171,8 +192,15 @@ jobs:
       # into admitting versions that crash at import while `pip check` stayed
       # happy. --resolution lowest-direct pins the declared dependencies to
       # their floors and leaves transitives alone.
+      #
+      # --no-default-groups is load-bearing, not tidiness: a bare
+      # `--group test` ALSO installs the default `dev` group, and `dev` pulls
+      # in `test` plus ruff/mypy/bandit/twine -- so the floors job would
+      # additionally resolve every linter to its oldest permitted release and
+      # fail on tooling that has nothing to do with the declared runtime
+      # floors. This installs exactly the `test` group and the runtime deps.
       - name: Resolve the declared floors
-        run: uv sync --resolution lowest-direct --extra test
+        run: uv sync --resolution lowest-direct --no-default-groups --group test
 
       # The sync alone proves nothing: a bogus floor still resolves fine. Only
       # importing and running the code catches it, so this job must execute
@@ -224,8 +252,10 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
+      # --no-default-groups keeps this to mkdocs and the runtime deps; a bare
+      # `--group docs` would drag in the whole `dev` group as well.
       - name: Install dependencies
-        run: uv sync --locked --extra docs
+        run: uv sync --locked --no-default-groups --group docs
 
       # --strict matches docs.yml and release.yml: without it a mkdocstrings
       # warning only surfaces at deploy time, after the merge.

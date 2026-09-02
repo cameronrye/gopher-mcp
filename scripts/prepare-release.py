@@ -313,7 +313,12 @@ class ReleasePreparation:
                     "tests/",
                     "-v",
                     "--cov=src/gopher_mcp",
-                    "--cov-fail-under=85",
+                    # Must track [tool.pytest.ini_options] addopts in
+                    # pyproject.toml. Hard-coding a lower number here would
+                    # validate a release against a gate the project no longer
+                    # uses, so a release could be blessed while CI would fail
+                    # it.
+                    "--cov-fail-under=95",
                 ],
                 check=False,
                 cwd=self.project_root,
@@ -334,7 +339,7 @@ class ReleasePreparation:
             # release without being able to fail on anything new.
 
             # Integration tests (if any). --no-cov because this is a SUBSET of
-            # the suite: the 85% gate in pyproject.toml is a whole-suite figure,
+            # the suite: the 95% gate in pyproject.toml is a whole-suite figure,
             # so running ~19 integration tests against it always fails on
             # coverage and reported "Integration tests had failures" on every
             # release even when all of them passed. Coverage is measured by the

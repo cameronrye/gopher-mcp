@@ -50,7 +50,10 @@ def __getattr__(name: str) -> Any:
         AttributeError: If the package has no such attribute.
     """
     if name in __all__:
-        from . import server
+        # Lazy on purpose (see the docstring above): hoisting this would pull
+        # FastMCP and cryptography into every ``import gopher_mcp.*``, which is
+        # the entire cost this PEP 562 hook exists to avoid.
+        from . import server  # noqa: PLC0415
 
         return getattr(server, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

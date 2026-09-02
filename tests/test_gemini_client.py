@@ -1,13 +1,22 @@
 """Tests for Gemini client implementation."""
 
 import asyncio
+import errno
+import os
+import tempfile
 import time
+from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
 from gopher_mcp.gemini_client import GeminiClient, _safe_display_url
-from gopher_mcp.gemini_tls import TLSConfig, TLSConnectionError
+from gopher_mcp.gemini_tls import (
+    GeminiConnectionError,
+    GeminiTLSClient,
+    TLSConfig,
+    TLSConnectionError,
+)
 from gopher_mcp.models import (
     GeminiCacheEntry,
     GeminiErrorResult,
@@ -1423,6 +1432,51 @@ class TestTofuOffTheEventLoop:
         assert result.error["code"] == "CERTIFICATE_STORE_UNAVAILABLE"
         # The store path stays in the log, not in the reply.
         assert "/x" not in result.error["message"]
+        # A store that is merely unwritable reaches the same code, so the message
+        # must not assert the lock-contention cause; and since the caller cannot
+        # see the path, it names the setting that chooses it.
+        message = result.error["message"]
+        assert "not writable" in message
+        assert "GEMINI_TOFU_STORAGE_PATH" in message
+
+    @pytest.mark.asyncio
+    async def test_not_yet_valid_cert_is_not_reported_as_expired(self):
+        """TOFUNotYetValidError subclasses TOFUExpiredError, so its handler must
+        come first -- otherwise a certificate presented before its notBefore is
+        reported as CERTIFICATE_EXPIRED, the opposite of what happened, and the
+        message ("not yet valid") contradicts its own code."""
+        with tempfile.TemporaryDirectory() as d:
+            client = GeminiClient(
+                cache_enabled=False,
+                client_certs_enabled=False,
+                respect_robots_txt=False,
+                tofu_storage_path=str(Path(d) / "tofu.json"),
+            )
+            assert client.tofu_manager is not None
+
+            # Well beyond NOT_BEFORE_SKEW_SECONDS, so this is a real refusal
+            # rather than the clock-skew grace the store deliberately allows.
+            client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+                return_value=(
+                    Mock(),
+                    {
+                        "cert_fingerprint": "sha256:beef",
+                        "peer_cert_info": {
+                            "not_before_timestamp": time.time() + 86400,
+                        },
+                    },
+                )
+            )
+            client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+            client.tls_client.receive_data = AsyncMock()  # type: ignore[method-assign]
+            client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+
+            result = await client.fetch("gemini://example.org/")
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "CERTIFICATE_NOT_YET_VALID"
+        assert "not yet valid" in result.error["message"]
+        client.tls_client.send_data.assert_not_awaited()
 
 
 class TestGeminiRobotsGate:
@@ -1980,3 +2034,135 @@ class TestFragmentBearingLinksAreFetchable:
         second = await client.fetch(link_url)
         assert not isinstance(second, GeminiErrorResult)
         assert sent[-1] == b"gemini://example.org/page\r\n"
+
+
+class TestTLSConnectFailureDoesNotEchoTheAddress:
+    """A failed connect must not report which IP was actually tried."""
+
+    @pytest.mark.asyncio
+    async def test_generic_oserror_omits_the_connect_address(self):
+        """The refused-connection branch shields the common case, but the
+        generic ``except OSError`` used to interpolate the exception itself --
+        and asyncio builds every deferred connect failure as
+        ``OSError(err, f"Connect call failed {address}")``, so the SSRF-vetted
+        resolved IP travelled inside ``strerror`` straight into the message.
+        """
+        client = GeminiTLSClient(TLSConfig())
+        failure = OSError(errno.EHOSTUNREACH, "Connect call failed ('10.1.2.3', 1965)")
+
+        with (
+            patch("asyncio.open_connection", side_effect=failure),
+            pytest.raises(GeminiConnectionError) as exc_info,
+        ):
+            await client.connect("example.com", 1965, connect_ip="10.1.2.3")
+
+        message = str(exc_info.value)
+        assert "10.1.2.3" not in message
+        assert os.strerror(errno.EHOSTUNREACH) in message
+
+
+class TestGeminiResponseSizeAccessor:
+    """Gemini spells the same field ``size``; the accessor hides the split."""
+
+    def test_gemini_reads_the_size_field(self):
+        client = GeminiClient()
+        response = GeminiSuccessResult(
+            mimeType=GeminiMimeType(type="text", subtype="plain"),
+            content="hello",
+            size=5,
+        )
+        assert client._response_size(response) == 5
+
+    def test_bodiless_results_report_zero(self):
+        client = GeminiClient()
+        response = GeminiRedirectResult(status=30, newUrl="gemini://example.org/b")
+        assert client._response_size(response) == 0
+
+
+class TestGeminiOffsetContinuation:
+    """A page cut at the render limit must be continuable, not a dead end."""
+
+    BODY = "".join(f"line {i}\n" for i in range(40))
+
+    def _client(self, **kw):
+        defaults = {
+            "respect_robots_txt": False,
+            "tofu_enabled": False,
+            "client_certs_enabled": False,
+            "requests_per_minute": 0,
+            "cache_enabled": False,
+            "max_rendered_chars": 45,
+        }
+        client = GeminiClient(**{**defaults, **kw})
+        client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+            return_value=(Mock(), {"cert_fingerprint": "x"})
+        )
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/gemini\r\n" + self.BODY.encode()
+        )
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+        return client
+
+    @pytest.mark.asyncio
+    async def test_gemtext_windows_reassemble_into_the_whole_page(self):
+        client = self._client()
+
+        first = await client.fetch("gemini://example.org/")
+        assert first.truncated is True
+        assert first.total_chars == len(self.BODY)
+        # The window is cut back to the last complete line, and next_offset
+        # points at that cut -- not at the character budget -- so the windows
+        # abut exactly instead of overlapping or dropping a line.
+        assert first.raw_content.endswith("\n")
+        assert first.next_offset == len(first.raw_content)
+
+        seen = first.raw_content
+        offset = first.next_offset
+        while offset is not None:
+            window = await client.fetch("gemini://example.org/", offset=offset)
+            seen += window.raw_content
+            offset = window.next_offset
+
+        assert seen == self.BODY
+
+    @pytest.mark.asyncio
+    async def test_a_plain_text_body_windows_too(self):
+        client = self._client()
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/plain\r\n" + self.BODY.encode()
+        )
+
+        result = await client.fetch("gemini://example.org/", offset=45)
+
+        assert isinstance(result, GeminiSuccessResult)
+        assert result.content == self.BODY[45:90]
+        assert result.total_chars == len(self.BODY)
+        assert result.next_offset == 90
+        # `size` counts bytes and is NOT an offset: an offset is in characters.
+        assert result.size == len(self.BODY.encode())
+
+    @pytest.mark.asyncio
+    async def test_a_negative_offset_is_rejected(self):
+        client = self._client()
+
+        result = await client.fetch("gemini://example.org/", offset=-1)
+
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
+    async def test_the_cache_does_not_serve_one_window_for_another(self):
+        """The cache stores the rendered window, not the body, so the offset is
+        part of the key -- otherwise the second window would be answered with
+        the first, silently."""
+        client = self._client(cache_enabled=True)
+
+        first = await client.fetch("gemini://example.org/")
+        second = await client.fetch("gemini://example.org/", offset=first.next_offset)
+        replay = await client.fetch("gemini://example.org/")
+
+        assert second.raw_content != first.raw_content
+        assert replay.cached is True
+        assert replay.raw_content == first.raw_content
+        assert client.tls_client.receive_data.await_count == 2

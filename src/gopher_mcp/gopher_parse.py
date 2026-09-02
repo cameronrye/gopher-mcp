@@ -213,7 +213,7 @@ def parse_menu_line(line: str, *, charset: str = "utf-8") -> GopherMenuItem | No
             selector="",
             host="",
             port=0,
-            nextUrl="",
+            next_url="",
         )
 
     try:
@@ -290,7 +290,7 @@ def parse_menu_line(line: str, *, charset: str = "utf-8") -> GopherMenuItem | No
             selector=selector,
             host=host,
             port=port,
-            nextUrl=next_url,
+            next_url=next_url,
         )
     except (ValueError, IndexError):
         return None

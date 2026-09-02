@@ -206,6 +206,51 @@ class TestValidateTarget:
             await validate_target("127.0.0.1", 70)
         assert not isinstance(blocked.value, HostResolutionError)
 
+    @pytest.mark.parametrize(
+        "addresses",
+        [
+            ["93.184.216.34", "10.0.0.5"],  # internal last
+            ["10.0.0.5", "93.184.216.34"],  # internal first
+            ["2606:2800:220::1", "::1"],  # dual-stack, loopback last
+            ["93.184.216.34", "8.8.8.8", "169.254.169.254"],  # metadata last
+        ],
+    )
+    async def test_a_mixed_answer_is_blocked_whichever_address_is_internal(
+        self, monkeypatch, addresses
+    ):
+        """EVERY resolved address is checked, not just the first.
+
+        A round-robin or dual-stack answer where only one record points inside
+        is the classic partial-answer / rebinding shape, and the callers connect
+        to every address ``validate_target`` returns (gemini_client's
+        ``_ipv4_first`` loop, gopher_transport's ``targets``) -- so an unchecked
+        tail is a live SSRF hole, not a theoretical one. Ordering is
+        parametrized because a "just take the first address" simplification
+        passes half of these by luck; the whole suite used to stay green with
+        the loop narrowed to ``addresses[:1]``.
+        """
+
+        async def mixed(host, port):
+            return list(addresses)
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", mixed)
+        with pytest.raises(SSRFError, match="Blocked"):
+            await validate_target("mixed.example", 1965)
+
+    async def test_an_all_public_answer_is_returned_whole(self, monkeypatch):
+        """The inverse of the above: a multi-address answer is not blocked
+        merely for having more than one record, and every vetted address is
+        handed back so the caller can fail over between them."""
+
+        async def public(host, port):
+            return ["93.184.216.34", "2606:2800:220::1"]
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", public)
+        assert await validate_target("mixed.example", 1965) == [
+            "93.184.216.34",
+            "2606:2800:220::1",
+        ]
+
     async def test_reserved_address_from_dns_is_blocked(self, monkeypatch):
         """An unallocated IPv6 range reports is_global=True, so it reaches the
         connect path unless the reserved check catches it."""

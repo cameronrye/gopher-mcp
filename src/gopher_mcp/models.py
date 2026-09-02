@@ -7,8 +7,10 @@ from typing import Annotated, Any, Generic, Literal, TypeVar
 from urllib.parse import urlsplit
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     Field,
+    RootModel,
     field_validator,
     model_serializer,
     model_validator,
@@ -88,6 +90,37 @@ _NextOffset = Annotated[
 ]
 
 _ResultT = TypeVar("_ResultT", bound=BaseModel)
+
+# Every result model carries a ``kind`` literal, so the fetch unions are tagged
+# unions: naming the discriminator turns validation into a single dict lookup
+# (instead of trying each member in turn) and makes the advertised JSON schema a
+# ``oneOf`` with a ``kind`` -> schema mapping, which is what tells a client -- and
+# the model -- that these are alternatives to branch on rather than an anything-goes
+# object.
+_KIND = Field(discriminator="kind")
+
+
+# Wire-name reconciliation for the camelCase aliases these models were written
+# with. A plain ``alias`` quietly made three different names for one field:
+#
+# * the payload said ``next_url`` -- ``model_dump()`` without ``by_alias`` emits
+#   *field* names, and that snake_case spelling is what every tool result has
+#   always carried and what docs/api-reference.md documents;
+# * anything dumping ``by_alias=True`` said ``nextUrl`` -- and the MCP SDK's
+#   ``convert_result`` does exactly that once a tool declares an output model,
+#   so annotating the fetch tools would have silently renamed half the payload;
+# * a plain ``alias`` is also the *validation* name, so a result could not be
+#   validated back from its own ``model_dump()`` ("nextUrl Field required"),
+#   which is precisely the round trip the SDK performs before returning
+#   structured content.
+#
+# So every such field now names ITSELF first in an ``AliasChoices`` and pins
+# ``serialization_alias`` to the same string: the snake_case name validates,
+# serializes and appears in the advertised JSON schema, while the camelCase
+# spelling stays accepted on input so stored JSON and any external caller
+# keep working. Nothing about the published payload changes. Written out at
+# each field rather than built by a helper -- mypy reads ``Field(...)`` as a
+# dataclass field specifier and cannot follow ``**kwargs`` into one.
 
 
 def iso_utc(timestamp: float | None) -> str | None:
@@ -179,7 +212,10 @@ class GopherMenuItem(BaseModel):
     # Info ('i') lines conventionally carry port 0, so 0 is permitted here.
     port: int = Field(..., ge=0, le=65535, description="Port number (typically 70)")
     next_url: str = Field(
-        ..., alias="nextUrl", description="Fully formed gopher:// URL for this item"
+        ...,
+        validation_alias=AliasChoices("next_url", "nextUrl"),
+        serialization_alias="next_url",
+        description="Fully formed gopher:// URL for this item",
     )
 
 
@@ -190,8 +226,9 @@ class MenuResult(BaseModel):
     items: list[GopherMenuItem] = Field(..., description="List of menu items")
     truncated: bool = Field(
         default=False,
-        description="True if the menu had more items than the render limit and "
-        "`items` was truncated",
+        description="True if the directory holds more items after this window. "
+        "`next_offset` is where they start -- call again with `offset` set to "
+        "it rather than treating `items` as the whole directory.",
     )
     total_items: _TotalItems = None
     next_offset: _NextOffset = None
@@ -200,7 +237,8 @@ class MenuResult(BaseModel):
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -214,8 +252,9 @@ class TextResult(BaseModel):
     text: str = Field(..., description="Text content")
     truncated: bool = Field(
         default=False,
-        description="True if `text` was truncated to the render limit (`bytes` "
-        "still reports the full original size)",
+        description="True if the body continues after this window. "
+        "`next_offset` is where it continues; `bytes` still reports the full "
+        "original size (in bytes, which is not the unit an offset counts in).",
     )
     total_chars: _TotalChars = None
     next_offset: _NextOffset = None
@@ -224,7 +263,8 @@ class TextResult(BaseModel):
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -235,7 +275,10 @@ class BinaryResult(BaseModel):
     kind: Literal["binary"] = "binary"
     bytes: int = Field(..., ge=0, description="Size of content in bytes")
     mime_type: str | None = Field(
-        None, alias="mimeType", description="Guessed MIME type"
+        None,
+        validation_alias=AliasChoices("mime_type", "mimeType"),
+        serialization_alias="mime_type",
+        description="Guessed MIME type",
     )
     note: str = Field(
         default="Binary content not returned to preserve context",
@@ -246,7 +289,8 @@ class BinaryResult(BaseModel):
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -266,13 +310,29 @@ class ErrorResult(BaseModel):
     error: dict[str, Any] = Field(..., description="Error information")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
 
 # Union type for all possible response types
 GopherFetchResponse = MenuResult | TextResult | BinaryResult | ErrorResult
+
+
+# A tool's ``outputSchema`` is built from its return annotation, and the wrappers
+# below are what let the fetch tools declare theirs. A bare union will not do:
+# the MCP SDK wraps any non-``BaseModel`` return in ``{"result": ...}``, which
+# would change the payload every client already reads. A ``RootModel`` IS a
+# ``BaseModel``, so it is used unwrapped -- the result keeps exactly the shape it
+# has always had, while the advertised schema becomes the real thing: a ``oneOf``
+# over the result kinds, discriminated by ``kind``, instead of the open
+# ``{"additionalProperties": true}`` object a ``-> dict[str, Any]`` annotation
+# produced. The docstrings are deliberately short: they are published to the
+# model as the schema's description.
+class GopherFetchOutput(RootModel[Annotated[GopherFetchResponse, _KIND]]):
+    """One Gopher fetch result: a menu, text, binary metadata, or an error."""
+
 
 _CacheValueT = TypeVar("_CacheValueT")
 
@@ -482,14 +542,18 @@ class GeminiSuccessResult(BaseModel):
 
     kind: Literal["success"] = "success"
     mime_type: GeminiMimeType = Field(
-        ..., alias="mimeType", description="Content MIME type"
+        ...,
+        validation_alias=AliasChoices("mime_type", "mimeType"),
+        serialization_alias="mime_type",
+        description="Content MIME type",
     )
     content: str = Field(..., description="Decoded text response content")
     size: int = Field(..., ge=0, description="Content size in bytes")
     truncated: bool = Field(
         default=False,
-        description="True if `content` was truncated to the render limit "
-        "(`size` still reports the full original size).",
+        description="True if the body continues after this window. "
+        "`next_offset` is where it continues; `size` still reports the full "
+        "original size (in bytes, which is not the unit an offset counts in).",
     )
     total_chars: _TotalChars = None
     next_offset: _NextOffset = None
@@ -499,7 +563,8 @@ class GeminiSuccessResult(BaseModel):
 
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -516,7 +581,10 @@ class GeminiBinaryResult(BaseModel):
 
     kind: Literal["binary"] = "binary"
     mime_type: GeminiMimeType = Field(
-        ..., alias="mimeType", description="Detected content MIME type"
+        ...,
+        validation_alias=AliasChoices("mime_type", "mimeType"),
+        serialization_alias="mime_type",
+        description="Detected content MIME type",
     )
     size: int = Field(..., ge=0, description="Content size in bytes")
     note: str = Field(
@@ -528,7 +596,8 @@ class GeminiBinaryResult(BaseModel):
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -541,7 +610,8 @@ class GeminiInputResult(BaseModel):
     sensitive: bool = Field(default=False, description="Whether input is sensitive")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -559,7 +629,8 @@ class GeminiRedirectResult(BaseModel):
     kind: Literal["redirect"] = "redirect"
     new_url: str = Field(
         ...,
-        alias="newUrl",
+        validation_alias=AliasChoices("new_url", "newUrl"),
+        serialization_alias="new_url",
         description="Redirect target URL. Follow at most five in a row, and "
         "stop if a URL you have already visited comes back: a capsule can "
         "otherwise spin a client through an unbounded chain of fetches",
@@ -579,7 +650,8 @@ class GeminiRedirectResult(BaseModel):
     )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -645,7 +717,8 @@ class GeminiCertificateResult(BaseModel):
     )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -764,7 +837,8 @@ class GeminiGemtextResult(BaseModel):
     # whole page a second time was a third of the payload the model paid for.
     raw_content: str = Field(
         ...,
-        alias="rawContent",
+        validation_alias=AliasChoices("raw_content", "rawContent"),
+        serialization_alias="raw_content",
         exclude=True,
         description="Raw gemtext content (server-side only; see `document`)",
     )
@@ -773,8 +847,10 @@ class GeminiGemtextResult(BaseModel):
     size: int = Field(..., description="Content size in bytes")
     truncated: bool = Field(
         default=False,
-        description="True if the gemtext was truncated to the render limit "
-        "(`size` still reports the full original byte size)",
+        description="True if the page continues after this window. "
+        "`next_offset` is where it continues -- at the last complete line, so "
+        "windows abut exactly; `size` still reports the full original byte "
+        "size (bytes are not the unit an offset counts in).",
     )
     total_chars: _TotalChars = None
     next_offset: _NextOffset = None
@@ -783,7 +859,8 @@ class GeminiGemtextResult(BaseModel):
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -798,6 +875,11 @@ GeminiFetchResponse = (
     | GeminiErrorResult
     | GeminiCertificateResult
 )
+
+
+class GeminiFetchOutput(RootModel[Annotated[GeminiFetchResponse, _KIND]]):
+    """One Gemini fetch result: gemtext, success, binary metadata, input,
+    redirect, certificate, or an error."""
 
 
 # Certificate and security models
@@ -1007,7 +1089,8 @@ class TOFUTrustListResult(BaseModel):
 
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -1033,7 +1116,8 @@ class TOFUTrustUpdateResult(BaseModel):
     message: str = Field(..., description="Human-readable summary of the outcome")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -1054,7 +1138,8 @@ class GeminiClientCertListResult(BaseModel):
     )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -1096,7 +1181,8 @@ class GeminiClientCertUpdateResult(BaseModel):
     message: str = Field(..., description="Human-readable summary of the outcome")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 

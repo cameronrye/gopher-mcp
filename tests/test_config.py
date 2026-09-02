@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 import pytest
 import structlog
+from pydantic import ValidationError
 
 from gopher_mcp.config import AppConfig, ServerConfig, configure_logging, reset_config
 
@@ -181,6 +182,27 @@ class TestConfigErrorMessages:
         captured = capsys.readouterr()
         assert "--transport" in captured.out
         assert captured.err == ""
+
+
+class TestLogLevelValidation:
+    """``log_level`` is the one ServerConfig field with a hand-written
+    validator, and it is what decides whether audit-relevant events (SSRF
+    blocks, TOFU mismatches) are emitted at all.
+
+    An unrecognised value must be refused at construction rather than silently
+    accepted and later handed to ``logging.getLevelName``, which answers
+    "Level verbose" for anything it does not know and leaves the filter set to
+    whatever was configured last.
+    """
+
+    @pytest.mark.parametrize("bad", ["verbose", "trace", "warn", ""])
+    def test_an_unrecognised_level_is_refused(self, bad):
+        with pytest.raises(ValidationError, match="Invalid log level"):
+            ServerConfig(log_level=bad)
+
+    @pytest.mark.parametrize("given", ["debug", "Info", "wArNiNg"])
+    def test_a_recognised_level_is_normalized_to_upper_case(self, given):
+        assert ServerConfig(log_level=given).log_level == given.upper()
 
 
 def _run_cli(*flags):

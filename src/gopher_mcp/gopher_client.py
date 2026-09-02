@@ -11,13 +11,19 @@ from dataclasses import dataclass
 import structlog
 
 from .client_base import FetchClientBase
+from .gopher_parse import (
+    gopher_type_category,
+    parse_gopher_menu,
+    parse_gopher_url,
+)
 from .gopher_transport import (
     GopherProtocolError,
     GopherTimeoutError,
     decode_gopher_text,
     fetch_gopher,
 )
-from .helpers import sanitize_display_text
+from .helpers import normalize_cache_key, sanitize_display_text, window_text
+from .mime import detect_binary_mime_type
 from .models import (
     BinaryResult,
     CacheEntry,
@@ -36,14 +42,6 @@ from .robots import (
     gopher_candidate_paths,
 )
 from .ssrf import HostResolutionError, SSRFError, validate_target
-from .utils import (
-    detect_binary_mime_type,
-    gopher_type_category,
-    normalize_cache_key,
-    parse_gopher_menu,
-    parse_gopher_url,
-    truncate_text,
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -115,6 +113,15 @@ class _ProbeCredit:
 _PROBE_CREDIT: ContextVar[_ProbeCredit | None] = ContextVar(
     "gopher_probe_credit", default=None
 )
+
+
+# Where the render window starts for the fetch running in this task: menu item
+# index / character position, 0 for the beginning. A ContextVar for the same
+# reason as the budget above -- it has to reach the render step across
+# ``_bounded_fetch``/``_fetch_content``, the seam subclasses and test doubles
+# implement, and each task's own copy keeps concurrent fetches from reading each
+# other's window (a value parked on the shared client instance would not).
+_RENDER_OFFSET: ContextVar[int] = ContextVar("gopher_render_offset", default=0)
 
 
 class _BudgetExhausted(GopherProtocolError):
@@ -206,6 +213,8 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
 
     _log_label = "Gopher"
     _cache_entry_cls = CacheEntry
+    # Gopher results spell the content length ``bytes`` (Gemini says ``size``).
+    _response_size_field = "bytes"
     _robots_tokens = GOPHER_TOKENS
     # Gopher fails *open*: the protocol has no status codes, so a missing
     # selector, an error document and an empty file are indistinguishable on the
@@ -321,7 +330,9 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         if not 1 <= parsed_url.port <= 65535:
             raise ValueError(f"Invalid port number: {parsed_url.port}")
 
-    async def fetch(self, url: str, *, refresh: bool = False) -> GopherFetchResponse:
+    async def fetch(
+        self, url: str, *, refresh: bool = False, offset: int = 0
+    ) -> GopherFetchResponse:
         """Fetch content from a Gopher URL.
 
         Args:
@@ -329,6 +340,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             refresh: Skip the cache lookup and go to the server. The fresh
                 response still replaces the cached one, so this bypasses the
                 cache for this read rather than disabling it.
+            offset: Where the render window starts -- the item index for a menu,
+                the character position for a text body. Pass back the
+                ``next_offset`` of a truncated result to read the part that was
+                cut; 0 is the beginning. Offsets past the end return an empty
+                window, not an error.
 
         Returns:
             Structured response based on content type
@@ -344,7 +360,22 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # same task would otherwise inherit the first one's rate-limit slot and
         # its already-resolved addresses.
         credit_token = _PROBE_CREDIT.set(None)
+        # Set here rather than passed down through ``_bounded_fetch``: that
+        # method and ``_fetch_content`` are the seam a subclass (and the robots
+        # gate's own fetcher) implement, and widening it for a value only the
+        # two render paths read would push the parameter through code that has
+        # no use for it. Same lifecycle as the budget above -- a ContextVar set
+        # inside one fetch outlives it in the caller's context, so it is reset
+        # in the ``finally``, and each task's copy keeps concurrent fetches
+        # from reading each other's window.
+        offset_token = _RENDER_OFFSET.set(offset)
         try:
+            # Rejected rather than clamped: a negative offset is a caller
+            # mistake, and silently reading from 0 would answer a question that
+            # was not asked.
+            if offset < 0:
+                raise ValueError("offset must not be negative")
+
             # Parse the URL
             parsed_url = parse_gopher_url(url)
 
@@ -379,6 +410,17 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # Canonical cache key (case-insensitive host) so requests differing
             # only in host case share one entry instead of duplicating.
             cache_key = normalize_cache_key(url)
+            if offset:
+                # What the cache stores is the RENDERED WINDOW, not the body, so
+                # two windows of one resource are two entries -- serving window
+                # 0 to a request for window 200 would silently answer the wrong
+                # question. The alternative (cache the whole body and window on
+                # the way out) would put full-size bodies in a cache whose
+                # entry cap exists to bound its memory, so the offset goes in
+                # the key instead and a continuation pays for its own fetch.
+                # NUL cannot appear in a URL, so this can never collide with a
+                # key some other URL normalizes to.
+                cache_key = f"{cache_key}\x00offset={offset}"
 
             # Check cache first, unless the caller asked for the current state.
             if self.cache_enabled and not refresh:
@@ -398,7 +440,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                         # so a rename or a typo must fail mypy rather than
                         # silently logging "unknown" forever.
                         response_type=cached_response.kind,
-                        response_size=getattr(cached_response, "bytes", 0),
+                        response_size=self._response_size(cached_response),
                     )
                     return cached_response
 
@@ -441,7 +483,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 selector=_display_selector(parsed_url.selector),
                 search=parsed_url.search,
                 response_type=response.kind,
-                response_size=getattr(response, "bytes", 0),
+                response_size=self._response_size(response),
                 cached=False,
             )
 
@@ -468,6 +510,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         finally:
             _FETCH_BUDGET.reset(budget_token)
             _PROBE_CREDIT.reset(credit_token)
+            _RENDER_OFFSET.reset(offset_token)
 
     async def _bounded_fetch(self, parsed_url: GopherURL) -> GopherFetchResponse:
         """Run the guarded fetch, spending what the robots probe already paid.
@@ -526,7 +569,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return ErrorResult(
             error={"code": code, "message": message},
-            requestInfo={"url": url, "timestamp": iso_utc(time.time())},
+            request_info={"url": url, "timestamp": iso_utc(time.time())},
         )
 
     async def _fetch_robots(self, host: str, port: int) -> str | None:
@@ -638,7 +681,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # request that produced it -- most visibly for one entry of a
             # gopher_batch_fetch list. The ``url`` is filled in by ``fetch``,
             # which is the only caller that has the original string.
-            requestInfo={
+            request_info={
                 "host": parsed_url.host,
                 "port": parsed_url.port,
                 "type": parsed_url.gopher_type,
@@ -734,17 +777,22 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 f"The request timed out after {self.timeout_seconds} seconds"
             ) from e
 
+        # Where the caller asked the render window to start. The whole response
+        # is still read from the server -- Gopher has no range request -- so
+        # this windows what is handed to the model, not what is transferred.
+        offset = _RENDER_OFFSET.get()
+
         if category == "menu":
             # Menu/directory or search results (which are menus)
-            return self._process_menu_response(raw)
+            return self._process_menu_response(raw, offset)
         elif category == "binary":
-            # Binary content - return metadata only
+            # Binary content - return metadata only (no body to window).
             return self._process_binary_response(raw)
         else:
             # Text (type 0, h/HTML, i/info) and unknown types - try as text
-            return self._process_text_response(raw)
+            return self._process_text_response(raw, offset)
 
-    def _process_menu_response(self, raw: bytes) -> MenuResult:
+    def _process_menu_response(self, raw: bytes, offset: int = 0) -> MenuResult:
         """Parse a Gopher menu (RFC 1436) into a structured result.
 
         Uses the project's own ``parse_gopher_menu``, which honours the
@@ -754,6 +802,8 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
 
         Args:
             raw: Raw response bytes from the server
+            offset: Index of the first item to return, so a directory bigger
+                than the render cap can be read a window at a time.
 
         Returns:
             Parsed menu result
@@ -768,22 +818,37 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # Parse at most one past the cap so we never materialise the whole
         # directory yet can still tell whether it was truncated.
         if self.max_menu_items:
-            items = parse_gopher_menu(
-                content, max_items=self.max_menu_items + 1, charset=charset
+            parsed = parse_gopher_menu(
+                content, max_items=offset + self.max_menu_items + 1, charset=charset
             )
-            truncated = len(items) > self.max_menu_items
-            if truncated:
-                items = items[: self.max_menu_items]
+            items = parsed[offset : offset + self.max_menu_items]
+            truncated = len(parsed) > offset + self.max_menu_items
+            # An exact count only when the parse ended on its own: hitting the
+            # cap proves there are more items but not how many, and inventing a
+            # number would be worse than admitting none. Counting the rest would
+            # mean materialising the whole directory, which is precisely what
+            # the cap above exists to avoid -- `next_offset` is what makes the
+            # remainder reachable regardless.
+            total_items = None if truncated else len(parsed)
         else:
-            items = parse_gopher_menu(content, charset=charset)
+            parsed = parse_gopher_menu(content, charset=charset)
+            items = parsed[offset:]
             truncated = False
-        return MenuResult(items=items, truncated=truncated)
+            total_items = len(parsed)
+        return MenuResult(
+            items=items,
+            truncated=truncated,
+            total_items=total_items,
+            next_offset=offset + len(items) if truncated else None,
+        )
 
-    def _process_text_response(self, raw: bytes) -> TextResult:
+    def _process_text_response(self, raw: bytes, offset: int = 0) -> TextResult:
         """Process a Gopher text response.
 
         Args:
             raw: Raw response bytes from the server
+            offset: Character position the returned window starts at, so a body
+                longer than the render cap can be read a window at a time.
 
         Returns:
             Text result
@@ -806,14 +871,18 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         sanitized_text = sanitized_text.replace("\r\n", "\n").replace("\r", "\n")
 
         # Cap the text handed to the LLM (distinct from the network byte cap);
-        # `bytes` still reports the full original size.
-        rendered, truncated = truncate_text(sanitized_text, self.max_rendered_chars)
+        # `bytes` still reports the full original size. The window is measured
+        # in characters, which is what `next_offset` speaks -- `bytes` cannot be
+        # used as an offset without risking a split UTF-8 sequence.
+        window = window_text(sanitized_text, offset, self.max_rendered_chars)
 
         return TextResult(
-            text=rendered,
+            text=window.text,
             bytes=len(raw),
             charset=charset,
-            truncated=truncated,
+            truncated=window.next_offset is not None,
+            total_chars=window.total,
+            next_offset=window.next_offset,
         )
 
     # Note: Search is handled by _process_menu_response since search results are menus
@@ -829,7 +898,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         """
         return BinaryResult(
             bytes=len(raw),
-            mimeType=detect_binary_mime_type(raw),
+            mime_type=detect_binary_mime_type(raw),
         )
 
     # The cache accessors, _bounded_fetch, _error_result and close() are

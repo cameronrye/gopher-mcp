@@ -18,6 +18,8 @@ import contextlib
 
 import structlog
 
+from .helpers import describe_oserror
+
 logger = structlog.get_logger(__name__)
 
 READ_CHUNK = 65536
@@ -161,11 +163,14 @@ async def fetch_gopher(
     except GopherProtocolError:
         raise
     except OSError as e:
-        # Use strerror only, so the resolved IP/address isn't echoed back to
-        # the caller (which would act as an internal-reachability oracle).
-        raise GopherProtocolError(
-            f"Connection failed: {e.strerror or 'unable to connect'}"
-        ) from e
+        # Report the errno's canonical text only, so the resolved IP/address
+        # isn't echoed back to the caller (which would act as an
+        # internal-reachability oracle). ``e.strerror`` is NOT safe for this:
+        # asyncio builds every deferred connect failure as
+        # ``OSError(err, f"Connect call failed {address}")``, so the sockaddr
+        # ends up *inside* strerror. ``os.strerror(errno)`` is the address-free
+        # description of the same failure.
+        raise GopherProtocolError(f"Connection failed: {describe_oserror(e)}") from e
 
 
 def decode_gopher_text(data: bytes) -> tuple[str, str]:
