@@ -1468,7 +1468,7 @@ alongside either. The endpoint table for client configuration is in
 
 ```console
 $ curl -s http://127.0.0.1:8000/health
-{"status":"ok","version":"0.8.0"}
+{"status":"ok","version":"0.9.0"}
 ```
 
 The MCP endpoint answers 400 to a well-formed request that is not a session

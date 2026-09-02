@@ -149,7 +149,7 @@ docker run --rm --no-healthcheck ghcr.io/cameronrye/gopher-mcp:latest --version
 they still work when an environment variable holds a value the server would
 reject at startup.
 
-!!! note "`--version` needs a release newer than 0.8.0"
+!!! note "`--version` needs 0.9.0 or newer"
     The flag is new. Against the version currently on PyPI, `gopher-mcp
     --version` answers `error: unrecognized arguments: --version`, which means
     the install worked and predates the flag — `gopher-mcp --help` verifies it

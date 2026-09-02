@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-09-02
+
 Everything below applies the findings of a full review of the code, the
 packaging and the documentation site. Each finding was independently verified
 against the code, or by running it, before it was applied.
@@ -1105,7 +1107,8 @@ connection failed`, `the reply was not a valid Gemini response`, or the status
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.1...v0.7.0
 [0.6.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.6.0...v0.6.1

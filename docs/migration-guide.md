@@ -8,7 +8,7 @@ crosses three releases means reading three sections.
 
 | Version | Why you have to read it |
 |---------|-------------------------|
-| [Unreleased](#unreleased) | Result payload shapes, four new or widened error codes, where trust state lives on disk, and the project's own tooling |
+| [0.9.0](#v090) | Result payload shapes, four new or widened error codes, where trust state lives on disk, and the project's own tooling |
 | [0.8.0](#error-code-changes-in-080) | Four error codes split or renamed — anything switching on `error["code"]` |
 | [0.7.0](#changed-defaults-in-070) | `robots.txt` is honoured by default; a fetch that used to succeed can now be refused |
 | [0.6.0](#public-api-changes-in-060) | Rate limits on by default, an empty allowlist flipped meaning, public Python API removed |
@@ -19,7 +19,7 @@ demand, and the one on-disk format that moved (see
 [Where trust state lives](#where-trust-state-lives)) keeps reading its old
 location permanently.
 
-## Unreleased
+## v0.9.0
 
 The largest upgrade since 0.2.0: twenty-two breaking changes, most of them in
 the shape of what a tool returns rather than in what you may call. No tool was
@@ -782,7 +782,7 @@ things deliberately, each for a stated reason:
 - **0.7.0** made `robots.txt` binding by default, so a fetch that used to
   succeed can now be refused.
 - **0.8.0** renamed or split four error codes.
-- **Unreleased** reshapes gemtext lines, the Gemini error payload and result
+- **0.9.0** reshapes gemtext lines, the Gemini error payload and result
   timestamps, empties an info line's `next_url`, moves the default trust store,
   and drops `task.py` and the published extras.
 
