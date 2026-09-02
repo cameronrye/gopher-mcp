@@ -248,6 +248,15 @@ class TestGopherCandidatePaths:
         assert policy.is_allowed(paths, ("*",)) is False
 
 
+# Slack for comparing a monotonic-clock deadline against the period it was built
+# from. ``_retry_after`` stores ``clock() + backoff`` and tests read back
+# ``deadline - clock()``; that round trip is not exact in IEEE754, so an
+# equality-tight bound fails on whichever runner happens to draw an unlucky
+# clock value. Far smaller than any period under test, so it discriminates
+# nothing it should.
+_CLOCK_EPSILON = 1e-6
+
+
 class TestRobotsUnavailableBackoff:
     """An unreachable robots.txt must not be re-probed on every single fetch.
 
@@ -1401,8 +1410,17 @@ class TestReviewRegressions:
         gate = client._robots_gate
         assert gate is not None
         # 5 seconds from the SLOW_DOWN, not the 60-second default backoff.
-        deadline = gate._retry_after["example.com:1965"]
-        assert deadline - gate._clock() <= 5.0
+        # Bounded on BOTH sides: "<= 5" alone also passes if the backoff were
+        # dropped to zero, which is the very failure the None-vs-0.0 handling in
+        # _slow_down_seconds exists to prevent.
+        #
+        # EPSILON: the deadline is stored as clock() + backoff and read back as
+        # deadline - clock(), so IEEE754 can return a hair OVER the exact bound
+        # -- (c + 300.0) - c > 300.0 for roughly 1 in 11k plausible clock
+        # values, which is what broke the Windows 3.11/3.12 jobs. The property
+        # is "the configured period was used", not femtosecond equality.
+        remaining = gate._retry_after["example.com:1965"] - gate._clock()
+        assert 0 < remaining <= 5.0 + _CLOCK_EPSILON, remaining
         await client.close()
 
     async def test_a_hostile_slow_down_cannot_pin_the_gate(self):
@@ -1419,8 +1437,11 @@ class TestReviewRegressions:
         await client.fetch("gemini://example.com/page")
         gate = client._robots_gate
         assert gate is not None
-        deadline = gate._retry_after["example.com:1965"]
-        assert deadline - gate._clock() <= MAX_PENALTY_SECONDS
+        remaining = gate._retry_after["example.com:1965"] - gate._clock()
+        # Lower bound too: a clamp that produced zero would pass "<= MAX" while
+        # silently removing the backoff altogether. Epsilon for the same float
+        # reason as above -- this is the assertion that actually failed on CI.
+        assert 0 < remaining <= MAX_PENALTY_SECONDS + _CLOCK_EPSILON, remaining
         await client.close()
 
     async def test_the_two_cases_carry_different_codes(self):
