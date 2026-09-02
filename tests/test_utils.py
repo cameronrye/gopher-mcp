@@ -112,6 +112,29 @@ class TestParseGopherUrl:
             parse_gopher_url("http://example.com/")
         assert "URL must start with 'gopher://'" in str(exc_info.value)
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "GOPHER://example.com/1/world",
+            "Gopher://example.com/1/world",
+            "gOpHeR://example.com/1/world",
+        ],
+    )
+    def test_scheme_is_case_insensitive(self, url):
+        """RFC 3986 s3.1 makes the scheme case-insensitive, matching what
+        ``parse_gemini_url`` already accepts. Refusing a capitalised one told
+        the caller a valid Gopher URL was not a Gopher URL at all."""
+        result = parse_gopher_url(url)
+
+        assert result.host == "example.com"
+        assert result.gopher_type == "1"
+        assert result.selector == "/world"
+
+    def test_a_non_gopher_scheme_is_still_refused(self):
+        """Only the case is forgiven; the scheme itself is still checked."""
+        with pytest.raises(ValueError, match="URL must start with 'gopher://'"):
+            parse_gopher_url("GEMINI://example.com/")
+
     def test_url_without_hostname(self):
         """Test parsing URL without hostname."""
         with pytest.raises(ValueError) as exc_info:

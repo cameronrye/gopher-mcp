@@ -2,7 +2,7 @@
 
 import time
 from datetime import UTC, datetime
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from typing import Annotated, Any, Generic, Literal, TypeVar
 from urllib.parse import urlsplit
 
@@ -179,6 +179,38 @@ def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
     )
 
 
+def _canonical_scheme(url: str, scheme: str) -> str:
+    """Check ``url``'s scheme case-insensitively and return it canonicalised.
+
+    RFC 3986 section 3.1 makes the scheme case-insensitive, and
+    :func:`~gopher_mcp.gemini_parse.parse_gemini_url` accepts ``GEMINI://``
+    accordingly. Matching the prefix literally here refused *at the MCP tool
+    boundary* what the parser behind it accepts, so a capitalised link this
+    server had itself just surfaced -- ``resolve_gemini_reference`` returns a
+    scheme-bearing target verbatim -- came back as ``INVALID_REQUEST`` with a
+    message claiming it was not a Gemini URL at all.
+
+    The lowercase spelling is returned rather than the caller's, so everything
+    downstream (the parsers, the cache key, the TOFU pin) sees the one
+    canonical form instead of one entry per spelling.
+
+    Args:
+        url: The URL as the caller wrote it.
+        scheme: The expected scheme, lowercase and without ``://``.
+
+    Returns:
+        ``url`` with its scheme lowercased.
+
+    Raises:
+        ValueError: If ``url`` does not carry ``scheme`` in any case.
+
+    """
+    prefix, separator, remainder = url.partition("://")
+    if separator != "://" or prefix.lower() != scheme:
+        raise ValueError(f"URL must start with '{scheme}://'")
+    return f"{scheme}://{remainder}"
+
+
 class GopherFetchRequest(BaseModel):
     """Request model for gopher.fetch tool."""
 
@@ -195,8 +227,7 @@ class GopherFetchRequest(BaseModel):
     @classmethod
     def validate_gopher_url(cls, v: str) -> str:
         """Validate that the URL is a proper Gopher URL."""
-        if not v.startswith("gopher://"):
-            raise ValueError("URL must start with 'gopher://'")
+        v = _canonical_scheme(v, "gopher")
         if len(v.encode("utf-8")) > 8192:
             raise ValueError("URL must not exceed 8192 bytes")
         return v
@@ -428,10 +459,15 @@ class GeminiFetchRequest(BaseModel):
 
     url: str = Field(
         ...,
-        description="Gemini URL to fetch (e.g., gemini://gemini.circumlunar.space/)",
+        # gemini.circumlunar.space is retired -- it now serves only a notice
+        # asking visitors to update their bookmarks -- and these strings are
+        # what the tool's inputSchema teaches every calling model to fetch, as
+        # well as what the published Data Models reference renders. Both
+        # replacements were checked as reachable.
+        description="Gemini URL to fetch (e.g., gemini://geminiprotocol.net/)",
         examples=[
-            "gemini://gemini.circumlunar.space/",
-            "gemini://gemini.circumlunar.space/docs/specification.gmi",
+            "gemini://geminiprotocol.net/",
+            "gemini://skyjake.fi/",
         ],
     )
 
@@ -439,8 +475,7 @@ class GeminiFetchRequest(BaseModel):
     @classmethod
     def validate_gemini_url(cls, v: str) -> str:
         """Validate that the URL is a proper Gemini URL."""
-        if not v.startswith("gemini://"):
-            raise ValueError("URL must start with 'gemini://'")
+        v = _canonical_scheme(v, "gemini")
         if len(v.encode("utf-8")) > 1024:
             raise ValueError("URL must not exceed 1024 bytes")
         return v
@@ -724,7 +759,7 @@ class GeminiCertificateResult(BaseModel):
 
 
 # Gemtext content models
-class GemtextLineType(str, Enum):
+class GemtextLineType(StrEnum):
     """Types of lines in gemtext format."""
 
     TEXT = "text"
@@ -835,8 +870,13 @@ class GeminiGemtextResult(BaseModel):
     # in gemini_client.py parses it -- but deliberately NOT serialized: every
     # line of it is already in `document.lines[*].content`, and shipping the
     # whole page a second time was a third of the payload the model paid for.
+    # Defaulted, not required, and the default is load-bearing: `exclude=True`
+    # keeps this out of `model_dump()`, and the SDK validates a tool's payload
+    # back through the advertised output schema. A required-but-excluded field
+    # cannot survive that round trip, so requiring it here made every gemtext
+    # response fail output validation with "raw_content Field required".
     raw_content: str = Field(
-        ...,
+        default="",
         validation_alias=AliasChoices("raw_content", "rawContent"),
         serialization_alias="raw_content",
         exclude=True,

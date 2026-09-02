@@ -414,6 +414,31 @@ class TestGeminiFetchRequest:
         with pytest.raises(ValidationError, match="URL must start with 'gemini://'"):
             GeminiFetchRequest(url="http://example.org/")
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "GEMINI://example.org/path",
+            "Gemini://example.org/path",
+            "gEmInI://example.org/path",
+        ],
+    )
+    def test_the_scheme_is_matched_case_insensitively(self, url):
+        """``parse_gemini_url`` accepts a capitalised scheme (RFC 3986 s3.1),
+        but this validator is the gate the MCP caller hits first: matching the
+        prefix literally here rejected as INVALID_REQUEST exactly the URLs the
+        parser behind it accepts -- including a gemtext link this server had
+        just handed back, since ``resolve_gemini_reference`` returns a
+        scheme-bearing target verbatim."""
+        request = GeminiFetchRequest(url=url)
+
+        # Canonicalised, so the cache key and the TOFU pin see one spelling.
+        assert request.url == "gemini://example.org/path"
+
+    def test_a_case_insensitive_match_does_not_admit_another_scheme(self):
+        """Only the case is forgiven; the scheme itself is still checked."""
+        with pytest.raises(ValidationError, match="URL must start with 'gemini://'"):
+            GeminiFetchRequest(url="GOPHER://example.org/1/x")
+
     def test_url_length_validation(self):
         """Test URL length validation in request model."""
         # Create a URL that exceeds 1024 bytes
@@ -423,15 +448,25 @@ class TestGeminiFetchRequest:
             GeminiFetchRequest(url=long_url)
 
     def test_gemini_fetch_request_examples(self):
-        """Test that example URLs in the model are valid."""
-        examples = [
-            "gemini://gemini.circumlunar.space/",
-            "gemini://gemini.circumlunar.space/docs/specification.gmi",
-        ]
+        """The declared examples must be valid, and must not name a capsule
+        that is gone.
 
+        They are read off the field rather than restated here: these strings
+        reach every calling model through the tool's inputSchema and are
+        rendered on the published Data Models page, so a copy in the test is a
+        second place to forget. ``gemini.circumlunar.space`` is retired -- it
+        serves only a notice asking visitors to update their bookmarks -- so
+        the examples must never point there again.
+        """
+        field = GeminiFetchRequest.model_fields["url"]
+        examples = field.examples
+
+        assert examples, "the url field must declare examples"
+        assert "circumlunar" not in (field.description or "")
         for example_url in examples:
             request = GeminiFetchRequest(url=example_url)
             assert request.url == example_url
+            assert "circumlunar" not in example_url
 
 
 class TestGeminiURLRoundTrip:

@@ -1457,6 +1457,7 @@ class _IdentityChange(NamedTuple):
 
 async def _create_identity(
     client: GeminiClient,
+    *,
     stored: list[GeminiCertificateInfo],
     covering: GeminiCertificateInfo | None,
     host: str,
@@ -1544,6 +1545,7 @@ async def _create_identity(
 
 async def _remove_identity(
     client: GeminiClient,
+    *,
     covering: GeminiCertificateInfo | None,
     stored: list[GeminiCertificateInfo],
     canonical: str,
@@ -1759,19 +1761,26 @@ async def gemini_client_cert_update(
             covering = _covering_certificate(stored, host, port, path)
             if action == "create":
                 outcome = await _create_identity(
-                    client, stored, covering, host, port, path, scope_url, request_info
+                    client,
+                    stored=stored,
+                    covering=covering,
+                    host=host,
+                    port=port,
+                    path=path,
+                    scope_url=scope_url,
+                    request_info=request_info,
                 )
             else:
                 outcome = await _remove_identity(
                     client,
-                    covering,
-                    stored,
-                    canonical,
-                    host,
-                    port,
-                    path,
-                    scope_url,
-                    request_info,
+                    covering=covering,
+                    stored=stored,
+                    canonical=canonical,
+                    host=host,
+                    port=port,
+                    path=path,
+                    scope_url=scope_url,
+                    request_info=request_info,
                 )
         if isinstance(outcome, dict):
             return outcome
@@ -1814,8 +1823,12 @@ async def gemini_client_cert_update(
 
 
 # The SDK leaves custom_route's decorator unannotated, so mypy cannot see that
-# the function keeps its type through it.
-@mcp.custom_route("/health", methods=["GET"])  # type: ignore[misc]
+# the function keeps its type through it. The code is `untyped-decorator`, not
+# `misc`: mypy 1.19 split this diagnostic out of the `misc` catch-all, and the
+# ignore names only the one it carries, so a genuine `misc` error on this line
+# would still be reported. That split is why the mypy floor is 1.19 -- under an
+# older mypy this line emits `misc`, which this comment no longer suppresses.
+@mcp.custom_route("/health", methods=["GET"])  # type: ignore[untyped-decorator]
 async def health(_request: Request) -> Response:
     """Report liveness for an orchestrator, over the HTTP transports.
 

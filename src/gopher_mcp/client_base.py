@@ -231,9 +231,17 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
         self.respect_robots_txt = respect_robots_txt
         self._robots_gate = (
             RobotsGate(
-                # Resolved at call time rather than bound here, so the
-                # gate follows the method (and stays patchable in tests).
-                fetcher=lambda host, port: self._fetch_robots(host, port),
+                # Resolved at call time rather than bound here, so the gate
+                # follows the method. `fetcher=self._fetch_robots` would
+                # capture the bound method now, and every test that swaps the
+                # fetcher after construction -- `patch.object(client,
+                # "_fetch_robots")` in test_robots.py and test_cache_freshness,
+                # `patch.object(GopherClient, "_fetch_robots", ...)` in
+                # test_integration.py and test_mcp_protocol.py -- would go on
+                # hitting the network through the stale reference.
+                fetcher=lambda host, port: self._fetch_robots(  # noqa: PLW0108
+                    host, port
+                ),
                 tokens=self._robots_tokens,
                 extra_tokens=(AI_AGENT_TOKENS if robots_honor_ai_tokens else ()),
                 ttl_seconds=robots_cache_ttl_seconds,

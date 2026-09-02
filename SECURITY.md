@@ -27,8 +27,14 @@ how to report vulnerabilities, and the measures we take to protect users.
 ### Resource Protection
 
 - **Memory Limits**: Response size limits prevent memory exhaustion
-- **Connection Limits**: An optional concurrency cap (off by default; set via
-  `*_MAX_CONCURRENT_REQUESTS`) bounds simultaneous in-flight fetches
+- **Connection Limits**: A concurrency cap bounds simultaneous in-flight
+  fetches — `5` by default, set via `*_MAX_CONCURRENT_REQUESTS`, `0` for
+  unlimited
+- **Rate Limiting**: Outbound requests are paced per host — `60` per minute
+  (one per second) by default, via `*_REQUESTS_PER_MINUTE`
+- **Robot Exclusion**: `/robots.txt` is fetched and honoured before the first
+  request on both protocols by default (`*_RESPECT_ROBOTS_TXT`), including
+  rules naming AI crawler tokens
 - **Cache Security**: Cached responses are isolated and have TTL limits
 - **Error Handling**: Error messages don't leak sensitive system information
 
@@ -128,14 +134,14 @@ export GOPHER_ALLOW_LOCAL_HOSTS=false
 
 Use the `GOPHER_` / `GEMINI_` prefix for each protocol.
 
-| Variable                   | Security Impact              | Recommendation                    |
-| -------------------------- | ---------------------------- | --------------------------------- |
-| `GOPHER_MAX_RESPONSE_SIZE` | Prevents memory exhaustion   | Set based on your needs, max 10MB |
-| `GOPHER_TIMEOUT_SECONDS`   | Prevents hanging connections | 15-60 seconds recommended         |
-| `GOPHER_CACHE_ENABLED`     | Reduces network requests     | Enable for better security        |
-| `GOPHER_CACHE_TTL_SECONDS` | Limits stale data exposure   | 60-300 seconds recommended        |
-| `GOPHER_ALLOW_LOCAL_HOSTS` | SSRF protection (keep off)   | Leave `false` in production       |
-| `GEMINI_ALLOW_LOCAL_HOSTS` | SSRF protection (keep off)   | Leave `false` in production       |
+| Variable                   | Security Impact              | Recommendation                                     |
+| -------------------------- | ---------------------------- | -------------------------------------------------- |
+| `GOPHER_MAX_RESPONSE_SIZE` | Prevents memory exhaustion   | Set to what you need; accepted range 1 KB – 100 MB |
+| `GOPHER_TIMEOUT_SECONDS`   | Prevents hanging connections | 15-60 seconds recommended                          |
+| `GOPHER_CACHE_ENABLED`     | Reduces network requests     | Enable for better security                         |
+| `GOPHER_CACHE_TTL_SECONDS` | Limits stale data exposure   | 60-300 seconds recommended                         |
+| `GOPHER_ALLOW_LOCAL_HOSTS` | SSRF protection (keep off)   | Leave `false` in production                        |
+| `GEMINI_ALLOW_LOCAL_HOSTS` | SSRF protection (keep off)   | Leave `false` in production                        |
 
 ### Example Secure Configuration
 
@@ -143,8 +149,8 @@ Use the `GOPHER_` / `GEMINI_` prefix for each protocol.
 {
   "mcpServers": {
     "gopher": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/gopher-mcp", "run", "task", "serve"],
+      "command": "uvx",
+      "args": ["gopher-mcp"],
       "env": {
         "GOPHER_MAX_RESPONSE_SIZE": "524288",
         "GOPHER_TIMEOUT_SECONDS": "15",
@@ -178,25 +184,34 @@ We recommend:
 
 ### Security Test Examples
 
-```python
-# Test URL validation
-def test_malicious_url_rejection():
-    """Test that malicious URLs are rejected."""
-    malicious_urls = [
-        "http://example.com/",  # Wrong protocol
-        "gopher://localhost:22/",  # SSH port
-        "gopher://internal.network/",  # Internal network
-    ]
-    for url in malicious_urls:
-        with pytest.raises(ValidationError):
-            validate_gopher_url(url)
+The fetch tools never raise: a refusal comes back as a result whose `kind` is
+`"error"`, carrying a machine-readable `error["code"]`. Assert on the code.
 
-# Test resource limits
-def test_response_size_limit():
-    """Test that oversized responses are rejected."""
-    # Implementation would test actual size limits
-    pass
+```python
+import pytest
+from gopher_mcp.server import gopher_fetch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("url", "code"),
+    [
+        ("http://example.com/", "INVALID_REQUEST"),  # wrong scheme
+        ("gopher://localhost:22/", "BLOCKED"),  # loopback + SSH port
+        ("gopher://192.168.0.1/1/", "BLOCKED"),  # private range
+    ],
+)
+async def test_malicious_url_refused(url: str, code: str) -> None:
+    """A refused target is reported, not fetched and not raised."""
+    result = await gopher_fetch(url)
+    assert result["kind"] == "error"
+    assert result["error"]["code"] == code
 ```
+
+`BLOCKED` means the SSRF guard refused the target; `INVALID_REQUEST` means the
+URL never passed validation. Both are answered without opening a connection.
+See the [API Reference](https://cameronrye.github.io/gopher-mcp/api-reference/)
+for the full error-code table.
 
 ## 🚨 Known Security Considerations
 
@@ -253,7 +268,8 @@ def test_response_size_limit():
 
 - [Contributing Guidelines](CONTRIBUTING.md) - Security requirements for contributors
 - [Development Setup](README.md#development) - Secure development environment
-- [API Documentation](docs/) - Security considerations for each API
+- [Configuration Guide](https://cameronrye.github.io/gopher-mcp/configuration/) - Every setting, its range and its default
+- [API Reference](https://cameronrye.github.io/gopher-mcp/api-reference/) - Security considerations for each tool
 
 ## 📞 Contact
 
@@ -269,4 +285,4 @@ We recognize security researchers who help improve our security:
 
 <!-- Future security researchers will be listed here -->
 
-Thank you for helping keep the Gopher MCP Server secure! 🔒
+Thank you for helping keep the Gopher & Gemini MCP Server secure! 🔒

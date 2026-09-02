@@ -1,6 +1,6 @@
 # Repository Setup for Open Source Release
 
-This document outlines the recommended repository settings and branch protection rules for the Gopher MCP Server project.
+This document outlines the recommended repository settings and branch protection rules for the Gopher & Gemini MCP Server project.
 
 ## Branch Protection Rules
 
@@ -12,14 +12,43 @@ Configure the following settings for the `main` branch:
 
 - ✅ Require status checks to pass before merging
 - ✅ Require branches to be up to date before merging
-- Required checks:
+- Required checks (the context names come from the `name:` of each job in
+  `.github/workflows/ci.yml`; keep them in step with that file):
   - `test` (Test Python 3.11 on ubuntu-latest)
   - `test` (Test Python 3.12 on ubuntu-latest)
   - `test` (Test Python 3.13 on ubuntu-latest)
-  - `lint` (Lint and type check)
+  - `test` (Test Python 3.14 on ubuntu-latest)
+  - `lint` (Lint, type check and package)
   - `security` (Security checks)
+  - `minimum-versions` (Declared minimum dependencies)
   - `docker` (Build Docker image)
   - `docs` (Build documentation)
+
+The `test` job runs a 12-way matrix — 3.11 through 3.14 on ubuntu, windows and
+macos — so the four contexts above cover only the Linux leg. Add the
+`windows-latest` and `macos-latest` contexts too if you want branch protection
+to catch a platform-specific regression; the release gate below is what
+currently catches one.
+
+Two names to watch for when reviewing an existing configuration:
+
+- `Lint and type check` was renamed to `Lint, type check and package` when the
+  distribution build and `twine check` moved into that job.
+- `Validate PR` / `Packaging` no longer exists. `.github/workflows/validate-pr.yml`
+  was deleted and its work folded into `lint`, so a required check by either
+  name will never report and must be removed.
+
+#### The release gate
+
+Branch protection is not the only thing that reads CI. `validate-release` in
+`.github/workflows/release.yml` refuses a tag unless a **completed, successful
+CI run exists for that exact commit**, polling for up to fifteen minutes so a
+tag pushed straight behind its commit waits rather than false-failing. This
+exists because `ci.yml` never triggers on tags and the release workflow's own
+`test-and-build` job is a single ubuntu-latest/3.11 leg: without the gate, a
+Windows- or macOS-only regression could publish to PyPI with a fully green
+Release run. Push the tag at a commit whose CI matrix is green, or the release
+stops before it validates anything else.
 
 #### Pull Request Requirements
 
@@ -41,11 +70,13 @@ Configure the following settings for the `main` branch:
 
 #### Features
 
-- ✅ Wikis: **Enabled** (for community documentation)
-- ✅ Issues: **Enabled**
+- ✅ Issues: **Enabled** — required: `security-audit.yml` files its findings as
+  an issue, and has nowhere to report if this is off
 - ✅ Sponsorships: **Enabled** (if applicable)
 - ✅ Preserve this repository: **Enabled**
-- ✅ Discussions: **Enabled** (for community Q&A)
+- Wikis: **Disabled** — documentation lives in `docs/` and is published to
+  GitHub Pages, so a wiki would be a second, unversioned copy
+- Discussions: **Disabled** — issues carry the traffic this project gets
 
 #### Pull Requests
 
@@ -70,9 +101,17 @@ Configure the following settings for the `main` branch:
 #### Dependabot Configuration
 
 `.github/dependabot.yml` is committed in the repository and covers three
-ecosystems on a weekly (Monday) schedule: `pip` (Python dependencies, with minor
+ecosystems on a weekly (Monday) schedule: `uv` (Python dependencies, with minor
 and patch updates grouped), `github-actions`, and `docker` (the `Dockerfile`
 base image). Edit that file rather than reproducing it here.
+
+The Python ecosystem must stay `uv`, not `pip`, and the file says why at
+length: the `pip` ecosystem edits only the version ranges in `pyproject.toml`,
+which are deliberately open floors, so it had almost nothing to propose — while
+`uv.lock`, the file every CI job installs from with `uv sync --locked`, never
+moved on a schedule at all. There is no `pre-commit` ecosystem, so the hook
+revisions in `.pre-commit-config.yaml` are hand-maintained; `uv run pre-commit
+autoupdate` is a step in the [release checklist](releasing.md#pre-release-checklist).
 
 #### Dependency advisories
 

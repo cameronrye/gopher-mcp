@@ -69,7 +69,7 @@ def env_var_for(model: type[BaseSettings], field_name: str) -> str:
     return f"{prefix}{field_name}".upper()
 
 
-def _parse_host_allowlist(v: None | str | list[str], env_var: str) -> list[str] | None:
+def _parse_host_allowlist(v: str | list[str] | None, env_var: str) -> list[str] | None:
     """Parse a host allowlist from an environment variable.
 
     Args:
@@ -98,7 +98,7 @@ def _parse_host_allowlist(v: None | str | list[str], env_var: str) -> list[str] 
     return hosts
 
 
-def _parse_port_allowlist(v: None | str | list[int], env_var: str) -> list[int] | None:
+def _parse_port_allowlist(v: str | list[int] | None, env_var: str) -> list[int] | None:
     """Parse a port allowlist from an environment variable.
 
     Args:
@@ -245,7 +245,7 @@ class _ProtocolConfig(BaseSettings):
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod
-    def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
+    def parse_allowed_hosts(cls, v: str | list[str] | None) -> list[str] | None:
         """Parse comma-separated allowed hosts from environment variable."""
         return _parse_host_allowlist(v, cls._env_var("allowed_hosts"))
 
@@ -253,7 +253,7 @@ class _ProtocolConfig(BaseSettings):
     # port differs), so the field is absent from this class at decoration time.
     @field_validator("allowed_ports", mode="before", check_fields=False)
     @classmethod
-    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
+    def parse_allowed_ports(cls, v: str | list[int] | None) -> list[int] | None:
         """Parse a comma-separated port allowlist from an environment variable."""
         return _parse_port_allowlist(v, cls._env_var("allowed_ports"))
 
@@ -396,7 +396,7 @@ class GeminiConfig(_ProtocolConfig):
 
     @field_validator("denied_mime_types", mode="before")
     @classmethod
-    def parse_denied_mime_types(cls, v: None | str | list[str]) -> list[str]:
+    def parse_denied_mime_types(cls, v: str | list[str] | None) -> list[str]:
         """Parse a comma-separated MIME deny list from an environment variable."""
         if v is None or v == "":
             return []

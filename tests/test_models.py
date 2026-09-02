@@ -37,6 +37,38 @@ class TestGopherFetchRequest:
         request = GopherFetchRequest(url=url)
         assert request.url == url
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "GOPHER://example.com/1/",
+            "Gopher://example.com/1/",
+            "gOpHeR://example.com/1/",
+        ],
+    )
+    def test_the_scheme_is_matched_case_insensitively(self, url):
+        """RFC 3986 s3.1 makes the scheme case-insensitive, and the parsers
+        accept a capitalised one. Matching it literally *here* -- at the MCP
+        tool boundary, which the caller hits first -- rejected as
+        INVALID_REQUEST a URL the parser behind it would have accepted."""
+        request = GopherFetchRequest(url=url)
+
+        # Canonicalised, so nothing downstream sees one entry per spelling.
+        assert request.url == "gopher://example.com/1/"
+
+    def test_a_case_insensitive_match_does_not_admit_another_scheme(self):
+        """Only the case is forgiven; the scheme itself is still checked."""
+        with pytest.raises(ValidationError) as exc_info:
+            GopherFetchRequest(url="GEMINI://example.com/")
+
+        assert "URL must start with 'gopher://'" in str(exc_info.value)
+
+    def test_a_bare_host_is_still_rejected(self):
+        """``partition`` finds no separator, so the message is unchanged."""
+        with pytest.raises(ValidationError) as exc_info:
+            GopherFetchRequest(url="gopher.floodgap.com")
+
+        assert "URL must start with 'gopher://'" in str(exc_info.value)
+
 
 class TestGopherMenuItem:
     """Test GopherMenuItem model."""

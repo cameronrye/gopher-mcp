@@ -1266,7 +1266,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             raise ValueError("Client certificates are not enabled")
 
         return self.client_cert_manager.generate_certificate(
-            host, port, path, common_name, validity_days
+            host, port, path, common_name=common_name, validity_days=validity_days
         )
 
     def get_client_certificate_for_scope(

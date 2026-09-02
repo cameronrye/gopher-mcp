@@ -4,6 +4,21 @@
 >
 > Based on RFC 1436 (The Internet Gopher Protocol) and RFC 4266 (The gopher URI Scheme)
 
+This page describes **the protocol**, not this server. Everything below is what
+a conforming Gopher client and server do; nothing here is a claim about
+`gopher_fetch`. For what this implementation actually returns — the response
+kinds, the error codes, the size and rendering caps, and the settings that bound
+them — see the [API reference](api-reference.md) and
+[Configuration](configuration.md). Keeping the two separate is deliberate: a
+protocol reference that quietly absorbs one implementation's choices stops being
+usable as a reference.
+
+One place the distinction matters in practice: RFC 4266 spells a type-7 search
+as `<selector>%09<search>` inside the path. `gopher_fetch` accepts that form and
+also a `?query`, but the argument to prefer is `search`, which takes the terms
+directly and encodes them for you — a query containing `#`, `+` or non-ASCII is
+otherwise easy to mangle on the way to the server.
+
 ## Table of Contents
 
 1. [Protocol Overview](#protocol-overview)

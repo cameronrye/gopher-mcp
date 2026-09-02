@@ -26,22 +26,35 @@ RUN useradd --create-home --uid 10001 app
 COPY --from=build /dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl
 
-# Pre-create the Gemini state directory, owned by app and mode 700, so that a
+# Pre-create gopher-mcp's state directory, owned by app and mode 700, so that a
 # named volume mounted at this path comes up with the right ownership instead
-# of root-owned. This directory holds the TOFU certificate pins
-# (~/.gemini/tofu.json) and client-certificate private keys (~/.gemini/certs/),
-# and TOFU is on by default. Without a mount it dies with the container, so the
-# documented `docker run --rm` re-armed blind trust-on-first-use on every start
-# -- the CERTIFICATE_CHANGED check is the only thing authenticating a Gemini
-# server -- and destroyed any client identity the user minted, whose private
-# key is unrecoverable. Run the image as:
+# of root-owned. This directory holds the TOFU certificate pins (tofu.json) and
+# the client-certificate private keys (certs/), and TOFU is on by default.
+# Without a mount the store dies with the container, so a `docker run --rm`
+# re-arms blind trust-on-first-use on every start -- the CERTIFICATE_CHANGED
+# check is the only thing authenticating a Gemini server -- and destroys any
+# client identity the user minted, whose private key is unrecoverable. Run the
+# image as:
 #
-#   docker run --rm -p 8000:8000 -v gopher-mcp-gemini:/home/app/.gemini gopher-mcp
+#   docker run --rm -p 8000:8000 \
+#     -v gopher-mcp-state:/home/app/.local/share/gopher-mcp gopher-mcp
 #
-# Deliberately NOT a bare `VOLUME /home/app/.gemini`: an anonymous volume is
-# recreated per `docker run` and deleted again by `--rm`, so it would persist
-# nothing while making the image look like it does.
-RUN install -d -o app -g app -m 700 /home/app/.gemini
+# That exact path, and not ~/.gemini, is where the code writes. The state
+# directory is `$XDG_DATA_HOME/gopher-mcp` or, with XDG_DATA_HOME unset as it
+# is here, `~/.local/share/gopher-mcp` (see tofu.default_state_directory).
+# ~/.gemini is only a read-in-place upgrade path for installs that pinned
+# certificates before gopher-mcp had a directory of its own: legacy_state_path
+# returns it only when the FILE ~/.gemini/tofu.json already exists, so
+# pre-creating an empty ~/.gemini in the image never activated it and a volume
+# mounted there persisted nothing. Setting XDG_DATA_HOME back to ~/.gemini
+# would "work" but would put state straight back into Google Gemini CLI's own
+# config directory, which is what moving it out of there was for.
+#
+# Deliberately NOT a bare `VOLUME` line: an anonymous volume is recreated per
+# `docker run` and deleted again by `--rm`, so it would persist nothing while
+# making the image look like it does.
+RUN install -d -o app -g app -m 755 /home/app/.local /home/app/.local/share \
+    && install -d -o app -g app -m 700 /home/app/.local/share/gopher-mcp
 
 USER app
 

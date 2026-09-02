@@ -261,6 +261,12 @@ jobs:
       - name: Build documentation
         run: uv run mkdocs build --strict
 
+      # --strict only proves nothing warned, not that anything rendered. The
+      # landing page's mermaid diagram shipped as literal `graph TB` text for a
+      # year while every strict build passed, so assert the rendered HTML.
+      - name: Check documentation rendered
+        run: ./scripts/check-docs-render.sh site
+
       - name: Build distribution packages
         run: uv build
 

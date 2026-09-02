@@ -380,8 +380,8 @@ class ReleasePreparation:
         try:
             # Whole-repo scope, matching ci.yml's `ruff check .` and the
             # rationale in pyproject.toml: scoping to src/tests hides
-            # violations in task.py and scripts/ that CI still fails on, so a
-            # release could pass here and go red the moment the tag lands.
+            # violations in scripts/ and the repo root that CI still fails on,
+            # so a release could pass here and go red the moment the tag lands.
             lint_result = subprocess.run(
                 [sys.executable, "-m", "ruff", "check", "."],
                 check=False,

@@ -11,6 +11,17 @@ repos:
         args: [--markdown-linebreak-ext=md]
       - id: end-of-file-fixer
       - id: check-yaml
+        # mkdocs.yml is exempt. mkdocs-material's documented way to register
+        # the mermaid superfence is
+        # `format: !!python/name:pymdownx.superfences.fence_code_format`, a
+        # YAML tag that resolves to a Python callable; MkDocs' own loader
+        # constructs it, PyYAML's SafeLoader (which this hook uses) cannot, and
+        # there is no quoted-string form that works -- the quoted string is
+        # exactly the bug that shipped the landing-page diagram as raw text for
+        # a year. Excluded rather than run with `--unsafe`, which would weaken
+        # the check for the file it is aimed at while still not validating it.
+        # `mkdocs build --strict` in CI parses this file on every docs change.
+        exclude: ^mkdocs\.yml$
       - id: check-toml
       - id: check-json
       - id: check-added-large-files
@@ -25,17 +36,22 @@ repos:
 
   # Ruff for linting and formatting
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.14.5
+    rev: v0.16.5
     hooks:
       # Run the linter. The id is `ruff-check`; the old `ruff` id still works
       # but runs as "ruff (legacy alias)". The rev tracks the ruff version in
-      # uv.lock so this gate and CI's `uv run ruff check .` agree.
+      # uv.lock so this gate and CI's `uv run ruff check .` agree. Bump the two
+      # together or this hook silently checks a different rule set than CI.
       - id: ruff-check
         args: [--fix, --exit-non-zero-on-fix]
         types_or: [python, pyi, jupyter]
-      # Run the formatter
+      # Run the formatter. `markdown` is in the list because ruff 0.16 formats
+      # Python inside fenced code blocks, so CI's `ruff format --check .` now
+      # covers every .md in the repo; without it here, a reformatted fence in
+      # the docs passes this gate and then fails CI. ruff-check stays off
+      # Markdown -- it only formats fences, it does not lint them.
       - id: ruff-format
-        types_or: [python, pyi, jupyter]
+        types_or: [python, pyi, jupyter, markdown]
 
   # MyPy for static type checking, run out of the project's own locked
   # environment rather than a mirrors-mypy venv with a hand-synced
@@ -59,14 +75,19 @@ repos:
         args: [--ignore-missing-imports, --explicit-package-bases]
         exclude: ^(tests/|docs/|scripts/)
 
-  # Bandit for security linting
+  # Bandit for security linting. Its rev tracks the bandit version in uv.lock
+  # for the same reason ruff's does: CI runs `uv run bandit -c pyproject.toml
+  # -r src/`, and a hook on a different release scans with a different rule
+  # set. The remaining revs below have no lockfile counterpart -- they are
+  # Node or standalone tools -- so `uv run pre-commit autoupdate` is the only
+  # thing that moves them.
   - repo: https://github.com/PyCQA/bandit
     rev: 1.9.4
     hooks:
       - id: bandit
         args: [-c, pyproject.toml]
         additional_dependencies: ["bandit[toml]", "pbr"]
-        exclude: ^(tests/|scripts/|task\.py)
+        exclude: ^(tests/|scripts/)
 
   # Safety for dependency vulnerability scanning (disabled - requires Poetry)
   # - repo: https://github.com/Lucas-C/pre-commit-hooks-safety

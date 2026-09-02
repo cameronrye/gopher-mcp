@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Gopher MCP">
+  <g fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="2.1" y="3.6" width="19.8" height="16.8" rx="2.6"/>
+    <path d="M6.6 9.4 9.9 12l-3.3 2.6"/>
+    <path d="M12.4 15.4h5"/>
+  </g>
+</svg>

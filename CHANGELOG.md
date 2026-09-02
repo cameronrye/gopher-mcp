@@ -7,6 +7,238 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Everything below applies the findings of a full review of the code, the
+packaging and the documentation site. Each finding was independently verified
+against the code, or by running it, before it was applied.
+
+This is the largest set of breaking changes the project has made. Almost all of
+them are in what a tool result looks like, so a client that reads only `kind`
+and the fields it needs will be unaffected, while one that switches on error
+codes, parses timestamps, or reads gemtext line internals will need the
+migration notes below. See the
+[Migration Guide](https://cameronrye.github.io/gopher-mcp/migration-guide/).
+
+### Added
+
+- `gopher_fetch` and `gemini_fetch` take an `offset`, and a truncated result
+  carries `next_offset`, plus `total_items` for a menu and `total_chars` for a
+  body. Truncation used to be a dead end: the result said it had been cut and
+  offered no way to read the rest, so anything past the configured cap was
+  unreachable. A menu larger than the cap reports a null total rather than
+  parsing the whole directory to count it, which is the work the cap exists to
+  avoid.
+- Both fetch tools advertise a real `outputSchema`, a discriminated union over
+  the `kind` values, instead of an unconstrained object.
+- `gopher_fetch` takes the search terms directly, so a Veronica-2 query
+  containing `#`, `+` or non-ASCII is no longer mangled on its way to the
+  server. This is what `input` already does for Gemini.
+- The batch fetch tools accept `refresh`, which the server instructions already
+  told the model to use.
+- The server registers MCP resources and prompts: the effective fetch policy is
+  readable over the protocol, and the navigation and safety rules are available
+  as prompts rather than only as prose in the instructions.
+- The HTTP transports answer `GET /health`, and the container declares a
+  `HEALTHCHECK` against it.
+- `gopher-mcp --version`, and help text that mentions Gemini and points at the
+  environment variables everything else is configured through. The version was
+  previously readable only by importing the package, which neither the
+  recommended `uvx` install nor the container can do.
+- A redirect result says whether the target leaves the capsule or the `gemini`
+  scheme, and states the five-hop limit the caller has to enforce, since this
+  server deliberately does not follow redirects itself.
+- A warning when a client certificate is sent over TLS 1.2, which transmits it
+  where a passive observer can read it.
+- Python 3.14 is covered by the CI matrix on Linux, macOS and Windows, and
+  advertised on PyPI.
+- The MCP registry manifest is published on a tagged release, and the container
+  image is published to `ghcr.io/cameronrye/gopher-mcp` with a signed
+  provenance attestation. The manifest had been gated on every tag for four
+  releases and uploaded on none of them.
+
+### Changed
+
+- **Breaking:** a gemtext line is serialized once. Each parsed line used to
+  appear two and three times, as `content`, inside a nested per-type object
+  that repeated the same text under another name, and again in a
+  whole-document `rawContent` field that is now gone. A 487-byte page produced
+  3,526 bytes of JSON. If you read `line.heading.text`, read `line.text`.
+- **Breaking:** timestamps in tool results are ISO-8601 UTC strings rather than
+  epoch seconds. `cached_at` and `request_info.timestamp` previously disagreed
+  about what a timestamp looks like, and the certificate tools already used
+  ISO. Stored values keep their epoch format, so `tofu.json` is unchanged.
+- **Breaking:** a Gemini 4x/5x failure reports the capsule's own text in
+  `error.meta`, and `error.message` now carries only this server's explanation.
+  A hostile capsule could previously answer `51 <instruction>` and have its
+  text read as guidance from us. If you display `error.message`, you may want
+  `error.meta` as well, clearly marked as remote content.
+- **Breaking:** a tool failure sets the protocol's `isError` flag. A blocked,
+  DNS-failed or rejected call used to look like a success to any host that
+  reads the flag rather than the body. The documented no-raise contract is
+  unchanged: no tool raises.
+- **Breaking:** info lines in a Gopher menu no longer carry a fabricated
+  `nextUrl`. The host and port a server parks in those fields never pointed
+  anywhere, and on a real Floodgap menu those unfollowable URLs were roughly
+  two thirds of the payload the model was told to navigate by.
+- **Breaking:** a hostname is IDNA-encoded when it is normalized, so the
+  Unicode and punycode spellings of an internationalized host share one trust
+  pin, one certificate scope and one robots policy. A link using the Unicode
+  spelling of an already-pinned capsule previously got a fresh trust-on-first-
+  use, letting an on-path certificate through with only a "trusted on first
+  use" note instead of `CERTIFICATE_CHANGED`. Any pin stored under a Unicode
+  spelling is re-pinned under the encoded form on the next visit.
+- **Breaking:** trust pins and client identities default to this project's own
+  data directory rather than `~/.gemini/`, which belongs to Google's Gemini CLI
+  and holds the `settings.json` a user edits to register this server. Writing
+  generically named state there, and tightening its mode, reached into another
+  product's configuration. An existing `~/.gemini/tofu.json` or `~/.gemini/certs/`
+  keeps being read and written where it is, permanently, because relocating a
+  trust store silently would either lose every pin or make a pinned host look
+  unpinned.
+- **Breaking:** Gopher text results report LF line endings. The carriage return
+  of a CRLF-served page carried no information and spent an escaped `\r` on
+  every line of the JSON handed to the model.
+- **Breaking:** the dev, test and docs extras are PEP 735 dependency groups.
+  `pip install gopher-mcp[dev]` was a published, versioned install surface that
+  nothing documented and nobody supported. Contributors use
+  `uv sync --all-groups`.
+- **Breaking:** `task.py` is removed. The task table existed twice, in that
+  file and in taskipy, they had already drifted, and nothing compared them.
+  `uv run task <cmd>` is the one way to run project tasks, and `make <cmd>`
+  delegates to it.
+- A mistyped or wrong-scheme URL answers with the one sentence that corrects
+  it, and names the sibling tool, instead of a pydantic dump of internals.
+- An invalid environment value fails with one line naming the variable, the
+  value and the accepted range, instead of a 26-line traceback pointing at an
+  internal field. It no longer takes `--help` down with it.
+- Both fetch tools accept an uppercase or mixed-case scheme and canonicalise
+  it, which RFC 3986 requires. The tools previously rejected URLs their own
+  parsers accept, including gemtext links this server had just handed back.
+- The robots refusal no longer tells the model to switch robots checking off,
+  and the documentation no longer points at a Geminispace search engine without
+  saying that it refuses automated queries.
+- All four fetch tools say in their own description that what comes back is
+  untrusted remote content, rather than relying on server instructions a client
+  may drop.
+- Settings are handed to the clients as a whole rather than one keyword at a
+  time, so a new setting cannot be added to the configuration and silently
+  forgotten at the call site.
+- The coverage gate rises from 85% to 95%, matching the suite's measured 97%.
+  The old gate had roughly 350 statements of slack for a regression to hide in.
+- Dependabot updates `uv.lock` on its weekly run. The Python entry was on the
+  `pip` ecosystem, which can only edit version floors and structurally cannot
+  touch the lockfile every CI job installs, so scheduled lock updates never
+  arrived and only security advisories moved it.
+- A release tag is refused unless the full nine-way CI matrix passed on that
+  exact commit. Releases previously re-tested Ubuntu on 3.11 only, so a
+  Windows-only regression could publish behind a green Release run.
+
+### Fixed
+
+- **Breaking:** `--host` on the HTTP transports makes the server reachable
+  under that host. The container binds `0.0.0.0` precisely to be reachable and
+  answered `421 Misdirected Request` to every client that was not on localhost,
+  because the SDK fixes a loopback-only Host allowlist when it is constructed.
+  A new repeatable `--allowed-host` narrows the accepted headers rather than
+  turning the check off.
+- **Breaking:** a trust or certificate store that cannot be written reports
+  `CERTIFICATE_STORE_UNAVAILABLE` and names the setting to check. The raw
+  `OSError` used to reach the robots probe's transport handler, so a read-only
+  disk was described to the model as a transient network failure whose stated
+  remedy was to retry, which could never succeed.
+- **Breaking:** a trust-on-first-use pin that fails to persist is no longer
+  trusted in memory. The retry after a storage error was served as "already
+  trusted" on a pin written nowhere, so a restart re-opened the first-use
+  window that error exists to deny.
+- **Breaking:** Gopher item types `P` and `:` are handled as binary rather than
+  decoded as latin-1 and handed to the model as up to 50,000 characters of
+  mojibake.
+- **Breaking:** one damaged byte no longer re-reads a whole UTF-8 page as
+  latin-1. Only the bad bytes become U+FFFD, and pervasively 8-bit bodies still
+  decode as latin-1. The mojibake was previously cached for the full TTL.
+- **Breaking:** a latin-1 server's menu links are followable again. A non-ASCII
+  selector byte is preserved through `nextUrl` and put back on the wire
+  unchanged, instead of being re-encoded as UTF-8 into a selector the server
+  has never heard of.
+- **Breaking:** a `#fragment` is stripped from a Gemini URL rather than
+  refused, so a link or redirect target this server emitted is one it will
+  follow.
+- **Breaking:** an internationalized Gemini host is sent as its punycode form
+  and non-ASCII path bytes are percent-encoded, so the request line conforms to
+  RFC 3986 and matches the name the TLS layer already sends.
+- **Breaking:** an empty answer to a status 10 or 11 prompt is preserved.
+  `gemini_fetch(url, input="")` reached the capsule as the bare URL it had just
+  answered with a 10, so a prompt that accepts an empty value could not be
+  answered.
+- **Breaking:** a Gopher menu item whose type field holds a control byte is
+  reported as an info line, so a raw escape can no longer reach the model
+  through the one field that was never sanitized.
+- Failing over to the next resolved address now happens when the first one
+  black-holes the connection, not only when it refuses it. The advertised
+  dual-homed fail-over previously helped only in the rare refused case.
+- A batch of URLs on one unreachable host costs one `robots.txt` probe rather
+  than one per URL. The lock that exists to make it a single request re-checked
+  the policy cache but not the failure backoff, so every waiter paid a fresh
+  connect timeout, serially, inside that lock.
+- A first fetch to a cold host no longer sleeps a full rate-limit interval, or
+  resolves the same name twice, because the `robots.txt` probe and the fetch it
+  guards each paid separately for one user request.
+- A long status 44 backoff answers with a structured "retry in N seconds"
+  instead of sleeping up to five minutes inside the tool call while holding a
+  batch concurrency slot.
+- A certificate whose validity starts up to five minutes ahead of our clock is
+  pinned on first contact rather than refused. Capsules mint self-signed
+  certificates at startup, so seconds of clock skew used to fail the connection
+  and leave nothing pinned to recover with. Beyond that window the refusal is
+  now `CERTIFICATE_NOT_YET_VALID` rather than being reported as an expiry.
+- Server-supplied text is no longer stripped of characters that are visible.
+  The sanitizer removed every space separator except U+0020 and every format
+  character, so a non-breaking space and the CJK ideographic space were deleted
+  outright, fusing the words either side, and a family emoji came back as three
+  separate people. Controls, surrogates, private-use and separator characters
+  are still removed.
+- A failed connection no longer echoes the resolved IP address back to the
+  caller, which the transport's own comment already claimed it did not.
+- ANSI escapes are stripped from the Gemini redirect target, MIME type and
+  malformed-status message, the three server-controlled strings that still
+  reached the model raw.
+- The Gemini cache is keyed on the request that actually goes on the wire, so
+  a bare host, a trailing slash, an explicit `:1965` and an encoded dot segment
+  stop re-fetching identical content into separate entries.
+- A Gopher timeout names the configured deadline rather than the fraction of it
+  left when the transport was called, which read as an 18-digit number.
+- `NOT_FETCHABLE` results echo the request they refused, like every other
+  Gopher error.
+- A `?query` on a non-type-7 Gopher URL is still dropped, but the response says
+  so rather than returning an unrelated page silently.
+- Standard-library and MCP SDK log records go through the same pipeline as
+  ours, and the HTTP transports route uvicorn's startup and access logs through
+  it too, so a stream configured as JSON is JSON on every line, the optional
+  log file mirrors those records, and nothing reaches stdout. For a stdio
+  server, stdout carries the protocol stream.
+- The `py.typed` marker ships. The `Typing :: Typed` classifier has promised it
+  since 0.1.0, and without it every downstream type checker skipped this
+  package as untyped, discarding its strict-typing work at the import boundary.
+- The documentation site's architecture diagram renders. It had shipped as a
+  wall of literal `graph TB` text for a year, because the superfence format was
+  quoted as a string, and a strict build never noticed.
+- The documentation site no longer loads a script from `polyfill.io`, a domain
+  seized after a supply-chain attack, nor a megabyte of MathJax for pages that
+  contain no mathematics.
+- The release scripts enforce the same coverage gate as the project, rather
+  than a threshold retired several releases ago, and `scripts/verify-setup.py`
+  no longer fails on a workflow that was deleted a year ago.
+- Documentation that described a different program: the Gemini error tables,
+  the Gopher item-type coverage, the response-type lists, the configuration
+  reference, a troubleshooting example the code cannot produce, and a dozen
+  references to an example host whose domain no longer exists.
+
+### Security
+
+- **Breaking:** the `mcp` floor rises to 1.28.1 and `cryptography` to 50.0.0.
+  The old floors admitted SDK versions with DNS-rebinding protection off by
+  default, the one protection the HTTP transports rely on, and the
+  minimum-versions job proved that set importable while never proving it safe.
+
 ## [0.8.0] - 2026-09-02
 
 ### Added

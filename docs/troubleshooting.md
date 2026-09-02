@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Common problems and fixes for the Gopher & Gemini MCP Server, covering installation, connections, protocol quirks, Claude Desktop integration, configuration, and performance.
+Common problems and fixes for the Gopher & Gemini MCP Server, covering installation, connections, protocol quirks, MCP client integration, the HTTP transports, configuration, and performance.
 
 ## Installation Issues
 
@@ -30,7 +30,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 ```
 
 !!! note
-    `uv` is only required for development and source installs. If you installed from PyPI (`pip install gopher-mcp` or `uvx gopher-mcp`), you do not need `uv` to run the server.
+    `uvx` ships with `uv`, so the zero-install form needs it too. Only a `pip install gopher-mcp` into an environment you manage yourself runs without `uv`.
 
 ### Permission Denied
 
@@ -48,12 +48,12 @@ chmod +x scripts/dev-setup.sh
 After installing, confirm the package and console script are available:
 
 ```bash
-# Confirm the console script is on your PATH
+# Confirm the console script is on your PATH and report the version
+gopher-mcp --version
 gopher-mcp --help
-
-# Confirm the package imports and check its version
-python -c "import gopher_mcp; print(gopher_mcp.__version__)"
 ```
+
+`--version` and `--help` are parsed before the configuration is loaded, so they answer even when an environment variable holds a value the server would reject at startup — which makes `gopher-mcp --version` the first thing to run on any bug report. It also works for installs that have no importable package on your `PATH`: `uvx gopher-mcp --version`, or `docker run --rm --no-healthcheck ghcr.io/cameronrye/gopher-mcp:latest --version`. `--version` is newer than the release on PyPI today, so `error: unrecognized arguments: --version` is itself an answer — the install works and predates the flag; use `gopher-mcp --help` instead.
 
 You can also start the server directly via `python -m gopher_mcp` or, without installing, via `uvx gopher-mcp`.
 
@@ -104,9 +104,12 @@ Two different error codes come from the robots gate, and they call for opposite
 responses.
 
 **`BLOCKED_BY_ROBOTS`** — the server published a policy and it forbids this
-path. This will not change on a retry. Set `GOPHER_RESPECT_ROBOTS_TXT=false` /
-`GEMINI_RESPECT_ROBOTS_TXT=false` if you have reason to override it (a host you
-operate, say).
+path. This is the operator's decision, it will not change on a retry, and a
+different spelling of the path is not a workaround: the answer is that the
+resource is excluded. `GOPHER_RESPECT_ROBOTS_TXT=false` /
+`GEMINI_RESPECT_ROBOTS_TXT=false` overrides the check, but only for a host you
+have said you operate — it is not a setting to reach for because a fetch was
+refused.
 
 **`ROBOTS_UNAVAILABLE`** — the policy could not be read at all, and Gemini fails
 closed when that happens (RFC 9309 §2.3.1.4). Nothing disallowed you; the
@@ -150,7 +153,25 @@ gopher://gopher.floodgap.com:70/0/gopher/welcome
 
 **Problem:** Binary files (images, archives, executables) do not return their contents.
 
-**Solution:** This is by design. For binary Gopher item types the server returns metadata describing the resource rather than downloading the raw bytes. There is no setting that changes this behavior.
+**Solution:** This is by design. For binary Gopher item types — `4`, `5`, `6`, `9`, `g`, `I`, `d`, `s`, `;`, `p`, `P`, `:`, `M` and `<` — the server returns metadata describing the resource rather than downloading the raw bytes. There is no setting that changes this behavior.
+
+### Interactive Item Types Cannot Be Fetched
+
+**Problem:** A menu entry of type `2` (CSO), `8` (Telnet) or `T` (tn3270) returns `NOT_FETCHABLE`.
+
+**Solution:** Expected: those types name an interactive session rather than a retrievable document, so there is no body to return. The result echoes the request in `request_info`, so an entry in a batch fetch can still be matched back to its URL.
+
+### A Menu Item With No `next_url`
+
+**Problem:** A menu item has an empty `next_url` and cannot be followed.
+
+**Solution:** Expected, and it is the signal to stop: an empty `next_url` means the item is display-only. Info lines (type `i`) carry no real target — the host and port a server parks there, such as `error.host:1` or `(NULL):0`, never pointed anywhere — and a menu item whose type field holds a control byte is reported as an info line for the same reason.
+
+### Truncated Menus and Pages
+
+**Problem:** A result comes back with `truncated: true` and is missing the end.
+
+**Solution:** Not a dead end. A truncated result carries `next_offset`; call the same tool again with `offset` set to that value and repeat until `next_offset` is null. Menus count items and page bodies count characters (`bytes` and `size` are byte counts, never offsets), and `total_items` / `total_chars` say how much there is. The batch tools do not take `offset` — continue a truncated batch entry with the single-URL tool. Raising `*_MAX_MENU_ITEMS` or `*_MAX_RENDERED_CHARS` also works, at the cost of a larger single payload.
 
 ## Claude Desktop Integration
 
@@ -160,7 +181,7 @@ gopher://gopher.floodgap.com:70/0/gopher/welcome
 
 **Solution:**
 
-1. Use an **absolute path** to the command in your config so Claude Desktop can find it regardless of its working directory.
+1. Use `uvx` (`"command": "uvx"`, `"args": ["gopher-mcp"]`), or an **absolute path** to the command, so Claude Desktop can find it regardless of the `PATH` a desktop-launched application inherits.
 2. Confirm the `claude_desktop_config.json` file is valid JSON.
 3. Fully quit and restart Claude Desktop after editing the config.
 
@@ -197,6 +218,24 @@ The Claude Desktop configuration file location depends on your operating system:
 | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
 | Linux | `~/.config/Claude/claude_desktop_config.json` |
 
+### Other MCP Clients
+
+Claude Code, Cursor, VS Code, Zed and Windsurf each want their own file and key — see [MCP Client Integration](installation.md#mcp-client-integration) for the exact path and snippet for each.
+
+## HTTP Transport Issues
+
+### `404 Not Found` on the Endpoint
+
+**Problem:** The client connects to `http://127.0.0.1:8000` and gets a 404.
+
+**Solution:** The path is part of the endpoint. Both HTTP transports default to `127.0.0.1:8000` — the port does not vary by transport — but `streamable-http` serves `/mcp` and `sse` serves `/sse` (the client then POSTs back to `/messages/`). The bare origin is a 404 under both. `GET /health` answers on either and is the right target for a container or Kubernetes probe.
+
+### `421 Misdirected Request` / `Invalid Host header`
+
+**Problem:** The server is bound and listening, but every request is refused with 421.
+
+**Solution:** The `Host` header, not the bind address, is being rejected by the SDK's DNS-rebinding protection. With no `--host`, or a loopback one, only `localhost`, `127.0.0.1` and `[::1]` are accepted. Pass `--allowed-host NAME` (repeatable) with the name clients or your reverse proxy actually use; a bare name matches any port. The effective allowlist is logged at startup. See [Host header checking](installation.md#host-header-checking-and-the-421-you-may-see).
+
 ## Configuration Issues
 
 ### Environment Variables Not Taking Effect
@@ -210,7 +249,7 @@ The Claude Desktop configuration file location depends on your operating system:
 - Server and logging settings use the `GOPHER_MCP_` prefix (for example `GOPHER_MCP_LOG_LEVEL`, `GOPHER_MCP_LOG_FILE_PATH`).
 
 !!! warning
-    Unprefixed names such as a bare `LOG_LEVEL` or `TIMEOUT_SECONDS` are **ignored**. Always use the prefixed form. Variable names are case-sensitive, and boolean values must be exactly `true` or `false`.
+    Unprefixed names such as a bare `LOG_LEVEL` or `TIMEOUT_SECONDS` are **ignored**. Always use the prefixed form. Names are matched **case-insensitively**, so a lowercase `gemini_timeout_seconds` left behind by other tooling is read exactly like `GEMINI_TIMEOUT_SECONDS` and can be the value you are seeing. Booleans accept `true`/`false`, `1`/`0`, `yes`/`no` and `on`/`off` in any case.
 
 Verify which variables are set and restart the server after changing them:
 
@@ -222,7 +261,7 @@ env | grep -E 'GOPHER|GEMINI'
 
 **Problem:** Startup fails with an error naming an environment variable.
 
-**Solution:** Some values cannot be applied safely and are rejected at startup rather than silently ignored:
+**Solution:** Some values cannot be applied safely and are rejected at startup rather than silently ignored. The server exits with status `2` and one line naming the variable, the accepted range and the value you set — for example `gopher-mcp: configuration error: GOPHER_TIMEOUT_SECONDS: Input should be less than or equal to 300 (got '999')`. The usual causes:
 
 - An allowlist that names nothing — `GOPHER_ALLOWED_HOSTS=" , "`, or `GEMINI_ALLOWED_PORTS="$A,$B"` where the shell variables are empty. An empty allowlist is indistinguishable from an absent one, so it would quietly drop the restriction you meant to apply. **Unset** the variable to allow everything.
 - A port outside `1`–`65535` in a `*_ALLOWED_PORTS` list. It could never match a request, so every fetch would be refused at runtime instead.
@@ -239,7 +278,9 @@ unset GOPHER_ALLOWED_HOSTS
 
 **Problem:** You need more detail to diagnose an issue.
 
-**Solution:** Raise the log level to `DEBUG`. Logs are written to standard error (stderr), never stdout — the stdio MCP transport uses stdout for the protocol stream. There is no default log file; to also capture logs to a file, opt in with `GOPHER_MCP_LOG_FILE_PATH`.
+**Solution:** Raise the log level to `DEBUG`. Logs are written to standard error (stderr), never stdout — the stdio MCP transport uses stdout for the protocol stream. There is no default log file; to also capture logs to a file, opt in with `GOPHER_MCP_LOG_FILE_PATH`, which **mirrors** stderr rather than redirecting it.
+
+Everything logs through one pipeline: this server's own events, the MCP SDK's, and (on the `sse` and `streamable-http` transports) uvicorn's startup lines and access log. They share the configured renderer and level, so `GOPHER_MCP_STRUCTURED_LOGGING=true` really is JSON on every line and `GOPHER_MCP_LOG_LEVEL=DEBUG` raises uvicorn's verbosity too.
 
 ```bash
 export GOPHER_MCP_LOG_LEVEL=DEBUG
@@ -254,11 +295,13 @@ Gemini relies on TLS and Trust-on-First-Use (TOFU) certificate validation, which
 
 A few quick reference points:
 
-- The TOFU trust store is a JSON file at `~/.gemini/tofu.json` by default.
-- Client certificates are stored under `~/.gemini/certs/` by default. One that already covers a host/port/path scope is attached automatically, and the fetch path never creates one, so a capsule answering status 60 needs an explicit **`gemini_client_cert_update`** call. **`gemini_client_cert_list`** (read-only) shows which scopes already hold an identity and whether each has expired.
+- The TOFU trust store is a JSON file named `tofu.json` in gopher-mcp's per-user data directory — `$XDG_DATA_HOME/gopher-mcp/` where that is set, otherwise `~/.local/share/gopher-mcp/` on Linux, `~/Library/Application Support/gopher-mcp/` on macOS and `%LOCALAPPDATA%\gopher-mcp\` on Windows. An install that already had a `~/.gemini/tofu.json` keeps using it exactly where it is, permanently — [where Gemini state is stored](configuration.md#where-gemini-state-is-stored) has the resolution order and the reason nothing is migrated.
+- Client certificates are stored in `certs/` beside it (or in an existing `~/.gemini/certs/`). One that already covers a host/port/path scope is attached automatically, and the fetch path never creates one, so a capsule answering status 60 needs an explicit **`gemini_client_cert_update`** call. **`gemini_client_cert_list`** (read-only) shows which scopes already hold an identity and whether each has expired.
 - Creating a client certificate gives the user a persistent pseudonymous identity on that capsule, sent on every in-scope request from then on, so ask before creating one and never do it because a fetched page asked. Creation refuses to replace an in-scope certificate — the private key cannot be recovered — and removal requires naming the fingerprint being destroyed.
 - If a server's certificate has changed, use the trust-store tools rather than editing the file. **`gemini_trust_list`** (read-only) reports what is pinned for a host, when it was first seen and when it expires. **`gemini_trust_update`** then removes or replaces that one host's pin — `action="remove"` requires the fingerprint currently pinned, so a pin cannot be dropped without naming what is being dropped. The next fetch re-establishes trust on first use.
 - A changed fingerprint is often a routine reissue — self-signed Gemini certificates rotate at expiry — but it is also what an active machine-in-the-middle attack looks like, and the two are indistinguishable from the client. Confirm the new certificate out of band before changing a pin, and never on the say-so of a fetched page.
+- **`CERTIFICATE_STORE_UNAVAILABLE`** is a *local* fault, not a problem with the capsule: the trust or certificate store could not be locked by this process, or could not be written (a read-only or misconfigured location, a container filesystem, a full disk). Check `GEMINI_TOFU_STORAGE_PATH`, `GEMINI_CLIENT_CERTS_STORAGE_PATH` and the `HOME` they default under, rather than retrying. A pin that could not be persisted is not trusted in memory either, so the next fetch reports the same thing until the store is writable.
+- **`CERTIFICATE_NOT_YET_VALID`** means the certificate's `notBefore` is more than five minutes in the future — almost always a clock skewed between the two machines, not an expiry. Five minutes of skew is tolerated; beyond that the certificate is refused on first use regardless of `GEMINI_TOFU_REJECT_EXPIRED`, because a genuinely premature certificate is the machine-in-the-middle signal the check exists for.
 
 !!! note
     Both paths are configurable; the values above are the defaults. Changing a pin only resets stored trust for that host — it does not disable TOFU validation, and it does mean that host's identity is no longer checked against the certificate previously trusted.

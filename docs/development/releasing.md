@@ -14,8 +14,12 @@ The canonical repository is
   features, PATCH for backward-compatible fixes.
 - **Tags trigger publishing** — pushing a Git tag matching `v*` (e.g. `v0.4.0`)
   runs [`.github/workflows/release.yml`](https://github.com/cameronrye/gopher-mcp/blob/main/.github/workflows/release.yml),
-  which validates, tests, builds, publishes to PyPI, and then creates the
-  GitHub Release. Nothing publishes without a tag.
+  which validates, tests, builds, publishes to PyPI, publishes the MCP registry
+  entry and the container image, and creates the GitHub Release. Nothing
+  publishes without a tag.
+- **CI must already be green on the tagged commit** — `validate-release`
+  refuses the tag unless a completed, successful `ci.yml` run exists for that
+  exact SHA. See [The CI gate](#the-ci-gate).
 - **Trusted Publishing (OIDC)** — uploads to PyPI use GitHub's OpenID Connect
   identity, so there are **no API tokens** to manage. Packages are also signed
   and attested via Sigstore.
@@ -33,6 +37,28 @@ The canonical repository is
     serve. If approval is declined or the upload fails, no release is published;
     if the release step itself fails after a successful upload, re-run that job
     — the tag and the built artifacts are still there.
+
+The MCP Registry and container-image publishes hang off `publish-pypi` but are
+deliberately **not** dependencies of the GitHub Release, so a registry or GHCR
+outage cannot block or empty a release. If one of them fails, the release is
+still complete; re-run that job on its own.
+
+## The CI gate
+
+`ci.yml` triggers on pushes and pull requests, never on tags, and the release
+workflow's own `test-and-build` job is a single `ubuntu-latest` / Python 3.11
+leg. Without a gate the 12-way OS/Python matrix would sit entirely outside the
+release path, and a Windows- or macOS-only regression could reach PyPI with a
+fully green Release run — which nearly happened for 0.8.0, where all three
+`windows-latest` legs failed on the release-preparation commit while every
+ubuntu job passed.
+
+So `validate-release` polls `gh run list --commit "$GITHUB_SHA" --workflow
+ci.yml` for up to fifteen minutes and fails the tag unless a completed,
+successful run comes back. In practice: **push to `main`, wait for CI to go
+green on that commit, then push the tag.** A tag pushed immediately behind its
+commit is fine — the gate waits for the run rather than false-failing — but a
+tag on a commit whose CI failed stops the release before anything is built.
 
 ## One-time setup
 
@@ -78,6 +104,12 @@ Both `pypi` and `testpypi` environments should exist in **Settings →
 Environments** with **required reviewers** so deployments pause for approval.
 The `pypi` environment should be restricted to protected branches.
 
+The rest of this repository's GitHub configuration — branch protection and the
+exact required status checks, repository settings, secrets, labels and code
+owners — is written down in
+[Repository Setup](repository-setup.md). It is maintainer runbook material and
+is deliberately not in the site navigation.
+
 ## Release steps
 
 ### 1. Bump the version
@@ -120,6 +152,10 @@ entry by hand.
     missing one means deleting and re-pushing the tag. Check both with
     `python -c "import json; d=json.load(open('server.json')); print(d['version'], d['packages'][0]['version'])"`.
 
+`validate-release` also validates the whole manifest against the official MCP
+registry schema its `$schema` names, so a field that drifts away from the schema
+fails the tag run rather than the registry publish.
+
 ### 2. Update the CHANGELOG
 
 `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com/). Move the
@@ -144,7 +180,7 @@ content, but review it for accuracy.
 
 ### 3. Validate locally
 
-Run the validation script to mirror what CI will check (tests with ≥85%
+Run the validation script to mirror what CI will check (tests with ≥95%
 coverage, lint, format, type-check, security scans, package build, docs build,
 and a functionality smoke test):
 
@@ -184,8 +220,10 @@ git push origin v0.5.0     # this starts the release
 ### 5. Watch, approve, and verify
 
 1. Open the [Actions tab](https://github.com/cameronrye/gopher-mcp/actions) and
-   follow the **Release** run. It proceeds through: validate → test & build →
-   publish to PyPI → create GitHub Release.
+   follow the **Release** run. It proceeds through: validate (including the CI
+   gate above) → test & build → publish to PyPI → and then, in parallel and
+   with none of them able to block the others, publish to the MCP Registry,
+   publish the container image, and create the GitHub Release.
 2. When the `Publish to PyPI` job pauses for the `pypi` environment, review the
    prior steps and **approve the deployment**.
 3. Verify the results:
@@ -193,12 +231,18 @@ git push origin v0.5.0     # this starts the release
       and attached artifacts (`.whl` + `.tar.gz`), pre-release flag correct.
     - [PyPI project page](https://pypi.org/project/gopher-mcp/) — new version
       present, metadata renders.
+    - The MCP Registry serves the new version. The `publish-registry` job reads
+      it back from the public search endpoint itself, so a green job is the
+      proof; the entry is `io.github.cameronrye/gopher-mcp`.
+    - The container image — `ghcr.io/cameronrye/gopher-mcp:<version>`, plus
+      `:latest` for a stable release only. A pre-release tag never moves
+      `latest`.
     - Installation:
 
       ```bash
       pip install gopher-mcp==0.5.0
+      gopher-mcp --version
       gopher-mcp --help
-      python -c "import gopher_mcp; print(gopher_mcp.__version__)"
       ```
 
 ## Pre-release checklist
@@ -208,15 +252,18 @@ checking locally avoids a failed release run.)
 
 - [ ] Decide the version number per SemVer (major / minor / patch).
 - [ ] All intended PRs are merged to `main`; no pending work that belongs in the release.
+- [ ] Hook revisions refreshed: `uv run pre-commit autoupdate`, then `uv run pre-commit run --all-files`. Nothing else bumps them — Dependabot has no `pre-commit` ecosystem and no pre-commit.ci app is installed on this repo — so without this step the local gate drifts away from CI between releases.
 - [ ] Lint and format pass: `uv run ruff check .` and `uv run ruff format --check .`.
 - [ ] Type checking passes: `uv run mypy src`.
-- [ ] Tests pass with coverage ≥85%: `uv run pytest`.
+- [ ] Tests pass with coverage ≥95%: `uv run pytest`.
 - [ ] Security scans pass: `uv run bandit -r src/` and `uv run pip-audit`. `pip-audit` is advisory-only in CI and in the release workflow (the nightly audit tracks findings in a `security-audit` issue), so check it here rather than relying on the tag run to stop you.
 - [ ] Docs build cleanly: `uv run mkdocs build --strict`.
+- [ ] CI is green on the commit you are about to tag — the release workflow enforces this, see [The CI gate](#the-ci-gate).
 - [ ] `README.md` and configuration examples reflect any new behavior.
 - [ ] `CHANGELOG.md` has a complete, dated `## [X.Y.Z]` section; breaking changes and any migration notes are called out.
 - [ ] `version` in `pyproject.toml` matches the tag you will create.
 - [ ] **Both** `server.json` version fields (top-level `version` and `packages[0].version`) match the tag.
+- [ ] `README.md` carries the `mcp-name: io.github.cameronrye/gopher-mcp` marker. The MCP Registry proves ownership of the PyPI package by reading the **live** long description for `packages[0].version` and looking for that line, and `README.md` is the long description — without it `publish-registry` fails with a namespace/ownership error.
 - [ ] `uv.lock` regenerated (`uv lock`) and committed.
 - [ ] Package builds and installs: `uv build && uv run python -m twine check dist/*`.
 - [ ] `scripts/validate-release.py` passes.
@@ -246,7 +293,9 @@ consistency and changelog checks still apply.
 The separate [`publish.yml`](https://github.com/cameronrye/gopher-mcp/blob/main/.github/workflows/publish.yml)
 workflow exists for upload tests against TestPyPI. Trigger it manually:
 
-1. **Actions → Publish to PyPI → Run workflow**.
+1. **Actions → Publish to TestPyPI → Run workflow**. (`publish.yml` is named
+   `Publish to TestPyPI`; `Publish to PyPI` is a job inside `release.yml` and
+   cannot be triggered by hand.)
 2. Choose `testpypi` as the target.
 3. Approve the `testpypi` environment and watch the upload succeed.
 

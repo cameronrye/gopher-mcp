@@ -95,8 +95,16 @@ def parse_gopher_url(url: str) -> GopherURL:
         ValueError: If URL is invalid
 
     """
-    if not url.startswith("gopher://"):
+    # RFC 3986 section 3.1 makes the scheme case-insensitive, so ``GOPHER://``
+    # names the same protocol as ``gopher://``; ``parse_gemini_url`` already
+    # compares its own scheme that way. Refusing a capitalised one told the
+    # caller its URL was not a Gopher URL at all. Compare case-insensitively and
+    # continue with the canonical lowercase spelling, which is what the cache
+    # key and the request built from it are keyed on.
+    scheme, separator, remainder = url.partition("://")
+    if separator != "://" or scheme.lower() != "gopher":
         raise ValueError("URL must start with 'gopher://'")
+    url = "gopher://" + remainder
 
     # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
     # accessed, so the access must live inside the try block.

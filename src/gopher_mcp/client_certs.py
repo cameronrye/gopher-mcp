@@ -192,6 +192,7 @@ class ClientCertificateManager:
         host: str,
         port: int = 1965,
         path: str = "/",
+        *,
         common_name: str | None = None,
         validity_days: int = 365,
         key_size: int = 2048,

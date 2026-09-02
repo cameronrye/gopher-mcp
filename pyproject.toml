@@ -136,24 +136,35 @@ dependencies = [
 # five entries verbatim, so a floor bumped in one quietly drifted from the other.
 dev = [
     { include-group = "test" },
-    # Both ceilings exist to keep a `uv lock --upgrade` from turning the repo
-    # red on a day nobody changed any code; both are meant to be lifted by a
-    # deliberate commit that also does the work the new release asks for.
+    # Neither of these two carries a ceiling any more. Both used to, to keep a
+    # `uv lock --upgrade` from turning the repo red on a day nobody changed any
+    # code, and both were meant to be lifted by a deliberate commit that also
+    # did the work the new release asked for. This is that commit. A linter
+    # ceiling is not free: it pins CI to one rule set while the declared range
+    # lets anyone installing from PyPI resolve a newer one, so the two disagree
+    # about what "lint clean" means and the disagreement only surfaces the day
+    # somebody bumps the lock. Answer a new rule when it lands instead.
     #
-    # mypy 1.19 started reporting `untyped-decorator` separately from `misc`,
-    # so the SDK-driven ignore on the `@mcp.custom_route("/health")` decorator
-    # in server.py becomes both "unused" and insufficient at once. Lifting the
-    # cap is a two-token edit to that comment
-    # (`# type: ignore[misc, untyped-decorator]`) plus a re-run of `mypy src`.
-    "mypy>=1.7.0,<1.19",
-    # ruff 0.15 stabilises PLW0108 (unnecessary lambda) and UP042 (StrEnum);
-    # 0.16 adds PLR0917 and RUF036 on top and starts formatting Python inside
-    # Markdown fences, which would rewrite CONTRIBUTING.md, SECURITY.md and
-    # five files under docs/. None of that is a defect in a dependency bump;
-    # lifting the cap means deciding on each new rule (fix or ignore, the way
-    # the PLR ignores above were decided) and re-formatting the docs in the
-    # same commit.
-    "ruff>=0.14.5,<0.15",
+    # mypy: the 1.19 split that used to justify one -- `untyped-decorator`
+    # reported separately from `misc`, which made the SDK-driven ignore on the
+    # `@mcp.custom_route("/health")` decorator in server.py both unused and
+    # insufficient at once -- is answered at that decorator instead, so the
+    # suppression names the code the diagnostic actually carries.
+    #
+    # The floor moved with it, and is a real minimum rather than a guess:
+    # server.py now spells that ignore `[untyped-decorator]`, a code no mypy
+    # below 1.19 knows, so on 1.7-1.18 the decorator's `misc` error goes
+    # unsuppressed and `mypy src` fails. Lower this only together with
+    # widening that ignore back out.
+    "mypy>=1.19.0",
+    # ruff: the 0.15/0.16 rules that used to justify one have been answered
+    # rather than deferred: RUF036 by reordering the unions in
+    # config.py, UP042 by making GemtextLineType a StrEnum, PLR0917 by making
+    # the tail of four long signatures keyword-only, and PLW0108 by a
+    # file-local noqa on the one lambda that has to stay a lambda. 0.16 also
+    # formats Python inside Markdown fences, and those fences are now
+    # formatted, so `ruff format --check .` covers every .md in the repo.
+    "ruff>=0.16.5",
     "pre-commit>=3.5.0",
     "bandit>=1.7.5",
     "pip-audit>=2.7.0",
@@ -168,6 +179,13 @@ docs = [
     "mkdocs-autorefs>=0.5.0",
     "mkdocstrings[python]>=0.24.0",
     "pymdown-extensions>=10.0.0",
+    # Three pages were merged away (advanced-features, gemini-configuration,
+    # task-runner) and their URLs are already published and linked from
+    # outside the repo, so removing them without a redirect turns live links
+    # into 404s. The `redirects` plugin entry that maps the old paths to the
+    # surviving ones lives in mkdocs.yml; this only makes the plugin
+    # installable. Retire a mapping only when the inbound traffic has.
+    "mkdocs-redirects>=1.2.1",
 ]
 # Kept as its own group so the minimum-versions CI job can install exactly the
 # test tooling against the declared floors.

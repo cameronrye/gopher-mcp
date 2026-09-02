@@ -1,4 +1,4 @@
-site_name: Gopher MCP
+site_name: Gopher & Gemini MCP Server
 site_description: A cross-platform Model Context Protocol (MCP) server for browsing Gopher and Gemini resources
 site_url: https://cameronrye.github.io/gopher-mcp
 repo_url: https://github.com/cameronrye/gopher-mcp
@@ -7,6 +7,9 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  custom_dir: docs/overrides
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
   palette:
     # Palette toggle for light mode
     - scheme: default
@@ -27,8 +30,10 @@ theme:
     - navigation.sections
     - navigation.expand
     - navigation.top
+    - navigation.footer
     - search.highlight
     - search.share
+    - content.action.edit
     - content.code.copy
     - content.code.annotate
     - content.tabs.link
@@ -39,29 +44,54 @@ nav:
       - Installation: installation.md
       - Configuration: configuration.md
       - Troubleshooting: troubleshooting.md
-  - Usage:
+  - Using the Server:
       - API Reference: api-reference.md
       - AI Assistant Guide: ai-assistant-guide.md
-      - Advanced Features: advanced-features.md
-      - Task Runner: task-runner.md
-  - Protocols:
-      - Gopher Specification: gopher-specification-for-llms.md
-      - Gemini Support: gemini-support.md
-      - Gemini Configuration: gemini-configuration.md
-      - Gemini Specification: gemini-specification-for-llms.md
+  - Gemini:
+      - Support and Trust Model: gemini-support.md
       - Gemini Troubleshooting: gemini-troubleshooting.md
   - Reference:
       - Architecture: architecture.md
       - Data Models: reference/models.md
       - Migration Guide: migration-guide.md
+      - Changelog: changelog.md
+      - Gopher Protocol: gopher-specification-for-llms.md
+      - Gemini Protocol: gemini-specification-for-llms.md
   - Development:
       - Contributing: contributing.md
-      - Repository Setup: development/repository-setup.md
       - Releasing: development/releasing.md
+
+# docs/overrides is the theme's custom_dir, read by Material directly. It also
+# sits inside docs_dir, so without this MkDocs copies the raw Jinja template to
+# site/overrides/main.html and publishes `{% extends "base.html" %}` as a page.
+exclude_docs: |
+  overrides/
+
+# development/repository-setup.md documents this repository's own GitHub
+# settings (branch protection, environments, secrets). It is maintainer
+# runbook material rather than something a reader of the site needs, so it is
+# built but deliberately kept out of the navigation.
+not_in_nav: |
+  development/repository-setup.md
 
 plugins:
   - search
   - autorefs
+  # The consistency pass merged three pages into their surviving neighbours.
+  # Their URLs are published and linked from outside this repository, so each
+  # one keeps answering with a redirect to the section that absorbed it rather
+  # than a 404. The plugin lives in pyproject.toml's `docs` dependency group.
+  - redirects:
+      redirect_maps:
+        # Security safeguards, caching, transports and the configuration
+        # reference it duplicated are all in the configuration guide now.
+        advanced-features.md: configuration.md
+        # Folded into the one cross-protocol configuration page, as the
+        # GEMINI_ table plus "Where Gemini state is stored".
+        gemini-configuration.md: configuration.md#gemini-protocol-configuration-gemini_
+        # `task.py` is gone; the taskipy table is described for contributors
+        # in CONTRIBUTING.md, which is what this page includes.
+        task-runner.md: contributing.md#the-task-runner
   - mkdocstrings:
       handlers:
         python:
@@ -87,7 +117,7 @@ markdown_extensions:
       custom_fences:
         - name: mermaid
           class: mermaid
-          format: "pymdownx.superfences.fence_code_format"
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.tabbed:
       alternate_style: true
   - pymdownx.highlight:
@@ -95,7 +125,15 @@ markdown_extensions:
       line_spans: __span
       pygments_lang_class: true
   - pymdownx.inlinehilite
-  - pymdownx.snippets
+  # docs/contributing.md and docs/changelog.md are one-line includes of the
+  # repository-root CONTRIBUTING.md and CHANGELOG.md, so the root is a snippet
+  # base path. check_paths turns a missing include into a build failure instead
+  # of a silently empty page.
+  - pymdownx.snippets:
+      base_path:
+        - .
+        - docs
+      check_paths: true
 
   - attr_list
   - md_in_html
@@ -104,8 +142,6 @@ markdown_extensions:
   - def_list
   - pymdownx.tasklist:
       custom_checkbox: true
-  - pymdownx.arithmatex:
-      generic: true
 
 extra:
   social:
@@ -113,15 +149,8 @@ extra:
       link: https://github.com/cameronrye/gopher-mcp
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/gopher-mcp/
-  version:
-    provider: mike
 
 extra_css:
   - stylesheets/extra.css
-
-extra_javascript:
-  - javascripts/mathjax.js
-  - https://polyfill.io/v3/polyfill.min.js?features=es6
-  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
 
 copyright: Copyright &copy; 2025&ndash;2026 Cameron Rye

@@ -12,6 +12,14 @@ on:
       # the published reference silently drifts from the code.
       - 'src/**'
       - 'uv.lock'
+      # docs/contributing.md and docs/changelog.md are one-line
+      # pymdownx.snippets includes of the root CONTRIBUTING.md and CHANGELOG.md
+      # rather than second copies of them, so those published pages change when
+      # the root files do and nothing under docs/ moves -- without these
+      # entries a release's changelog entry never reaches the site. Any further
+      # `--8<--` include of a file outside docs/ belongs here too.
+      - 'CONTRIBUTING.md'
+      - 'CHANGELOG.md'
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
@@ -36,10 +44,15 @@ jobs:
     # concurrency group -- which does not cancel in progress -- all day.
     timeout-minutes: 20
     steps:
+      # Shallow on purpose. This step used to pass `fetch-depth: 0  # Fetch all
+      # history for git info`, but nothing here reads git history: the plugin
+      # list is search/autorefs/mkdocstrings, with no
+      # mkdocs-git-revision-date-localized-plugin and no mike, and `edit_uri`
+      # only builds a URL. It was paying for a full-history clone that no
+      # consumer existed for. Restore it only in the same change that installs
+      # a plugin that actually needs history.
       - name: Checkout
         uses: actions/checkout@v7
-        with:
-          fetch-depth: 0  # Fetch all history for git info
 
       - name: Setup Python
         uses: actions/setup-python@v7
@@ -63,6 +76,13 @@ jobs:
       - name: Build documentation
         run: |
           uv run mkdocs build --clean --strict
+
+      # --strict only proves nothing warned, not that anything rendered. The
+      # landing page's mermaid diagram shipped as literal `graph TB` text for a
+      # year while every strict build passed, so assert the rendered HTML
+      # before this artifact is deployed to Pages.
+      - name: Check documentation rendered
+        run: ./scripts/check-docs-render.sh site
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v5

@@ -4,6 +4,16 @@
 >
 > Based on Gemini Network Protocol Specification v0.24.1 and Gemini Hypertext Format Specification v0.24.1
 
+This page describes **the protocol**, not this server. Everything below is what
+a conforming Gemini client and server do; nothing here is a claim about
+`gemini_fetch`. Where the two need to be told apart — which status codes this
+client turns into which error codes, what it does about redirects and TOFU, what
+it refuses before sending — see [Gemini Protocol
+Support](gemini-support.md), the [Configuration Guide](configuration.md) and
+the [API reference](api-reference.md). Keeping the two separate is deliberate:
+a protocol reference that quietly absorbs one implementation's choices stops
+being usable as a reference.
+
 ## Table of Contents
 
 1. [Protocol Overview](#protocol-overview)

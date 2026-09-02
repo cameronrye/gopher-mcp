@@ -122,6 +122,7 @@ def _parse_gemtext_link_line(
 def _create_gemtext_line(
     line_type: "GemtextLineType",
     content: str,
+    *,
     link: Optional["GemtextLink"] = None,
     text: str | None = None,
     level: int | None = None,
