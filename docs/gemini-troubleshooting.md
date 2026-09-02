@@ -275,6 +275,45 @@ Error: Failed to parse gemtext content
    - Ensure proper line endings (CRLF)
    - Check for malformed link lines
 
+#### Problem: `ROBOTS_UNAVAILABLE` — refused, but nothing disallowed you
+
+```
+Error: Could not fetch robots.txt from example.org because the connection
+timed out, so this request was refused ...
+```
+
+The robots gate has **two** error codes, and this is the one that is *not* a
+policy decision:
+
+| Code | What happened | What to do |
+|------|---------------|------------|
+| `BLOCKED_BY_ROBOTS` | The capsule published a policy and it forbids this path | Nothing to fix — the operator's decision. `GEMINI_RESPECT_ROBOTS_TXT=false` overrides it |
+| `ROBOTS_UNAVAILABLE` | The policy could not be retrieved, so the fetch failed closed per RFC 9309 §2.3.1.4 | Read the named cause below — this is almost never a robots problem |
+
+**Solutions for `ROBOTS_UNAVAILABLE`:**
+
+1. **Read the cause in the message.** It names the real failure: `the connection
+   timed out`, `the connection was refused or unreachable`, `the connection
+   failed`, `the TLS handshake failed`, `the reply was not a valid Gemini
+   response`, `the robots.txt response was too large`, or `the capsule answered
+   41 SERVER UNAVAILABLE` (any of 40-44, named).
+
+2. **Do not reach for `GEMINI_RESPECT_ROBOTS_TXT=false`.** If the capsule is
+   unreachable, disabling robots checking converts this into a `TLS_ERROR` or
+   `FETCH_ERROR` — it does not make the page load, and it leaves a safety
+   control switched off. Diagnose the named cause with the *TLS Connection
+   Issues* and *Connection and Timeout Issues* sections above.
+
+3. **Retrying immediately may return the same error.** After a failed probe the
+   capsule is left alone for `GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS` (60s by
+   default) and requests in that window are answered without touching the
+   network. Wait it out, or lower the value, before concluding the block is
+   permanent.
+
+4. **A `44 SLOW_DOWN` is self-clearing.** You are being rate limited, not
+   blocked. The capsule's own retry period is honoured instead of the generic
+   backoff, so the next request after that period re-probes.
+
 ### Configuration Issues
 
 #### Problem: Invalid Configuration Values

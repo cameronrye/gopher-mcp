@@ -106,6 +106,7 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GOPHER_RESPECT_ROBOTS_TXT` | Boolean | `true` | Fetch and honour `/robots.txt` from the host root, per the convention Veronica-2 documents. Fails open: Gopher has no status codes, so an unreachable policy cannot be distinguished from an absent one. A policy larger than the 500 KB cap is truncated at the last complete line and parsed (RFC 9309 section 2.5). |
 | `GOPHER_ROBOTS_CACHE_TTL_SECONDS` | Integer | `86400` | Lifetime of a cached robots policy (max `604800`). |
 | `GOPHER_ROBOTS_HONOR_AI_TOKENS` | Boolean | `true` | Also honour rules naming AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). |
+| `GOPHER_ROBOTS_FAILURE_BACKOFF_SECONDS` | Float | `60` | How long a host whose `robots.txt` probe failed is left alone before being probed again (max `3600`). A failed probe is never cached for the full policy TTL, but without a backoff every request to an unreachable host pays a fresh connect timeout; `0` retries on the next request. |
 
 ## Gemini Protocol Configuration (`GEMINI_`)
 
@@ -127,9 +128,10 @@ Provide environment variables through your MCP client (e.g. Claude Desktop):
 | `GEMINI_MAX_RENDERED_CHARS` | Integer | `50000` | Maximum characters of rendered text returned to the model (longer output is truncated and flagged). |
 | `GEMINI_REQUESTS_PER_MINUTE` | Float | `60` | Per-host outbound rate limit; `0` disables it. Gemini status 44 SLOW_DOWN is always honoured. |
 | `GEMINI_MAX_CONCURRENT_REQUESTS` | Integer | `5` | Maximum concurrent requests; `0` is unlimited. |
-| `GEMINI_RESPECT_ROBOTS_TXT` | Boolean | `true` | Fetch and honour `/robots.txt` from the capsule root, per the Gemini companion specification (virtual agents `webproxy` and `indexer`, plus `*`). Fails closed on a temporary (4x) failure; `51 NOT FOUND` means no policy. A policy larger than the 500 KB cap is truncated and parsed (RFC 9309 section 2.5). |
+| `GEMINI_RESPECT_ROBOTS_TXT` | Boolean | `true` | Fetch and honour `/robots.txt` from the capsule root, per the Gemini companion specification (virtual agents `webproxy` and `indexer`, plus `*`). Fails closed when the policy cannot be retrieved — a temporary (4x) status, but also a connection failure, TLS failure, timeout or malformed reply — so an unreachable capsule is refused with `ROBOTS_UNAVAILABLE` naming the cause (a real `Disallow` is `BLOCKED_BY_ROBOTS`). `51 NOT FOUND` means no policy. A policy larger than the 500 KB cap is truncated and parsed (RFC 9309 section 2.5). |
 | `GEMINI_ROBOTS_CACHE_TTL_SECONDS` | Integer | `86400` | Lifetime of a cached robots policy (max `604800`). |
 | `GEMINI_ROBOTS_HONOR_AI_TOKENS` | Boolean | `true` | Also honour rules naming AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). |
+| `GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS` | Float | `60` | How long a capsule whose `robots.txt` probe failed is left alone before being probed again (max `3600`). A failed probe is never cached for the full policy TTL, but without a backoff every request to an unreachable capsule pays a fresh connect timeout — and because Gemini fails closed, is refused. `0` retries on the next request. |
 | `GEMINI_DENIED_MIME_TYPES` | Comma-separated or JSON array | empty | MIME types to reject; supports wildcards like `image/*`. |
 
 !!! note "TLS and certificates are not env-configurable"

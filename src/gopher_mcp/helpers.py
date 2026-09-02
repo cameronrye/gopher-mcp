@@ -141,6 +141,17 @@ def resolve_gemini_reference(base_url: str, target: str) -> str:
     if urlparse(target).scheme:  # already absolute
         return target
 
+    # Drop the base's query before resolving. A Gemini query is the user's
+    # INPUT response and may be a secret (status 11 SENSITIVE_INPUT), which is
+    # why it is stripped from logs, from error URLs and from requestInfo. But
+    # RFC 3986 section 5.3 says an empty or fragment-only reference inherits the
+    # base's query, so a capsule serving "=> " or "=> #anchor" on a page fetched
+    # with a password in the query got that password handed straight back in a
+    # link URL -- into exactly the caller-visible surface every other path is
+    # careful to keep it out of. A reference supplying its own query ("?x") is
+    # unaffected: it replaces rather than inherits.
+    base_url = urlsplit(base_url)._replace(query="").geturl()
+
     if not base_url.startswith("gemini://"):
         return urljoin(base_url, target)
 

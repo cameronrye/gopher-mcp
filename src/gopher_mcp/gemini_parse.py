@@ -500,6 +500,18 @@ def _process_success_response(
         # under the byte limit) is ~250k tokens. `size` still reports the full
         # original byte length.
         content, truncated = truncate_text(content, max_rendered_chars)
+        if truncated:
+            # Drop the trailing partial line before parsing -- the same rule the
+            # robots.txt reader applies, and for the same reason. A cut landing
+            # inside a "=> url text" line parses as a COMPLETE link whose target
+            # is the surviving prefix, so the caller is handed a URL the server
+            # never sent and cannot tell it apart from a real one. Half a link
+            # must not be presented as a whole one.
+            #
+            # A cut before the first newline leaves nothing: that is a single
+            # line longer than the entire character budget, and there is no
+            # complete line to show. ``truncated`` still reports why.
+            content = content[: content.rfind("\n") + 1]
         # Parse gemtext into structured format, resolving each link against the
         # request URL: relative references are the norm in gemtext, and an
         # unresolved one is not fetchable by the caller.
@@ -600,7 +612,22 @@ def _process_redirect_response(
         )
 
     base_url = str(request_info.get("url", ""))
-    resolved = resolve_gemini_reference(base_url, target) if base_url else target
+    try:
+        resolved = resolve_gemini_reference(base_url, target) if base_url else target
+    except ValueError as e:
+        # urlparse raises a bare ValueError on a target it cannot parse at all
+        # ("//[::1" -> "Invalid IPv6 URL"). That escaped to the client's generic
+        # ValueError arm, which reports INVALID_REQUEST -- telling the model its
+        # own valid URL was malformed when in fact the *server* sent a
+        # nonsensical redirect. It belongs with the other 3x defects.
+        return GeminiErrorResult(
+            error={
+                "code": "INVALID_REDIRECT",
+                "message": f"Server sent a redirect (3x) to an unparseable URL: {e}",
+                "status": status_code,
+            },
+            requestInfo=request_info,
+        )
 
     # Guard against a redirect to the same URL (a one-hop loop) so a single
     # malformed response cannot drive an unbounded client re-fetch loop.

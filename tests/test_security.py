@@ -178,7 +178,11 @@ class TestResourceExhaustion:
 
         # The real receive_data loop hit the cap and rejected the response.
         assert isinstance(result, GeminiErrorResult)
-        assert result.error["code"] == "TLS_ERROR"
+        # FETCH_ERROR, not TLS_ERROR: a size cap is this server's own policy,
+        # not a handshake or certificate fault. The message names the cap so a
+        # caller can act on it rather than going to inspect certificates.
+        assert result.error["code"] == "FETCH_ERROR"
+        assert "1024" in result.error["message"]
 
     @pytest.mark.asyncio
     async def test_timeout_protection(self):

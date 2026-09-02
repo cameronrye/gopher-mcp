@@ -100,7 +100,26 @@ class RobotsUnavailable(Exception):
     Raised by a fetcher for a *temporary* failure, which RFC 9309 §2.3.1.4 says
     must be treated as a complete disallow. A permanently absent file is not
     this: a fetcher signals "no policy, allow everything" by returning ``None``.
+
+    ``detail`` is a short phrase naming what actually went wrong -- "the
+    connection timed out", "the capsule answered 41 SERVER UNAVAILABLE". It is
+    carried all the way out to the caller because the alternative is reporting
+    a capsule outage, a TLS fault or a local certificate problem as though the
+    operator had written a rule against us. Everything the gate can say about
+    *why* it is refusing is in here, so it must be safe to show a user: name
+    the failure class, never the exception's own text (which can quote remote
+    bytes).
+
+    ``retry_after`` lets a fetcher override the gate's configured failure
+    backoff when the server named its own period -- a status-44 SLOW_DOWN says
+    exactly how long to wait, and honouring the generic backoff on top of it
+    would refuse requests the server was willing to serve.
     """
+
+    def __init__(self, detail: str, *, retry_after: float | None = None) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -322,6 +341,11 @@ class RobotsDecision:
     allowed: bool
     # "allowed" | "disallowed" | "unavailable"
     reason: str = "allowed"
+    #: Why the policy could not be retrieved, when ``reason`` is "unavailable".
+    #: Set from :attr:`RobotsUnavailable.detail`, and preserved for the whole
+    #: failure backoff so a request answered from the backoff still says what
+    #: went wrong rather than repeating a bare refusal.
+    detail: str | None = None
 
 
 @dataclass
@@ -339,6 +363,20 @@ class RobotsGate:
     "no policy here" or raise :class:`RobotsUnavailable` for a temporary failure.
     """
 
+    #: Default for ``failure_backoff_seconds``: how long an unreachable host is
+    #: left alone before being probed again. A failure is deliberately not
+    #: cached for the full TTL -- a transient outage should be retried -- but
+    #: without any backoff, robots-on-by-default made every request to a dead
+    #: host pay a fresh connect timeout, including requests that would otherwise
+    #: be served entirely from the content cache (the gate runs ahead of that
+    #: lookup). On Gopher the gate then fails open and proceeds anyway, so the
+    #: wait bought nothing at all. Short enough to still be a retry, long enough
+    #: to stop the per-request cost -- but which side of that trade matters is
+    #: deployment-specific, so it is a constructor argument rather than a fixed
+    #: constant. It remains a class attribute because it is the default the
+    #: config layer restates.
+    FAILURE_BACKOFF_SECONDS = 60.0
+
     def __init__(
         self,
         *,
@@ -347,6 +385,7 @@ class RobotsGate:
         extra_tokens: tuple[str, ...] = (),
         ttl_seconds: int,
         fail_closed: bool,
+        failure_backoff_seconds: float = FAILURE_BACKOFF_SECONDS,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """Initialize the gate.
@@ -362,6 +401,10 @@ class RobotsGate:
             fail_closed: What to do when the fetcher raises
                 :class:`RobotsUnavailable`. True denies (RFC 9309 §2.3.1.4);
                 False allows, which is the only workable choice for Gopher.
+            failure_backoff_seconds: How long a host whose probe failed is left
+                alone before being probed again; 0 retries on the very next
+                request. See :attr:`FAILURE_BACKOFF_SECONDS` for why this is not
+                simply zero.
             clock: Monotonic clock source (injectable for tests).
         """
         self._fetcher = fetcher
@@ -369,6 +412,7 @@ class RobotsGate:
         self._extra_tokens = extra_tokens
         self._ttl_seconds = ttl_seconds
         self._fail_closed = fail_closed
+        self._failure_backoff_seconds = failure_backoff_seconds
         self._clock = clock
         self._cache: dict[str, _CachedPolicy] = {}
         # One lock per host so a batch of concurrent fetches to the same server
@@ -383,8 +427,12 @@ class RobotsGate:
         # fetches at the very server the gate exists to spare.
         self._lock_users: dict[str, int] = {}
         # When a probe fails, the host is not re-probed until this timestamp.
-        # See FAILURE_BACKOFF_SECONDS.
+        # See ``failure_backoff_seconds``.
         self._retry_after: dict[str, float] = {}
+        # Why the last probe of each host failed, kept for as long as the
+        # backoff suppresses re-probing so every request refused during that
+        # window can still name the cause instead of repeating a bare refusal.
+        self._failure_detail: dict[str, str] = {}
         # An open-world fetcher sees an unbounded number of distinct hosts, so
         # neither map may grow without limit (the rate limiter has the same
         # constraint and solves it the same way). Past this many entries, sweep
@@ -392,30 +440,29 @@ class RobotsGate:
         # dropping them is behaviour-preserving.
         self._sweep_threshold = 1024
 
-    #: How long an unreachable host is left alone before being probed again.
-    #: A failure is deliberately not cached for the full TTL -- a transient
-    #: outage should be retried -- but without any backoff, robots-on-by-default
-    #: made every request to a dead host pay a fresh connect timeout, including
-    #: requests that would otherwise be served entirely from the content cache
-    #: (the gate runs ahead of that lookup). On Gopher the gate then fails open
-    #: and proceeds anyway, so the wait bought nothing at all. Short enough to
-    #: still be a retry, long enough to stop the per-request cost.
-    FAILURE_BACKOFF_SECONDS = 60.0
+    @staticmethod
+    def _key(host: str, port: int) -> str:
+        """Cache key for a host. Strips the FQDN trailing dot so
+        "example.com." and "example.com" share one policy rather than each
+        getting their own."""
+        return f"{host.lower().rstrip('.')}:{port}"
 
     async def allows(self, host: str, port: int, paths: list[str]) -> RobotsDecision:
         """Return whether ``paths`` on ``host:port`` may be fetched."""
         policy = await self._policy_for(host, port)
         if policy is None:
             # Undeterminable; the fail-open/closed choice is the caller's.
-            return RobotsDecision(allowed=not self._fail_closed, reason="unavailable")
+            return RobotsDecision(
+                allowed=not self._fail_closed,
+                reason="unavailable",
+                detail=self._failure_detail.get(self._key(host, port)),
+            )
         if policy.is_allowed(paths, self._tokens, self._extra_tokens):
             return RobotsDecision(allowed=True)
         return RobotsDecision(allowed=False, reason="disallowed")
 
     async def _policy_for(self, host: str, port: int) -> RobotsPolicy | None:
-        # Strip the FQDN trailing dot so "example.com." and "example.com"
-        # share one policy rather than each getting their own.
-        key = f"{host.lower().rstrip('.')}:{port}"
+        key = self._key(host, port)
 
         cached = self._cache.get(key)
         if cached is not None and cached.expires_at > self._clock():
@@ -448,21 +495,35 @@ class RobotsGate:
                 try:
                     text = await self._fetcher(host, port)
                 except RobotsUnavailable as e:
-                    logger.debug(
-                        "robots.txt unavailable", host=host, port=port, reason=str(e)
+                    logger.info(
+                        "robots.txt unavailable",
+                        host=host,
+                        port=port,
+                        reason=e.detail,
                     )
                     # Deliberately not cached: a temporary failure should be
                     # retried, not pinned for the whole TTL. Fall back to the
                     # stale policy if we have one rather than throwing away a
                     # known-good answer.
-                    self._retry_after[key] = (
-                        self._clock() + self.FAILURE_BACKOFF_SECONDS
+                    #
+                    # A server that named its own retry period (a status-44
+                    # SLOW_DOWN) is honoured instead of the configured backoff:
+                    # it already told us when it would be ready, and stacking
+                    # the generic backoff on top would keep refusing requests
+                    # past the point the server was willing to serve them.
+                    backoff = (
+                        e.retry_after
+                        if e.retry_after is not None
+                        else self._failure_backoff_seconds
                     )
+                    self._retry_after[key] = self._clock() + backoff
+                    self._failure_detail[key] = e.detail
                     stale = self._cache.get(key)
                     return stale.policy if stale is not None else None
 
                 policy = parse_robots(text) if text is not None else RobotsPolicy()
                 self._retry_after.pop(key, None)
+                self._failure_detail.pop(key, None)
                 self._cache[key] = _CachedPolicy(
                     policy=policy, expires_at=self._clock() + self._ttl_seconds
                 )
@@ -490,3 +551,6 @@ class RobotsGate:
         # is safe to recreate.
         self._locks = {k: v for k, v in self._locks.items() if k in self._lock_users}
         self._retry_after = {k: v for k, v in self._retry_after.items() if v > now}
+        self._failure_detail = {
+            k: v for k, v in self._failure_detail.items() if k in self._retry_after
+        }

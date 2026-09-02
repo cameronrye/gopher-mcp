@@ -74,6 +74,33 @@ class TLSConnectionError(Exception):
         self.original_error = original_error
 
 
+class GeminiConnectionError(TLSConnectionError):
+    """A failure *before* TLS had anything to do with it.
+
+    Connection refused, host unreachable, connection reset, name resolution --
+    none of these is a handshake or certificate fault, and reporting them as
+    ``TLS_ERROR`` steers diagnosis toward certificates when the real answer is
+    "nothing is listening". This is the same correction already applied to
+    :class:`TimeoutError` in :meth:`GeminiTLSClient.connect`, extended to the
+    rest of the pre-handshake failures.
+
+    Subclasses :class:`TLSConnectionError` so every existing handler catching
+    the base keeps catching it; only the reported error code differs.
+    """
+
+
+class GeminiResponseTooLargeError(TLSConnectionError):
+    """The response exceeded the configured size cap, or hit it mid-stream.
+
+    A size limit is the operator's own policy, not a transport fault: the bytes
+    arrived fine, there were simply too many. Reporting it as ``TLS_ERROR`` told
+    a caller fetching a large page to go and look at certificates.
+
+    Subclasses :class:`TLSConnectionError` for the same compatibility reason as
+    :class:`GeminiConnectionError`.
+    """
+
+
 @dataclass
 class TLSConnection:
     """An established Gemini TLS connection (native asyncio streams)."""
@@ -218,13 +245,16 @@ class GeminiTLSClient:
                 f"Connection to {host}:{port} timed out after {timeout} seconds"
             ) from e
         except socket.gaierror as e:
-            raise TLSConnectionError(f"DNS resolution failed for {host}: {e}", e) from e
+            raise GeminiConnectionError(
+                f"DNS resolution failed for {host}: {e}", e
+            ) from e
         except ConnectionRefusedError as e:
-            raise TLSConnectionError(f"Connection refused by {host}:{port}") from e
+            raise GeminiConnectionError(f"Connection refused by {host}:{port}") from e
         except ssl.SSLError as e:
+            # The one genuinely TLS-level failure in this set.
             raise TLSConnectionError(f"TLS handshake failed: {e}", e) from e
         except OSError as e:
-            raise TLSConnectionError(f"Connection failed: {e}", e) from e
+            raise GeminiConnectionError(f"Connection failed: {e}", e) from e
 
         ssl_object = writer.get_extra_info("ssl_object")
         connection_info = self._get_connection_info(
@@ -393,12 +423,12 @@ class GeminiTLSClient:
                     reader.read(1), timeout=PROBE_TIMEOUT_SECONDS
                 )
             except TimeoutError:
-                raise TLSConnectionError(
+                raise GeminiResponseTooLargeError(
                     f"Response reached the maximum size of {max_size} bytes and "
                     f"the server did not close the connection; it may be truncated"
                 ) from None
             if extra:
-                raise TLSConnectionError(
+                raise GeminiResponseTooLargeError(
                     f"Response exceeds maximum size of {max_size} bytes"
                 )
             return b"".join(chunks)

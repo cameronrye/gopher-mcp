@@ -88,13 +88,44 @@ export GEMINI_TIMEOUT_SECONDS=60
 
 ### DNS Failures
 
-**Problem:** The hostname cannot be resolved.
+**Problem:** The hostname cannot be resolved. This returns the `DNS_ERROR`
+error code — *not* `BLOCKED`, which means the SSRF guard actively refused a
+target that did resolve.
 
 **Solution:**
 
 - Verify your internet connection and that the hostname is spelled correctly.
 - Test resolution directly, for example `nslookup gopher.floodgap.com`.
 - If you maintain a host allowlist, confirm the host is included — `GOPHER_ALLOWED_HOSTS` and `GEMINI_ALLOWED_HOSTS` restrict connections to the listed hosts only.
+
+### Blocked by robots.txt
+
+Two different error codes come from the robots gate, and they call for opposite
+responses.
+
+**`BLOCKED_BY_ROBOTS`** — the server published a policy and it forbids this
+path. This will not change on a retry. Set `GOPHER_RESPECT_ROBOTS_TXT=false` /
+`GEMINI_RESPECT_ROBOTS_TXT=false` if you have reason to override it (a host you
+operate, say).
+
+**`ROBOTS_UNAVAILABLE`** — the policy could not be read at all, and Gemini fails
+closed when that happens (RFC 9309 §2.3.1.4). Nothing disallowed you; the
+capsule did not answer. The message names the real problem — a timeout, a TLS
+handshake failure, a refused or unreachable connection, or a status such as
+`41 SERVER UNAVAILABLE`. Diagnose that, and see *Timeouts* and *Connection
+Refused* above.
+
+!!! warning
+    Turning robots checking off will **not** help with `ROBOTS_UNAVAILABLE`. The
+    fetch would fail anyway, just with a transport error instead — and you would
+    be left with a safety control switched off. Retry instead.
+
+Gopher fails **open**, so an unreachable policy there allows the fetch rather
+than refusing it — only a real `Disallow` produces `BLOCKED_BY_ROBOTS`, and
+`ROBOTS_UNAVAILABLE` is a Gemini-only outcome.
+
+!!! note
+    After a failed probe the host is left alone for `*_ROBOTS_FAILURE_BACKOFF_SECONDS` (60 seconds by default) and requests in that window are answered without contacting it. If you have just fixed the underlying problem, an immediate retry can still return the same error — wait out the backoff, or lower it, before concluding the block is permanent.
 
 ## Gopher-Specific Issues
 

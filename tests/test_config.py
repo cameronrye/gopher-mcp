@@ -69,6 +69,7 @@ class TestPolitenessDefaults:
         for cfg in (GopherConfig(), GeminiConfig()):
             assert cfg.robots_cache_ttl_seconds == 86400
             assert cfg.robots_honor_ai_tokens is True
+            assert cfg.robots_failure_backoff_seconds == 60.0
 
     def test_robots_env_vars(self, monkeypatch):
         from gopher_mcp.config import GeminiConfig, GopherConfig
@@ -77,6 +78,7 @@ class TestPolitenessDefaults:
         monkeypatch.setenv("GOPHER_ROBOTS_CACHE_TTL_SECONDS", "3600")
         monkeypatch.setenv("GEMINI_RESPECT_ROBOTS_TXT", "true")
         monkeypatch.setenv("GEMINI_ROBOTS_HONOR_AI_TOKENS", "false")
+        monkeypatch.setenv("GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS", "5")
 
         gopher = GopherConfig()
         assert gopher.respect_robots_txt is True
@@ -85,6 +87,7 @@ class TestPolitenessDefaults:
         gemini = GeminiConfig()
         assert gemini.respect_robots_txt is True
         assert gemini.robots_honor_ai_tokens is False
+        assert gemini.robots_failure_backoff_seconds == 5.0
 
     def test_defaults_match_the_client_constants(self):
         """config.py restates these as literals (the module's convention).
@@ -107,6 +110,9 @@ class TestPolitenessDefaults:
             assert cfg.robots_cache_ttl_seconds == (
                 module.DEFAULT_ROBOTS_CACHE_TTL_SECONDS
             )
+            assert cfg.robots_failure_backoff_seconds == (
+                module.DEFAULT_ROBOTS_FAILURE_BACKOFF_SECONDS
+            )
 
     def test_the_two_client_modules_agree(self):
         """gopher_client and gemini_client each carry their own copy."""
@@ -116,5 +122,21 @@ class TestPolitenessDefaults:
             "DEFAULT_REQUESTS_PER_MINUTE",
             "DEFAULT_MAX_CONCURRENT_REQUESTS",
             "DEFAULT_ROBOTS_CACHE_TTL_SECONDS",
+            "DEFAULT_ROBOTS_FAILURE_BACKOFF_SECONDS",
         ):
             assert getattr(gopher_client, const) == getattr(gemini_client, const)
+
+    def test_the_backoff_default_matches_the_gate(self):
+        """A third copy lives on RobotsGate, where the rationale is written.
+
+        The gate is the only one of the three that is also a *fallback* -- it is
+        what a RobotsGate built without the argument uses -- so a drift here
+        would go unnoticed everywhere except in direct gate construction.
+        """
+        from gopher_mcp import gopher_client
+        from gopher_mcp.robots import RobotsGate
+
+        assert (
+            gopher_client.DEFAULT_ROBOTS_FAILURE_BACKOFF_SECONDS
+            == RobotsGate.FAILURE_BACKOFF_SECONDS
+        )

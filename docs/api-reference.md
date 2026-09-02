@@ -1008,7 +1008,8 @@ rather than assuming either key is present.
 | `INVALID_REQUEST` | The URL failed validation: bad scheme, over-long selector or search, control characters, host not in the allowlist, or a port outside `1`-`65535` |
 | `NOT_FETCHABLE` | The item type is interactive (telnet, tn3270, CSO) and has no Gopher-fetchable body; connect with an appropriate client instead |
 | `BLOCKED` | The SSRF guard refused the target (loopback, private range, or a disallowed port) |
-| `BLOCKED_BY_ROBOTS` | `GOPHER_RESPECT_ROBOTS_TXT` is on and the host disallows this selector |
+| `DNS_ERROR` | The hostname could not be resolved. Nothing was refused — check the spelling, or the resolver |
+| `BLOCKED_BY_ROBOTS` | `GOPHER_RESPECT_ROBOTS_TXT` is on and the host disallows this selector. Gopher fails open, so an unretrievable policy allows the fetch rather than producing `ROBOTS_UNAVAILABLE` |
 | `FETCH_ERROR` | Connection failure, timeout, oversize response, or an unexpected internal failure |
 
 #### Gemini error codes
@@ -1028,7 +1029,9 @@ rather than assuming either key is present.
 | `CERTIFICATE_UNVERIFIED` | No fingerprint was available to compare against |
 | `CERTIFICATE_STORE_UNAVAILABLE` | The TOFU trust store was locked by another process, so the certificate could not be recorded; retry once that process releases it |
 | `BLOCKED` | The SSRF guard refused the target |
-| `BLOCKED_BY_ROBOTS` | `GEMINI_RESPECT_ROBOTS_TXT` is on and the capsule disallows this resource, or its policy could not be retrieved |
+| `DNS_ERROR` | The hostname could not be resolved. Nothing was refused — check the spelling, or the resolver |
+| `BLOCKED_BY_ROBOTS` | `GEMINI_RESPECT_ROBOTS_TXT` is on and the capsule disallows this resource. The operator's decision; retrying will not change it |
+| `ROBOTS_UNAVAILABLE` | `GEMINI_RESPECT_ROBOTS_TXT` is on and the capsule's policy could not be retrieved — a 4x status, or a connection/TLS/timeout/protocol failure — so the gate failed closed per RFC 9309 §2.3.1.4. **Transient**: the capsule did not disallow anything, it did not answer. The message names the underlying cause. Retry rather than disabling robots checking, which will not make an unreachable capsule reachable |
 | `FETCH_ERROR` | The request timed out, or an unexpected internal failure occurred |
 
 ## Rate Limiting

@@ -512,7 +512,8 @@ never match, so every fetch would be refused at runtime instead.
 that expire the instant they are written.
 
 The tables above cover the most common settings. Additional options include
-robots policy caching (`*_ROBOTS_CACHE_TTL_SECONDS`, `*_ROBOTS_HONOR_AI_TOKENS`),
+robots policy caching and retry (`*_ROBOTS_CACHE_TTL_SECONDS`,
+`*_ROBOTS_HONOR_AI_TOKENS`, `*_ROBOTS_FAILURE_BACKOFF_SECONDS`),
 rendered-output limits (`*_MAX_RENDERED_CHARS`, `GOPHER_MAX_MENU_ITEMS`), Gemini
 TOFU/certificate storage paths and expiry policy (`GEMINI_TOFU_STORAGE_PATH`,
 `GEMINI_TOFU_REJECT_EXPIRED`, `GEMINI_CLIENT_CERTS_STORAGE_PATH`), MIME filtering
@@ -581,7 +582,9 @@ Set `GOPHER_RESPECT_ROBOTS_TXT=false` / `GEMINI_RESPECT_ROBOTS_TXT=false` to
 turn it off — for example if you are fetching from a host you operate, or if a
 blanket `Disallow: /` is blocking a deployment that previously worked. A
 blocked fetch returns the `BLOCKED_BY_ROBOTS` error code rather than failing
-silently.
+silently, and a fetch refused because the policy could not be read at all
+returns `ROBOTS_UNAVAILABLE` — a separate code because it is transient and means
+nothing disallowed you.
 
 Which convention applies depends on the protocol:
 
@@ -606,6 +609,13 @@ By default the server also honours rules naming AI crawler tokens such as
 part of either protocol's convention, but an operator who wrote one meant "no
 LLM tooling", and that is the request being made.
 
+When a policy cannot be retrieved at all, the host is left alone for a short
+while before being probed again (`*_ROBOTS_FAILURE_BACKOFF_SECONDS`, 60s by
+default) rather than paying a fresh connect timeout on every request. Set it to
+`0` to re-probe immediately, or raise it if you routinely fetch from hosts that
+are down. A Gemini capsule answering `44 SLOW_DOWN` is the exception: it named
+its own retry period, so that is used instead.
+
 Two known limitations, both documented rather than papered over:
 
 - **Gopher fails open.** The protocol has no status codes, so a missing
@@ -613,8 +623,13 @@ Two known limitations, both documented rather than papered over:
   wire. RFC 9309 §2.3.1.4 would have an unreachable policy deny everything,
   which would block most of Gopherspace. Instead the parser is lenient: content
   that yields no `User-agent:` group imposes no rules. Gemini, which does have
-  status codes, fails closed on a temporary (4x) failure and treats `51 NOT
-FOUND` as "no policy".
+  status codes, fails closed and treats `51 NOT FOUND` as "no policy". Note that
+  failing closed covers more than a 4x status: a capsule that is unreachable —
+  connection refused, TLS failure, timeout, malformed reply — also has no
+  retrievable policy, so it is refused too — but under the separate
+  `ROBOTS_UNAVAILABLE` code, since the capsule never disallowed anything. The
+  message names the underlying cause, and turning robots checking off will not
+  make such a capsule reachable.
 - **Gopher path rules are best-effort.** A Gopher URI carries the item type as
   the first path character, so `gopher://host/1/archive` has the URI path
   `/1/archive` but the on-wire selector `/archive`. Rules are tested against both

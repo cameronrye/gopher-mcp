@@ -198,3 +198,35 @@ class TestBlankPathIsUnset:
     def test_a_real_path_still_parses(self, monkeypatch, tmp_path):
         monkeypatch.setenv("GOPHER_MCP_LOG_FILE_PATH", str(tmp_path / "server.log"))
         assert ServerConfig().log_file_path == tmp_path / "server.log"
+
+
+class TestRobotsFailureBackoffEnv:
+    """GOPHER_/GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS bounds."""
+
+    @pytest.mark.parametrize(("config_cls", "prefix"), CONFIGS)
+    def test_zero_is_accepted(self, monkeypatch, config_cls, prefix):
+        """0 means "retry on the very next request" -- the pre-0.7.0 behaviour,
+        which has to stay reachable rather than being read as unset."""
+        monkeypatch.setenv(f"{prefix}ROBOTS_FAILURE_BACKOFF_SECONDS", "0")
+        assert config_cls().robots_failure_backoff_seconds == 0.0
+
+    @pytest.mark.parametrize(("config_cls", "prefix"), CONFIGS)
+    def test_fractional_seconds_are_accepted(self, monkeypatch, config_cls, prefix):
+        monkeypatch.setenv(f"{prefix}ROBOTS_FAILURE_BACKOFF_SECONDS", "0.5")
+        assert config_cls().robots_failure_backoff_seconds == 0.5
+
+    @pytest.mark.parametrize(("config_cls", "prefix"), CONFIGS)
+    @pytest.mark.parametrize("value", ["-1", "3601"])
+    def test_out_of_range_is_rejected(self, monkeypatch, config_cls, prefix, value):
+        """A negative backoff would put the retry deadline in the past (no
+        backoff at all), and past an hour it caches the outage rather than
+        retrying it -- the one thing the failure path is documented not to do."""
+        monkeypatch.setenv(f"{prefix}ROBOTS_FAILURE_BACKOFF_SECONDS", value)
+        with pytest.raises(ValidationError):
+            config_cls()
+
+    @pytest.mark.parametrize(("config_cls", "prefix"), CONFIGS)
+    def test_non_numeric_is_rejected(self, monkeypatch, config_cls, prefix):
+        monkeypatch.setenv(f"{prefix}ROBOTS_FAILURE_BACKOFF_SECONDS", "soon")
+        with pytest.raises(ValidationError):
+            config_cls()

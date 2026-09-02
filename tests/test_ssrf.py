@@ -14,6 +14,7 @@ import pytest
 
 from gopher_mcp import ssrf
 from gopher_mcp.ssrf import (
+    HostResolutionError,
     SSRFError,
     classify_blocked_ip,
     normalize_host,
@@ -138,6 +139,27 @@ class TestValidateTarget:
         monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", nothing)
         with pytest.raises(SSRFError, match="Could not resolve"):
             await validate_target("nope.example", 70)
+
+    async def test_resolution_failure_is_its_own_exception_type(self, monkeypatch):
+        """A name that does not resolve was never *refused* by the SSRF policy:
+        nothing was evaluated, because there was no address to evaluate. The
+        clients key their error code off this, so the type must stay distinct --
+        while remaining an SSRFError so every existing handler still catches it.
+        """
+
+        async def boom(host, port):
+            raise OSError("name resolution failed")
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", boom)
+        with pytest.raises(HostResolutionError):
+            await validate_target("nope.example", 70)
+        assert issubclass(HostResolutionError, SSRFError)
+
+    async def test_a_real_policy_refusal_is_not_a_resolution_error(self):
+        """The inverse: a genuine block must NOT be reported as a DNS problem."""
+        with pytest.raises(SSRFError) as blocked:
+            await validate_target("127.0.0.1", 70)
+        assert not isinstance(blocked.value, HostResolutionError)
 
     async def test_reserved_address_from_dns_is_blocked(self, monkeypatch):
         """An unallocated IPv6 range reports is_global=True, so it reaches the

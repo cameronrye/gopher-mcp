@@ -465,3 +465,100 @@ class TestLoadTesting:
 
         # Should handle burst efficiently
         assert burst_time < 1.0  # Less than 1 second for 100 operations
+
+
+class TestGopherTimeoutIsOneBudget:
+    """docs/configuration.md and config/example.env both promise that
+    GOPHER_TIMEOUT_SECONDS is the "overall deadline for one fetch, covering DNS,
+    connect, send and read". It was not: DNS and the transport were each handed
+    the full value, and the robots probe spent two more full phases of its own,
+    so one call could occupy four multiples of the configured deadline."""
+
+    @pytest.mark.asyncio
+    async def test_dns_and_transport_share_one_deadline(self, monkeypatch):
+        from gopher_mcp.gopher_client import GopherClient
+
+        seen: list[float] = []
+
+        async def slow_resolve(host, port):
+            await asyncio.sleep(0.20)
+            return ["93.184.216.34"]
+
+        async def record_timeout(host, port, selector, search, **kwargs):
+            seen.append(kwargs["timeout"])
+            return b"iok\tfake\t(NULL)\t0\r\n.\r\n"
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", slow_resolve)
+        monkeypatch.setattr("gopher_mcp.gopher_client.fetch_gopher", record_timeout)
+
+        client = GopherClient(
+            timeout_seconds=1.0,
+            cache_enabled=False,
+            requests_per_minute=0,
+            respect_robots_txt=False,
+        )
+        await client.fetch("gopher://example.com/1/")
+        await client.close()
+
+        assert seen, "the transport was never reached"
+        # The 0.2s spent in DNS came out of the 1.0s budget, so the transport
+        # must be granted strictly less than the full deadline.
+        assert seen[0] < 1.0, f"transport got a fresh full timeout: {seen[0]}"
+        assert seen[0] == pytest.approx(0.8, abs=0.15)
+
+    @pytest.mark.asyncio
+    async def test_the_robots_probe_spends_from_the_same_budget(self, monkeypatch):
+        from gopher_mcp.gopher_client import GopherClient
+
+        seen: list[float] = []
+
+        async def slow_resolve(host, port):
+            await asyncio.sleep(0.15)
+            return ["93.184.216.34"]
+
+        async def record_timeout(host, port, selector, search, **kwargs):
+            seen.append(kwargs["timeout"])
+            return b".\r\n"
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", slow_resolve)
+        monkeypatch.setattr("gopher_mcp.gopher_client.fetch_gopher", record_timeout)
+
+        client = GopherClient(
+            timeout_seconds=1.0,
+            cache_enabled=False,
+            requests_per_minute=0,
+            respect_robots_txt=True,
+        )
+        await client.fetch("gopher://example.com/1/")
+        await client.close()
+
+        # Two transport phases: the robots probe, then the fetch it guards.
+        assert len(seen) == 2, seen
+        # Each is strictly smaller than the last -- one budget, drawn down.
+        assert seen[1] < seen[0] < 1.0, seen
+
+    @pytest.mark.asyncio
+    async def test_an_exhausted_budget_reports_as_a_timeout(self):
+        """The budget check raises through the robots probe's handler chain,
+        where the generic GopherProtocolError arm would have called a spent
+        deadline "the reply was not a valid Gopher response"."""
+        from gopher_mcp.gopher_client import (
+            _FETCH_BUDGET,
+            _BudgetExhausted,
+            _FetchBudget,
+            _spend_budget,
+        )
+        from gopher_mcp.gopher_transport import GopherProtocolError
+
+        token = _FETCH_BUDGET.set(_FetchBudget(0.0))
+        try:
+            with pytest.raises(_BudgetExhausted) as exc:
+                async with _spend_budget(30.0):
+                    pass  # pragma: no cover - the guard fires before the body
+        finally:
+            _FETCH_BUDGET.reset(token)
+
+        assert "timed out" in str(exc.value)
+        # Still a GopherProtocolError, so fetch() keeps mapping it to
+        # FETCH_ERROR rather than needing a new arm.
+        assert isinstance(exc.value, GopherProtocolError)

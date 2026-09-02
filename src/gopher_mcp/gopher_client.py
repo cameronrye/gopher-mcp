@@ -1,8 +1,12 @@
 """Gopher protocol client implementation."""
 
 import asyncio
+import contextlib
 import re
 import time
+from collections.abc import AsyncIterator
+from contextvars import ContextVar
+from dataclasses import dataclass
 
 import structlog
 
@@ -25,7 +29,7 @@ from .robots import (
     RobotsUnavailable,
     gopher_candidate_paths,
 )
-from .ssrf import SSRFError, validate_target
+from .ssrf import HostResolutionError, SSRFError, validate_target
 from .utils import (
     detect_binary_mime_type,
     gopher_type_category,
@@ -52,6 +56,65 @@ DEFAULT_MAX_MENU_ITEMS = 1000  # LLM-facing menu item cap; 0 = unlimited
 DEFAULT_REQUESTS_PER_MINUTE = 60.0  # one request per second, per host
 DEFAULT_MAX_CONCURRENT_REQUESTS = 5  # matches the batch tools' concurrency
 DEFAULT_ROBOTS_CACHE_TTL_SECONDS = 86400  # RFC 9309 s2.4 permits 24h
+DEFAULT_ROBOTS_FAILURE_BACKOFF_SECONDS = 60.0  # dead host: retry, not per request
+
+
+@dataclass
+class _FetchBudget:
+    """Network time still available to one :meth:`GopherClient.fetch` call.
+
+    ``timeout_seconds`` is documented -- in ``docs/configuration.md`` and in
+    ``config/example.env`` -- as the "overall deadline for one fetch, covering
+    DNS, connect, send and read". It was not: the DNS ``wait_for`` and the
+    transport fetch were each handed the full value, and with robots checking on
+    by default the probe spent two more full-length phases of its own, so one
+    call could occupy four multiples of the configured deadline against a tarpit
+    answering each phase just under the limit. This makes the documented
+    sentence true. Mirrors the Gemini client's budget of the same name.
+    """
+
+    remaining: float
+
+
+# Budget for the fetch currently running in this task. A ContextVar rather than
+# an argument because the robots probe is invoked through RobotsGate, which owns
+# its fetcher signature; each task copies the context, so concurrent fetches get
+# their own budget.
+_FETCH_BUDGET: ContextVar[_FetchBudget | None] = ContextVar(
+    "gopher_fetch_budget", default=None
+)
+
+
+class _BudgetExhausted(GopherProtocolError):
+    """The fetch deadline ran out before this phase could start.
+
+    Subclasses :class:`GopherProtocolError` so :meth:`GopherClient.fetch` keeps
+    mapping it to ``FETCH_ERROR`` -- a timeout is a fetch failure -- while the
+    robots probe, whose generic handler would otherwise call it "the reply was
+    not a valid Gopher response", can report it for what it is.
+    """
+
+
+@contextlib.asynccontextmanager
+async def _spend_budget(default_timeout: float) -> AsyncIterator[float]:
+    """Yield the timeout for one wire phase, then charge what it used.
+
+    Every phase that touches the network goes through here -- the robots
+    probe's DNS lookup and transport read, then the guarded fetch's own two --
+    so all four draw down one deadline instead of each being handed a full one.
+    """
+    budget = _FETCH_BUDGET.get()
+    if budget is None:
+        yield default_timeout
+        return
+    if budget.remaining <= 0:
+        raise _BudgetExhausted(f"The request timed out after {default_timeout} seconds")
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    try:
+        yield budget.remaining
+    finally:
+        budget.remaining -= loop.time() - started
 
 
 def _strip_gopher_text_terminator(text: str) -> str:
@@ -120,6 +183,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         respect_robots_txt: bool = True,
         robots_cache_ttl_seconds: int = DEFAULT_ROBOTS_CACHE_TTL_SECONDS,
         robots_honor_ai_tokens: bool = True,
+        robots_failure_backoff_seconds: float = DEFAULT_ROBOTS_FAILURE_BACKOFF_SECONDS,
     ) -> None:
         """Initialize the Gopher client.
 
@@ -139,6 +203,8 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             robots_cache_ttl_seconds: Lifetime of a cached robots policy.
             robots_honor_ai_tokens: Also honour rules naming AI crawler
                 tokens (ClaudeBot, GPTBot, ...).
+            robots_failure_backoff_seconds: How long a host whose /robots.txt
+                probe failed is left alone before being probed again
 
         """
         super().__init__(
@@ -156,6 +222,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             respect_robots_txt=respect_robots_txt,
             robots_cache_ttl_seconds=robots_cache_ttl_seconds,
             robots_honor_ai_tokens=robots_honor_ai_tokens,
+            robots_failure_backoff_seconds=robots_failure_backoff_seconds,
         )
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
@@ -216,6 +283,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             Structured response based on content type
 
         """
+        # ONE budget for the whole call, drawn down by every phase that touches
+        # the wire -- including the robots.txt probe, which runs before the
+        # fetch it guards and would otherwise be granted a full deadline of its
+        # own. Reset in the matching ``finally`` below.
+        budget_token = _FETCH_BUDGET.set(_FetchBudget(self.timeout_seconds))
         try:
             # Parse the URL
             parsed_url = parse_gopher_url(url)
@@ -241,7 +313,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 )
                 if not decision.allowed:
                     return self._robots_denied_result(
-                        url, parsed_url.host, decision.reason
+                        url, parsed_url.host, decision.reason, decision.detail
                     )
 
             # Canonical cache key (case-insensitive host) so requests differing
@@ -306,6 +378,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
 
             return response
 
+        except HostResolutionError as e:
+            # Must precede SSRFError (its base): a name that does not resolve
+            # was never refused by the SSRF policy, and reporting it as BLOCKED
+            # sends the reader hunting for an allowlist problem.
+            return self._error_result(url, "DNS_ERROR", str(e), e)
         except SSRFError as e:
             return self._error_result(url, "BLOCKED", str(e), e)
         except GopherProtocolError as e:
@@ -319,19 +396,47 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             return self._error_result(
                 url, "FETCH_ERROR", "Failed to fetch the requested resource", e
             )
+        finally:
+            _FETCH_BUDGET.reset(budget_token)
 
-    def _robots_denied_result(self, url: str, host: str, reason: str) -> ErrorResult:
-        """Build the result returned when the robots gate blocks a resource."""
-        logger.info("Blocked by robots.txt", url=url, host=host, reason=reason)
+    def _robots_denied_result(
+        self, url: str, host: str, reason: str, detail: str | None = None
+    ) -> ErrorResult:
+        """Build the result returned when the robots gate blocks a resource.
+
+        Gopher fails **open** (``_robots_fail_closed`` is False), so an
+        unretrievable policy allows the fetch and only "disallowed" can reach
+        here today -- ``ROBOTS_UNAVAILABLE`` is therefore a code this client
+        does not currently emit. The branch is written anyway rather than
+        assuming: a one-character change to that class attribute would otherwise
+        have this assert the host refused us when the host never answered, which
+        is precisely the confusion the Gemini side exists to avoid.
+        """
+        logger.info(
+            "Blocked by robots.txt"
+            if reason == "disallowed"
+            else "Robots probe failed",
+            url=url,
+            host=host,
+            reason=reason,
+            detail=detail,
+        )
+        if reason == "unavailable":
+            cause = f" because {detail}" if detail else ""
+            message = (
+                f"Could not fetch robots.txt from {host}{cause}, so this request "
+                f"was refused rather than sent. The host did not disallow this "
+                f"resource -- its policy could not be read. Retry shortly."
+            )
+        else:
+            message = (
+                f"{host} disallows this resource in its robots.txt. "
+                f"Set GOPHER_RESPECT_ROBOTS_TXT=false to disable robots "
+                f"checking."
+            )
+        code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return ErrorResult(
-            error={
-                "code": "BLOCKED_BY_ROBOTS",
-                "message": (
-                    f"{host} disallows this resource in its robots.txt. "
-                    f"Set GOPHER_RESPECT_ROBOTS_TXT=false to disable robots "
-                    f"checking."
-                ),
-            },
+            error={"code": code, "message": message},
             requestInfo={"url": url, "timestamp": time.time()},
         )
 
@@ -359,34 +464,43 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         """
         cap = min(ROBOTS_MAX_BYTES, self.max_response_size)
         try:
-            connect_addresses = await asyncio.wait_for(
-                validate_target(
+            async with _spend_budget(self.timeout_seconds) as timeout:
+                connect_addresses = await asyncio.wait_for(
+                    validate_target(
+                        host,
+                        port,
+                        allow_local=self.allow_local_hosts,
+                        allowed_ports=self.allowed_ports,
+                    ),
+                    timeout=timeout,
+                )
+            # Outside the budget: waiting for a rate-limit slot is not wire time
+            # and must not eat the deadline configured for the exchange itself.
+            await self._rate_limiter.acquire(host)
+            async with _spend_budget(self.timeout_seconds) as timeout:
+                raw = await fetch_gopher(
                     host,
                     port,
-                    allow_local=self.allow_local_hosts,
-                    allowed_ports=self.allowed_ports,
-                ),
-                timeout=self.timeout_seconds,
-            )
-            await self._rate_limiter.acquire(host)
-            raw = await fetch_gopher(
-                host,
-                port,
-                "/robots.txt",
-                None,
-                max_bytes=cap,
-                timeout=self.timeout_seconds,
-                connect_addresses=connect_addresses,
-                truncate_at_max=True,
-            )
-        except (
-            SSRFError,
-            GopherProtocolError,
-            OSError,
-            TimeoutError,
-            ValueError,
-        ) as e:
-            raise RobotsUnavailable(f"could not reach {host}:{port}") from e
+                    "/robots.txt",
+                    None,
+                    max_bytes=cap,
+                    timeout=timeout,
+                    connect_addresses=connect_addresses,
+                    truncate_at_max=True,
+                )
+        except (TimeoutError, _BudgetExhausted) as e:
+            # _BudgetExhausted must precede the GopherProtocolError arm below
+            # (it is a subclass): a deadline that ran out is a timeout, not a
+            # malformed reply.
+            raise RobotsUnavailable("the connection timed out") from e
+        except HostResolutionError as e:
+            raise RobotsUnavailable("the host could not be resolved") from e
+        except SSRFError as e:
+            raise RobotsUnavailable("the SSRF guard refused the target") from e
+        except GopherProtocolError as e:
+            raise RobotsUnavailable("the reply was not a valid Gopher response") from e
+        except (OSError, ValueError) as e:
+            raise RobotsUnavailable("the connection failed") from e
         if len(raw) >= cap:
             # Drop the trailing line: it was cut mid-way, and half a Disallow
             # must not be applied as if it were a whole one.
@@ -453,15 +567,16 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # confined to ssrf.py's own bounded DNS pool, so a stalled resolver can
         # never occupy the event loop's default executor.
         try:
-            connect_addresses = await asyncio.wait_for(
-                validate_target(
-                    parsed_url.host,
-                    parsed_url.port,
-                    allow_local=self.allow_local_hosts,
-                    allowed_ports=self.allowed_ports,
-                ),
-                timeout=self.timeout_seconds,
-            )
+            async with _spend_budget(self.timeout_seconds) as timeout:
+                connect_addresses = await asyncio.wait_for(
+                    validate_target(
+                        parsed_url.host,
+                        parsed_url.port,
+                        allow_local=self.allow_local_hosts,
+                        allowed_ports=self.allowed_ports,
+                    ),
+                    timeout=timeout,
+                )
         except TimeoutError as e:
             raise GopherProtocolError(
                 f"Timed out resolving host '{parsed_url.host}'"
@@ -471,15 +586,16 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # servers; never forward a stray search to a plain selector.
         search = parsed_url.search if gopher_type == "7" else None
 
-        raw = await fetch_gopher(
-            parsed_url.host,
-            parsed_url.port,
-            parsed_url.selector,
-            search,
-            max_bytes=self.max_response_size,
-            timeout=self.timeout_seconds,
-            connect_addresses=connect_addresses,
-        )
+        async with _spend_budget(self.timeout_seconds) as transport_timeout:
+            raw = await fetch_gopher(
+                parsed_url.host,
+                parsed_url.port,
+                parsed_url.selector,
+                search,
+                max_bytes=self.max_response_size,
+                timeout=transport_timeout,
+                connect_addresses=connect_addresses,
+            )
 
         if category == "menu":
             # Menu/directory or search results (which are menus)

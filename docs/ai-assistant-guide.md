@@ -370,6 +370,33 @@ if result["kind"] == "gemtext":
 4. **Content too large**: Response exceeds size limits
 5. **Host restrictions**: Server not in allowlist
 
+### Robot exclusion (`BLOCKED_BY_ROBOTS` vs `ROBOTS_UNAVAILABLE`)
+
+Two codes come from the robots gate, and **retrying is right for exactly one of
+them**. Do not treat them alike because both mention robots.
+
+- **`BLOCKED_BY_ROBOTS`** — the host published a `robots.txt` and it forbids this
+  path. This is the operator's decision about automated clients, and it will
+  never change on a retry. Do not retry, do not try to route around it with a
+  different spelling of the same path, and do not suggest disabling robots
+  checking unless the user has said they operate the host. Tell the user the
+  resource is excluded and stop.
+- **`ROBOTS_UNAVAILABLE`** — the policy could not be *read*, so the fetch failed
+  closed (RFC 9309 §2.3.1.4 treats that as a complete disallow). Nothing
+  disallowed you: the host did not answer. This is transient. The message names
+  the real cause — a timeout, a refused or unreachable connection, a TLS
+  handshake failure, or a status such as `41 SERVER UNAVAILABLE` — and that
+  cause is what to report and act on.
+
+For `ROBOTS_UNAVAILABLE`, one retry after a short wait is reasonable; if it
+persists, report the named cause as the problem ("the capsule appears to be
+down"), not the robots policy. Do not recommend
+`GEMINI_RESPECT_ROBOTS_TXT=false` as a fix — an unreachable capsule stays
+unreachable with robots checking off, so it trades a clear error for a murkier
+one and leaves a safety control disabled. Note also that after a failed probe
+the host is left alone briefly (`*_ROBOTS_FAILURE_BACKOFF_SECONDS`), so an
+immediate retry may return the same answer without contacting it.
+
 ### Error Recovery
 
 ```python

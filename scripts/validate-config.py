@@ -96,6 +96,12 @@ def _protocol_specs(prefix: str, default_port_example: str) -> list[Spec]:
         Spec(f"{prefix}RESPECT_ROBOTS_TXT", "bool"),
         Spec(f"{prefix}ROBOTS_CACHE_TTL_SECONDS", "int", minimum=0, maximum=604800),
         Spec(f"{prefix}ROBOTS_HONOR_AI_TOKENS", "bool"),
+        Spec(
+            f"{prefix}ROBOTS_FAILURE_BACKOFF_SECONDS",
+            "float",
+            minimum=0,
+            maximum=3600,
+        ),
     ]
 
 

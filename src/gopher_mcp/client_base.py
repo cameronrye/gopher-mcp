@@ -69,6 +69,7 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
         respect_robots_txt: bool,
         robots_cache_ttl_seconds: int,
         robots_honor_ai_tokens: bool,
+        robots_failure_backoff_seconds: float,
     ) -> None:
         """Initialize the settings every protocol client shares.
 
@@ -90,6 +91,9 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
             robots_cache_ttl_seconds: Lifetime of a cached robots policy.
             robots_honor_ai_tokens: Also honour rules naming AI crawler
                 tokens (ClaudeBot, GPTBot, ...).
+            robots_failure_backoff_seconds: How long a host whose
+                /robots.txt probe failed is left alone before being probed
+                again; 0 retries on the very next request.
 
         """
         self.max_response_size = max_response_size
@@ -141,6 +145,7 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
                 extra_tokens=(AI_AGENT_TOKENS if robots_honor_ai_tokens else ()),
                 ttl_seconds=robots_cache_ttl_seconds,
                 fail_closed=self._robots_fail_closed,
+                failure_backoff_seconds=robots_failure_backoff_seconds,
             )
             if respect_robots_txt
             else None

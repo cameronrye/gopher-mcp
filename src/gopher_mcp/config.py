@@ -203,6 +203,17 @@ class _ProtocolConfig(BaseSettings):
         ge=0,
         le=604800,  # at most one week
     )
+    robots_failure_backoff_seconds: float = Field(
+        default=60.0,  # still a retry, but no longer a per-request cost
+        description="How long a host whose robots.txt probe failed is left "
+        "alone before being probed again, in seconds. A failed probe is never "
+        "cached for the full policy TTL -- a transient outage should be "
+        "retried -- but without a backoff every request to an unreachable host "
+        "pays a fresh connect timeout, including requests the response cache "
+        "could otherwise have served. 0 restores the immediate retry.",
+        ge=0,
+        le=3600,  # an hour; past this it is caching the outage, not retrying
+    )
 
     model_config = SettingsConfigDict(
         # env_prefix is supplied per protocol; the rest is shared.

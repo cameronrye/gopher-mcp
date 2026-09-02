@@ -164,7 +164,7 @@ This document provides a comprehensive reference for all Gemini protocol configu
 
 - **Type**: Boolean
 - **Default**: `true`
-- **Description**: Fetch and honour `/robots.txt` from the capsule root before retrieving a resource, following the [Gemini companion specification](https://geminiprotocol.net/docs/companion/robots.gmi) (virtual agents `webproxy` and `indexer`, plus `*`, alongside `gopher-mcp`). On by default; the policy is cached per host, but note the probe spends from the same `GEMINI_TIMEOUT_SECONDS` budget as the fetch it guards. **Fails closed** on a temporary (4x) robots fetch failure; `51 NOT FOUND` means "no policy". A policy larger than the 500 KB read cap is truncated at the last complete line and parsed (RFC 9309 section 2.5) rather than treated as unavailable. A target the SSRF guard refuses is reported as `BLOCKED`, not as an unreachable robots.txt — disabling robots checking would not make it reachable.
+- **Description**: Fetch and honour `/robots.txt` from the capsule root before retrieving a resource, following the [Gemini companion specification](https://geminiprotocol.net/docs/companion/robots.gmi) (virtual agents `webproxy` and `indexer`, plus `*`, alongside `gopher-mcp`). On by default; the policy is cached per host, but note the probe spends from the same `GEMINI_TIMEOUT_SECONDS` budget as the fetch it guards. **Fails closed** whenever the policy cannot be retrieved. That is a temporary (4x) status — reported by name, e.g. `41 SERVER UNAVAILABLE` — but also a connection failure, TLS failure, timeout or malformed reply, so a capsule that is simply *down* is refused with `ROBOTS_UNAVAILABLE` (distinct from `BLOCKED_BY_ROBOTS`, which means the capsule actually disallowed the path) rather than a transport error. The message names the cause and says so; disabling robots checking will not make such a capsule reachable. `51 NOT FOUND` means "no policy". A policy larger than the 500 KB read cap is truncated at the last complete line and parsed (RFC 9309 section 2.5) rather than treated as unavailable. A target the SSRF guard refuses is reported as `BLOCKED`, not as an unreachable robots.txt — disabling robots checking would not make it reachable.
 - **Example**: `GEMINI_RESPECT_ROBOTS_TXT=false`
 
 #### `GEMINI_ROBOTS_CACHE_TTL_SECONDS`
@@ -181,6 +181,14 @@ This document provides a comprehensive reference for all Gemini protocol configu
 - **Default**: `true`
 - **Description**: Also honour `Disallow` rules aimed at named AI crawler tokens (`ClaudeBot`, `GPTBot`, `CCBot`, ...). Not part of the companion specification, but a capsule naming them meant "no LLM tooling". Only applies when `GEMINI_RESPECT_ROBOTS_TXT` is enabled.
 - **Example**: `GEMINI_ROBOTS_HONOR_AI_TOKENS=false`
+
+#### `GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS`
+
+- **Type**: Float (seconds)
+- **Default**: `60`
+- **Range**: `0` - `3600` (one hour)
+- **Description**: How long a capsule whose `/robots.txt` probe failed is left alone before being probed again. A failed probe is deliberately never cached for the full `GEMINI_ROBOTS_CACHE_TTL_SECONDS` — a transient outage should be retried — but with no backoff at all, every request to an unreachable capsule pays a fresh connect timeout, including requests the response cache could otherwise have served (the gate runs ahead of that lookup). Because Gemini fails **closed**, that also means every such request is refused with `ROBOTS_UNAVAILABLE` until the capsule answers again. Raise it if you fetch from capsules that are often down; set `0` to retry on the very next request.
+- **Example**: `GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS=300`
 
 !!! note "TLS version and hostname verification are not configurable"
     The minimum TLS version is fixed in code at **TLS 1.2** (TLS 1.2 and 1.3 are supported); there is no environment variable to change it. Server certificates are trusted via TOFU rather than CA-chain/hostname verification, so there is no hostname-verification toggle either. Client certificates are generated and managed automatically (see `GEMINI_CLIENT_CERTS_ENABLED` / `GEMINI_CLIENT_CERTS_STORAGE_PATH`) — you do not point the server at a manual cert/key file.

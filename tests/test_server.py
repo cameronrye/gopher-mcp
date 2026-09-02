@@ -79,6 +79,34 @@ class TestGetGopherClient:
             assert client.max_search_length == 512
 
     @pytest.mark.asyncio
+    async def test_robots_settings_reach_both_clients(self):
+        """The env -> config -> client -> gate seam for the robots knobs.
+
+        Nothing else asserts this wiring, so a kwarg dropped in server.py would
+        leave the gate silently on its defaults with the whole suite green.
+        """
+        clear_client_manager()
+
+        env_vars = {
+            "GOPHER_ROBOTS_FAILURE_BACKOFF_SECONDS": "7.5",
+            "GOPHER_ROBOTS_CACHE_TTL_SECONDS": "1200",
+            "GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS": "12.5",
+            "GEMINI_ROBOTS_CACHE_TTL_SECONDS": "2400",
+        }
+
+        with patch.dict(os.environ, env_vars, clear=True):
+            manager = await get_client_manager()
+            gopher = await manager.get_gopher_client()
+            gemini = await manager.get_gemini_client()
+
+            assert gopher._robots_gate is not None
+            assert gopher._robots_gate._failure_backoff_seconds == 7.5
+            assert gopher._robots_gate._ttl_seconds == 1200
+            assert gemini._robots_gate is not None
+            assert gemini._robots_gate._failure_backoff_seconds == 12.5
+            assert gemini._robots_gate._ttl_seconds == 2400
+
+    @pytest.mark.asyncio
     async def test_get_gopher_client_singleton(self):
         """Test that get_gopher_client returns the same instance."""
         clear_client_manager()

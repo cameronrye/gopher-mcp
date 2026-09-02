@@ -96,3 +96,80 @@ class TestResolveGeminiReference:
             resolve_gemini_reference("https://example.org/a/", "b")
             == "https://example.org/a/b"
         )
+
+
+class TestTruncationDoesNotFabricate:
+    """A cut must never turn half a record into a whole one."""
+
+    def test_gemtext_truncated_mid_link_does_not_invent_a_url(self):
+        """A cut inside a "=> url text" line parsed as a COMPLETE link whose
+        target was the surviving prefix, so the caller was handed a URL the
+        server never sent and could not tell it from a real one."""
+        from gopher_mcp.gemini_parse import _process_success_response
+
+        text = "intro\n=> gemini://example.com/very/long/real/target.gmi A link\n"
+        cap = len("intro\n") + len("=> gemini://example.com/very/lo")
+
+        result = _process_success_response(
+            "text/gemini; charset=utf-8",
+            text.encode(),
+            {"url": "gemini://example.com/"},
+            max_rendered_chars=cap,
+        )
+
+        assert result.truncated is True
+        urls = [
+            line.link.url for line in result.document.lines if line.link is not None
+        ]
+        assert urls == [], f"a partial link was presented as whole: {urls}"
+        assert "very/lo" not in result.raw_content
+
+    def test_a_complete_link_before_the_cut_survives(self):
+        """The rule drops the partial tail, not everything."""
+        from gopher_mcp.gemini_parse import _process_success_response
+
+        text = "=> /a First\n=> /b Second\n"
+        result = _process_success_response(
+            "text/gemini; charset=utf-8",
+            text.encode(),
+            {"url": "gemini://example.com/"},
+            max_rendered_chars=len("=> /a First\n") + 5,
+        )
+        urls = [
+            line.link.url for line in result.document.lines if line.link is not None
+        ]
+        assert urls == ["gemini://example.com/a"]
+
+
+class TestQueryIsNotReflectedIntoLinks:
+    """A Gemini query may be a SENSITIVE_INPUT secret."""
+
+    def test_an_empty_reference_does_not_inherit_the_secret(self):
+        """RFC 3986 s5.3 has an empty reference inherit the base query, so a
+        capsule serving "=> " on a page fetched with a password in the query got
+        that password handed back in a link URL."""
+        from gopher_mcp.helpers import resolve_gemini_reference
+
+        base = "gemini://example.com/login?hunter2secret"
+        assert "hunter2secret" not in resolve_gemini_reference(base, "")
+        assert "hunter2secret" not in resolve_gemini_reference(base, "#anchor")
+
+    def test_a_reference_with_its_own_query_is_unaffected(self):
+        """ "?x" replaces rather than inherits, so it was never a leak and must
+        keep working."""
+        from gopher_mcp.helpers import resolve_gemini_reference
+
+        base = "gemini://example.com/login?hunter2secret"
+        assert (
+            resolve_gemini_reference(base, "?fresh")
+            == "gemini://example.com/login?fresh"
+        )
+
+    def test_ordinary_relative_resolution_is_unchanged(self):
+        from gopher_mcp.helpers import resolve_gemini_reference
+
+        base = "gemini://example.com/dir/page?secret"
+        assert resolve_gemini_reference(base, "/a") == "gemini://example.com/a"
+        assert (
+            resolve_gemini_reference(base, "b.gmi") == "gemini://example.com/dir/b.gmi"
+        )

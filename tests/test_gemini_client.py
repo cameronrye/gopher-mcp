@@ -1431,7 +1431,9 @@ class TestGeminiRobotsGate:
         result = await client.fetch("gemini://example.org/page")
 
         assert isinstance(result, GeminiErrorResult)
-        assert result.error["code"] == "BLOCKED_BY_ROBOTS"
+        # Fails closed, but as ROBOTS_UNAVAILABLE: the capsule never answered,
+        # so it cannot have disallowed anything.
+        assert result.error["code"] == "ROBOTS_UNAVAILABLE"
 
     @pytest.mark.asyncio
     async def test_oversize_robots_is_truncated_and_parsed_not_denied(self):

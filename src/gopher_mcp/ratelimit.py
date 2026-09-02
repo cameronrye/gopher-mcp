@@ -30,6 +30,24 @@ logger = structlog.get_logger(__name__)
 MAX_PENALTY_SECONDS = 300.0
 
 
+def sanitize_penalty_seconds(seconds: float) -> float:
+    """Clamp a server-named backoff into the bounded window.
+
+    Shared by the rate limiter and the robots gate: both take their period from
+    a status-44 meta, so both need the same guard against ``inf``, NaN and an
+    arbitrarily large number of seconds. Returns 0.0 for a value that is not a
+    meaningful backoff, which every caller treats as "no penalty".
+    """
+    seconds = float(seconds)
+    if not math.isfinite(seconds) and seconds == float("inf"):
+        # An explicit "wait forever" is treated as the maximum bounded wait.
+        return MAX_PENALTY_SECONDS
+    if not math.isfinite(seconds):
+        # NaN (or -inf): not a meaningful backoff.
+        return 0.0
+    return min(max(seconds, 0.0), MAX_PENALTY_SECONDS)
+
+
 class RateLimiter:
     """Throttle outbound requests to at most one per ``min_interval`` per host.
 
@@ -106,15 +124,7 @@ class RateLimiter:
         is rejected and anything over ``MAX_PENALTY_SECONDS`` is clamped, so a
         malicious server cannot pin the host (and a held semaphore slot) forever.
         """
-        seconds = float(seconds)
-        if not math.isfinite(seconds) and seconds == float("inf"):
-            # An explicit "wait forever" is treated as the maximum bounded wait.
-            seconds = MAX_PENALTY_SECONDS
-        elif not math.isfinite(seconds):
-            # NaN (or -inf): not a meaningful backoff -- ignore rather than
-            # writing a value that would wedge the reservation.
-            return
-        seconds = min(max(seconds, 0.0), MAX_PENALTY_SECONDS)
+        seconds = sanitize_penalty_seconds(seconds)
         if seconds <= 0.0:
             return
 

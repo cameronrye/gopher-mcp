@@ -33,6 +33,19 @@ class SSRFError(ValueError):
     """Raised when a target host/address is blocked by the SSRF policy."""
 
 
+class HostResolutionError(SSRFError):
+    """The host could not be resolved at all.
+
+    A *subclass* of :class:`SSRFError` so every existing ``except SSRFError``
+    keeps catching it and the fail-closed behaviour is unchanged -- but callers
+    that report an error code can catch this first and say what actually
+    happened. A name that does not resolve was never *refused* by the SSRF
+    policy: nothing was evaluated, because there was no address to evaluate.
+    Reporting a typo'd hostname as a security block sends the reader looking for
+    an allowlist problem that does not exist.
+    """
+
+
 # Deprecated IPv6 site-local prefix. CPython reports ``fec0::/10`` as
 # ``is_global=True`` (it predates the modern special-registry rules), so the
 # generic ``not is_global`` catch-all below would miss it -- block it explicitly.
@@ -256,8 +269,9 @@ async def validate_target(
         The validated IP address strings to connect to, in resolution order.
 
     Raises:
-        SSRFError: If the host cannot be resolved, its port is not permitted,
-            or (unless ``allow_local``) it resolves to an internal address.
+        HostResolutionError: If the host cannot be resolved.
+        SSRFError: If the port is not permitted, or (unless ``allow_local``) the
+            host resolves to an internal address.
 
     Note:
         There is deliberately no host allowlist here. The clients apply theirs
@@ -298,10 +312,10 @@ async def validate_target(
     try:
         addresses = await resolve_host(norm, port)
     except OSError as e:  # socket.gaierror is a subclass of OSError
-        raise SSRFError(f"Could not resolve host: {host}") from e
+        raise HostResolutionError(f"Could not resolve host: {host}") from e
 
     if not addresses:
-        raise SSRFError(f"Could not resolve host: {host}")
+        raise HostResolutionError(f"Could not resolve host: {host}")
 
     if not allow_local:
         for addr in addresses:

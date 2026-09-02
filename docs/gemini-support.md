@@ -223,7 +223,9 @@ Gopher failure has no use for. The machine-readable `code` is always present;
 | `CERTIFICATE_UNVERIFIED` | No fingerprint was available to compare against, so the peer could not be authenticated |
 | `CERTIFICATE_STORE_UNAVAILABLE` | The TOFU trust store was locked by another process, so the certificate could not be recorded. The certificate itself was never in question — retry once the other process releases the store |
 | `BLOCKED` | The SSRF guard refused the target (loopback, private range, or a disallowed port) |
-| `BLOCKED_BY_ROBOTS` | `GEMINI_RESPECT_ROBOTS_TXT` is on and the capsule disallows this resource, or its policy could not be retrieved |
+| `DNS_ERROR` | The hostname could not be resolved — a typo, a dead name, or a resolver problem. Distinct from `BLOCKED`: nothing was refused |
+| `BLOCKED_BY_ROBOTS` | `GEMINI_RESPECT_ROBOTS_TXT` is on and the capsule disallows this resource |
+| `ROBOTS_UNAVAILABLE` | The capsule's policy could not be retrieved, so the gate failed closed (RFC 9309 §2.3.1.4). Transient — the capsule did not answer, it did not refuse. The message names the cause |
 | `FETCH_ERROR` | The request timed out, or an unexpected internal failure occurred |
 
 ## Security
@@ -351,6 +353,7 @@ meaning; in single-field values such as a `META` they are dropped as noise.
 | `GEMINI_RESPECT_ROBOTS_TXT` | Honour `/robots.txt` from the capsule root; an over-cap policy is truncated and parsed | `true` | `false` |
 | `GEMINI_ROBOTS_CACHE_TTL_SECONDS` | Lifetime of a cached robots policy, in seconds | `86400` | `3600` |
 | `GEMINI_ROBOTS_HONOR_AI_TOKENS` | Also honour rules naming AI crawler tokens | `true` | `false` |
+| `GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS` | How long a capsule whose robots.txt probe failed is left alone before being re-probed | `60` | `300` |
 
 ### Advanced Configuration
 

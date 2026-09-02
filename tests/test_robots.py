@@ -19,6 +19,7 @@ from gopher_mcp.models import (
     GeminiSuccessResult,
     TextResult,
 )
+from gopher_mcp.ratelimit import MAX_PENALTY_SECONDS
 from gopher_mcp.robots import (
     AI_AGENT_TOKENS,
     GEMINI_TOKENS,
@@ -301,8 +302,153 @@ class TestRobotsUnavailableBackoff:
         assert len(calls) == 2, "the backoff must expire, not pin the failure"
 
     async def test_backoff_is_far_shorter_than_the_policy_ttl(self):
-        """The point is a retry, not a 24h cache of a transient outage."""
+        """The point is a retry, not a 24h cache of a transient outage.
+
+        This guards the *default*; the value is configurable per deployment
+        (``*_ROBOTS_FAILURE_BACKOFF_SECONDS``), and the config layer caps it at
+        an hour for the same reason.
+        """
         assert 0 < RobotsGate.FAILURE_BACKOFF_SECONDS <= 300
+
+    async def test_a_configured_backoff_replaces_the_default(self):
+        """Which side of the retry/cost trade to take is deployment-specific."""
+        calls = []
+        now = [1000.0]
+
+        async def fetcher(host, port):
+            calls.append(1)
+            raise RobotsUnavailable("connect timeout")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=False,
+            failure_backoff_seconds=600.0,
+            clock=lambda: now[0],
+        )
+
+        await gate.allows("dead.example", 70, ["/x"])
+        # Past the default backoff, but well inside the configured one.
+        now[0] += RobotsGate.FAILURE_BACKOFF_SECONDS + 1
+        await gate.allows("dead.example", 70, ["/x"])
+        assert len(calls) == 1, "the configured backoff was not honoured"
+        now[0] += 600.0
+        await gate.allows("dead.example", 70, ["/x"])
+        assert len(calls) == 2
+
+    async def test_the_cause_reaches_the_decision(self):
+        """A refusal has to be able to say what actually went wrong."""
+
+        async def fetcher(host, port):
+            raise RobotsUnavailable("the connection timed out")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=True,
+            clock=lambda: 1000.0,
+        )
+
+        decision = await gate.allows("dead.example", 1965, ["/x"])
+        assert decision.allowed is False
+        assert decision.reason == "unavailable"
+        assert decision.detail == "the connection timed out"
+
+    async def test_the_cause_survives_the_backoff_window(self):
+        """A request answered from the backoff never touched the network, so
+        the cause it reports is the recorded one -- not silence."""
+        calls = []
+        now = [1000.0]
+
+        async def fetcher(host, port):
+            calls.append(1)
+            raise RobotsUnavailable("the TLS connection failed")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=True,
+            clock=lambda: now[0],
+        )
+
+        await gate.allows("dead.example", 1965, ["/x"])
+        now[0] += 1  # well inside the backoff
+        second = await gate.allows("dead.example", 1965, ["/x"])
+        assert len(calls) == 1, "the backoff should have suppressed the re-probe"
+        assert second.detail == "the TLS connection failed"
+
+    async def test_a_recovered_host_forgets_the_cause(self):
+        state = {"fail": True}
+        now = [1000.0]
+
+        async def fetcher(host, port):
+            if state["fail"]:
+                raise RobotsUnavailable("the connection timed out")
+            return "User-agent: *\nDisallow:\n"
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=True,
+            clock=lambda: now[0],
+        )
+
+        await gate.allows("flaky.example", 1965, ["/x"])
+        state["fail"] = False
+        now[0] += RobotsGate.FAILURE_BACKOFF_SECONDS + 1
+        assert (await gate.allows("flaky.example", 1965, ["/x"])).allowed is True
+        assert gate._failure_detail == {}
+
+    async def test_a_server_named_retry_period_overrides_the_backoff(self):
+        """A status-44 SLOW_DOWN says when to come back; stacking the generic
+        backoff on top keeps refusing after the server is ready again."""
+        calls = []
+        now = [1000.0]
+
+        async def fetcher(host, port):
+            calls.append(1)
+            raise RobotsUnavailable(
+                "the capsule answered 44 SLOW_DOWN", retry_after=5.0
+            )
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=True,
+            failure_backoff_seconds=60.0,
+            clock=lambda: now[0],
+        )
+
+        await gate.allows("busy.example", 1965, ["/x"])
+        now[0] += 6.0  # past the server's 5s, far short of the 60s backoff
+        await gate.allows("busy.example", 1965, ["/x"])
+        assert len(calls) == 2, "the server's own retry period was not honoured"
+
+    async def test_a_zero_backoff_restores_the_immediate_retry(self):
+        """0 is the pre-0.7.0 behaviour, and must stay reachable."""
+        calls = []
+
+        async def fetcher(host, port):
+            calls.append(1)
+            raise RobotsUnavailable("connect timeout")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=False,
+            failure_backoff_seconds=0.0,
+            clock=lambda: 1000.0,
+        )
+
+        await gate.allows("dead.example", 70, ["/x"])
+        await gate.allows("dead.example", 70, ["/x"])
+        assert len(calls) == 2
 
     async def test_a_recovered_host_is_cached_normally(self):
         state = {"fail": True}
@@ -512,6 +658,22 @@ class TestGopherClientIntegration:
         assert client._robots_gate is not None
         await client.close()
 
+    async def test_failure_backoff_reaches_the_gate(self):
+        """Nothing else in the suite covers this wiring; a dropped kwarg here
+        would silently leave the default in place."""
+        client = GopherClient(robots_failure_backoff_seconds=5.0)
+        assert client._robots_gate is not None
+        assert client._robots_gate._failure_backoff_seconds == 5.0
+        await client.close()
+
+        default = GopherClient()
+        assert default._robots_gate is not None
+        assert (
+            default._robots_gate._failure_backoff_seconds
+            == RobotsGate.FAILURE_BACKOFF_SECONDS
+        )
+        await default.close()
+
     async def test_no_robots_fetch_when_disabled(self):
         client = GopherClient(
             cache_enabled=False, requests_per_minute=0, respect_robots_txt=False
@@ -699,7 +861,12 @@ class TestGeminiClientIntegration:
         await client.close()
 
     async def test_status_4x_fails_closed(self):
-        """A temporary failure is RFC 9309 s2.3.1.4's complete disallow."""
+        """A temporary failure is RFC 9309 s2.3.1.4's complete disallow.
+
+        It denies, but under its own code: the capsule was never asked whether
+        it disallows this path, so BLOCKED_BY_ROBOTS would claim a rule the
+        operator never wrote.
+        """
         client = GeminiClient(
             cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
         )
@@ -710,7 +877,7 @@ class TestGeminiClientIntegration:
         )
         result = await client.fetch("gemini://example.com/page")
         assert isinstance(result, GeminiErrorResult)
-        assert result.error["code"] == "BLOCKED_BY_ROBOTS"
+        assert result.error["code"] == "ROBOTS_UNAVAILABLE"
         await client.close()
 
     async def test_robots_request_is_size_capped(self):
@@ -841,6 +1008,43 @@ class TestGateMemoryIsBounded:
 
         assert len(gate._cache) <= 120
         assert len(gate._locks) <= gate._sweep_threshold + 1
+
+    async def test_failure_details_are_swept_with_their_backoffs(self):
+        """The per-host failure cause is a third unbounded map alongside the
+        policy cache and the retry deadlines, and an open-world fetcher can
+        fail against unboundedly many hosts. It must not outlive the backoff
+        window it explains."""
+        clock = _FakeClock()
+
+        async def fetcher(host, port):
+            raise RobotsUnavailable("the connection timed out")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=10,
+            fail_closed=False,
+            failure_backoff_seconds=5.0,
+            clock=clock,
+        )
+        gate._sweep_threshold = 50
+
+        for i in range(60):
+            await gate.allows(f"dead{i}.example", 70, ["/ok"])
+        assert len(gate._failure_detail) == 60
+        clock.t += 1000  # every backoff has now expired
+
+        for i in range(60, 120):
+            await gate.allows(f"dead{i}.example", 70, ["/ok"])
+
+        # The expired generation is gone; only the live one remains. (The sweep
+        # drops expired entries, not live ones, so the bound on this map is the
+        # bound on concurrent in-backoff hosts -- exactly as for _retry_after.)
+        assert not any(k.startswith("dead0.") for k in gate._failure_detail)
+        assert "dead59.example:70" not in gate._failure_detail
+        assert "dead119.example:70" in gate._failure_detail
+        # It must never outlive, or exceed, the deadline map it explains.
+        assert set(gate._failure_detail) == set(gate._retry_after)
 
     async def test_sweep_never_drops_a_lock_with_waiters(self):
         """A lock released this tick still has coroutines queued on it.
@@ -1126,5 +1330,326 @@ class TestReviewRegressions:
         )
         result = await client.fetch("gemini://example.com/page")
         assert isinstance(result, GeminiErrorResult)
-        assert "Could not retrieve robots.txt" in result.error["message"]
+        message = result.error["message"]
+        assert "Could not fetch robots.txt" in message
+        # The cause, not just the consequence: 41 means the capsule is down,
+        # and a reader must not have to infer that from a bare refusal.
+        assert "41 SERVER UNAVAILABLE" in message
+        # The disallowed remedy is wrong here and must not be offered: turning
+        # robots checking off does not make an unreachable capsule reachable.
+        assert "GEMINI_RESPECT_ROBOTS_TXT=false" not in message
+        assert "disallows this resource" not in message
+        await client.close()
+
+    async def test_each_temporary_status_is_named(self):
+        """40-44 mean different things; a bare number invites the reader to
+        conclude the refusal was a policy decision."""
+        for status, phrase in (
+            (40, "40 TEMPORARY FAILURE"),
+            (41, "41 SERVER UNAVAILABLE"),
+            (42, "42 CGI ERROR"),
+            (43, "43 PROXY ERROR"),
+            (44, "44 SLOW_DOWN"),
+        ):
+            client = GeminiClient(
+                cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+            )
+            client._fetch_content = _fake_gemini_content(
+                robots=GeminiErrorResult(
+                    error={"code": "TEMPORARY_ERROR", "message": "1", "status": status}
+                )
+            )
+            result = await client.fetch("gemini://example.com/page")
+            assert isinstance(result, GeminiErrorResult)
+            assert phrase in result.error["message"], status
+            await client.close()
+
+    async def test_a_transport_failure_names_its_kind(self):
+        """A timed-out connection and a broken capsule are different problems
+        and must not arrive as the same sentence."""
+        for exc, phrase in (
+            (TimeoutError("slow"), "the connection timed out"),
+            (OSError("refused"), "the connection failed"),
+        ):
+            client = GeminiClient(
+                cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+            )
+
+            async def content(url, *a, _exc=exc, **kw):
+                if url.path == "/robots.txt":
+                    raise _exc
+                raise AssertionError("the gate should have refused first")
+
+            client._fetch_content = content
+            result = await client.fetch("gemini://example.com/page")
+            assert isinstance(result, GeminiErrorResult)
+            assert phrase in result.error["message"], phrase
+            await client.close()
+
+    async def test_a_slow_down_does_not_also_arm_the_generic_backoff(self):
+        """Being rate limited already costs a rate-limiter penalty; adding the
+        robots backoff on top refuses requests the capsule would have served."""
+        client = GeminiClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+        client._fetch_content = _fake_gemini_content(
+            robots=GeminiErrorResult(
+                error={"code": "TEMPORARY_ERROR", "message": "5", "status": 44}
+            )
+        )
+        await client.fetch("gemini://example.com/page")
+        gate = client._robots_gate
+        assert gate is not None
+        # 5 seconds from the SLOW_DOWN, not the 60-second default backoff.
+        deadline = gate._retry_after["example.com:1965"]
+        assert deadline - gate._clock() <= 5.0
+        await client.close()
+
+    async def test_a_hostile_slow_down_cannot_pin_the_gate(self):
+        """The 44 meta is attacker-controlled and now feeds the robots backoff,
+        so an unclamped value would let a capsule refuse itself forever."""
+        client = GeminiClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+        client._fetch_content = _fake_gemini_content(
+            robots=GeminiErrorResult(
+                error={"code": "TEMPORARY_ERROR", "message": "inf", "status": 44}
+            )
+        )
+        await client.fetch("gemini://example.com/page")
+        gate = client._robots_gate
+        assert gate is not None
+        deadline = gate._retry_after["example.com:1965"]
+        assert deadline - gate._clock() <= MAX_PENALTY_SECONDS
+        await client.close()
+
+    async def test_the_two_cases_carry_different_codes(self):
+        """The retry decision turns on this, and prose is a weaker signal than
+        a code for a consumer that switches on error["code"] -- which is what
+        docs/api-reference.md tells it to do."""
+        from gopher_mcp.models import GeminiGemtextResult, GemtextDocument
+
+        disallowed = GeminiClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+        disallowed._fetch_content = _fake_gemini_content(
+            robots=GeminiGemtextResult(
+                rawContent="User-agent: *\nDisallow: /\n",
+                document=GemtextDocument(lines=[]),
+                size=26,
+            )
+        )
+        refused = await disallowed.fetch("gemini://example.com/page")
+        assert isinstance(refused, GeminiErrorResult)
+        assert refused.error["code"] == "BLOCKED_BY_ROBOTS"
+        await disallowed.close()
+
+        unreachable = GeminiClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+
+        async def content(url, *a, **kw):
+            if url.path == "/robots.txt":
+                raise TimeoutError("slow")
+            raise AssertionError("the gate should have refused first")
+
+        unreachable._fetch_content = content
+        result = await unreachable.fetch("gemini://example.com/page")
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "ROBOTS_UNAVAILABLE"
+        await unreachable.close()
+
+    @pytest.mark.parametrize(
+        ("exc_factory", "phrase"),
+        [
+            (lambda: TimeoutError("slow"), "the connection timed out"),
+            (
+                lambda: __import__(
+                    "gopher_mcp.gemini_parse", fromlist=["GeminiProtocolError"]
+                ).GeminiProtocolError("garbage"),
+                "the reply was not a valid Gemini response",
+            ),
+            (
+                lambda: __import__(
+                    "gopher_mcp.gemini_tls", fromlist=["GeminiResponseTooLargeError"]
+                ).GeminiResponseTooLargeError("too big"),
+                "the robots.txt response was too large",
+            ),
+            (
+                lambda: __import__(
+                    "gopher_mcp.gemini_tls", fromlist=["GeminiConnectionError"]
+                ).GeminiConnectionError("refused"),
+                "the connection was refused or unreachable",
+            ),
+            (
+                lambda: __import__(
+                    "gopher_mcp.gemini_tls", fromlist=["TLSConnectionError"]
+                ).TLSConnectionError("handshake"),
+                "the TLS handshake failed",
+            ),
+            (lambda: OSError("reset"), "the connection failed"),
+        ],
+    )
+    async def test_every_gemini_probe_failure_names_its_own_cause(
+        self, exc_factory, phrase
+    ):
+        """These phrases are a documented contract -- troubleshooting.md and
+        ai-assistant-guide.md list them as what the reader should look for --
+        and until now nothing pinned them, which is how the docs came to promise
+        a phrase the code never emitted."""
+        client = GeminiClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+
+        async def content(url, *a, **kw):
+            raise exc_factory()
+
+        client._fetch_content = content
+        with pytest.raises(RobotsUnavailable) as exc:
+            await client._fetch_robots("example.com", 1965)
+        assert exc.value.detail == phrase
+        await client.close()
+
+    @pytest.mark.parametrize(
+        ("exc_factory", "phrase"),
+        [
+            (lambda: TimeoutError("slow"), "the connection timed out"),
+            (
+                lambda: __import__(
+                    "gopher_mcp.gopher_transport", fromlist=["GopherProtocolError"]
+                ).GopherProtocolError("garbage"),
+                "the reply was not a valid Gopher response",
+            ),
+            (lambda: OSError("reset"), "the connection failed"),
+        ],
+    )
+    async def test_every_gopher_probe_failure_names_its_own_cause(
+        self, exc_factory, phrase
+    ):
+        client = GopherClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+
+        async def boom(*a, **kw):
+            raise exc_factory()
+
+        with patch("gopher_mcp.gopher_client.fetch_gopher", boom):
+            with pytest.raises(RobotsUnavailable) as exc:
+                await client._fetch_robots("example.com", 70)
+        assert exc.value.detail == phrase
+        await client.close()
+
+    async def test_a_dns_failure_is_not_reported_as_a_security_block(self):
+        """BLOCKED is documented as an SSRF refusal. A hostname that does not
+        resolve was never refused -- reporting it as BLOCKED sends the reader
+        looking for an allowlist problem that does not exist."""
+
+        async def boom(host, port):
+            raise OSError("name resolution failed")
+
+        for client, url in (
+            (
+                GopherClient(cache_enabled=False, requests_per_minute=0),
+                "gopher://nope.example/0/page",
+            ),
+            (
+                GeminiClient(cache_enabled=False, requests_per_minute=0),
+                "gemini://nope.example/page",
+            ),
+        ):
+            with patch("gopher_mcp.ssrf.resolve_host", boom):
+                result = await client.fetch(url)
+            assert result.error["code"] == "DNS_ERROR", type(client).__name__
+            assert "resolve" in result.error["message"].lower()
+            await client.close()
+
+    async def test_a_refused_connection_is_not_a_tls_fault(self):
+        """Nothing reached a handshake, so pointing the caller at TLS sends them
+        to inspect certificates for a connection that never opened."""
+        from unittest.mock import AsyncMock
+
+        from gopher_mcp.gemini_tls import GeminiConnectionError
+
+        client = GeminiClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=False
+        )
+        client.tls_client.connect = AsyncMock(
+            side_effect=GeminiConnectionError("Connection refused by example.com:1965")
+        )
+        client.tls_client.close = AsyncMock()
+        result = await client.fetch("gemini://example.com/page")
+        assert result.error["code"] == "FETCH_ERROR"
+        assert "refused" in result.error["message"].lower()
+        await client.close()
+
+    async def test_a_server_redirect_we_cannot_parse_is_not_our_fault(self):
+        """A 3x whose target will not parse is a SERVER defect. It used to
+        escape as a bare ValueError into the INVALID_REQUEST arm, telling the
+        model to fix a URL that was never wrong."""
+        from gopher_mcp.gemini_parse import (
+            parse_gemini_response,
+            process_gemini_response,
+        )
+
+        result = process_gemini_response(
+            parse_gemini_response(b"31 //[::1\r\n"),
+            {"url": "gemini://example.com/a"},
+        )
+        assert isinstance(result, GeminiErrorResult)
+        assert result.error["code"] == "INVALID_REDIRECT"
+        assert result.error["code"] != "INVALID_REQUEST"
+
+    async def test_a_real_ssrf_refusal_is_still_blocked(self):
+        """The inverse must keep working: DNS_ERROR must not swallow a genuine
+        policy refusal, which is a security signal."""
+        client = GopherClient(cache_enabled=False, requests_per_minute=0)
+        result = await client.fetch("gopher://blocked.example/0/page")
+        assert result.error["code"] == "BLOCKED"
+        await client.close()
+
+    async def test_an_unusable_slow_down_meta_keeps_the_configured_backoff(self):
+        """NaN, -inf, a negative and a literal zero all sanitize to 0.0. Passing
+        that through as the retry period would read as "retry immediately" and
+        silently drop the backoff below what the operator configured."""
+        for meta in ("NaN", "-inf", "-5", "0", "not-a-number"):
+            client = GeminiClient(
+                cache_enabled=False,
+                requests_per_minute=0,
+                respect_robots_txt=True,
+                robots_failure_backoff_seconds=180.0,
+            )
+            client._fetch_content = _fake_gemini_content(
+                robots=GeminiErrorResult(
+                    error={"code": "TEMPORARY_ERROR", "message": meta, "status": 44}
+                )
+            )
+            await client.fetch("gemini://example.com/page")
+            gate = client._robots_gate
+            assert gate is not None
+            remaining = gate._retry_after["example.com:1965"] - gate._clock()
+            # 180, not 60: an unparseable meta must fall through to the
+            # CONFIGURED backoff, not to the invented slow-down default. A
+            # weaker bound here passed while that bug was live.
+            assert remaining == pytest.approx(180.0), (
+                f"{meta!r} did not fall through to the configured backoff"
+            )
+            await client.close()
+
+    async def test_gopher_unavailable_does_not_claim_a_disallow(self):
+        """Gopher fails open so this branch is unreachable today; it is written
+        anyway because flipping _robots_fail_closed must not start asserting
+        that a host refused us when it never answered."""
+        client = GopherClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+        result = client._robots_denied_result(
+            "gopher://example.com/0/page",
+            "example.com",
+            "unavailable",
+            "the connection timed out",
+        )
+        message = result.error["message"]
+        assert "the connection timed out" in message
+        assert "did not disallow" in message
+        assert "disallows this resource" not in message
         await client.close()

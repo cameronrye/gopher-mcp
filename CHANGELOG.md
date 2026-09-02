@@ -7,6 +7,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `GOPHER_ROBOTS_FAILURE_BACKOFF_SECONDS` and
+  `GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS` (default `60`, range `0`-`3600`) make
+  the robots.txt failure backoff configurable. 0.7.0 introduced the backoff as a
+  fixed 60 seconds, which is a judgement call rather than a fact about either
+  protocol: the right value depends on how often the hosts you fetch from are
+  down and, on Gemini, on how long you are willing to be refused while one is.
+  Setting `0` restores the pre-0.7.0 behaviour of re-probing on the very next
+  request. The ceiling is an hour — past that the failure path would be caching
+  the outage rather than retrying it, which is the one thing it is documented
+  not to do.
+
+### Changed
+
+- **Breaking:** a fetch refused because `robots.txt` could not be _retrieved_
+  now returns a new error code, `ROBOTS_UNAVAILABLE`, instead of
+  `BLOCKED_BY_ROBOTS`. The latter now means only what it says: the host
+  published a policy and that policy forbids this path.
+
+  0.7.0 routed both outcomes to `BLOCKED_BY_ROBOTS`, because RFC 9309 §2.3.1.4
+  makes an unretrievable policy deny. That is correct as a _decision_ and wrong
+  as a _name_ — a capsule that never answered has not disallowed anything, and
+  reporting it as a robots block claims the operator wrote a rule they did not
+  write. The two also want opposite handling: a `Disallow` is permanent and
+  should not be retried, while an unretrievable policy is transient and should
+  be. That is precisely the distinction an error code exists to carry, and it is
+  the same one `CERTIFICATE_STORE_UNAVAILABLE` already draws beside
+  `CERTIFICATE_UNVERIFIED` — "the check could not happen" is a different answer
+  from "the check says no", not a variant of it.
+
+  If you switch on `error["code"]`, match both codes wherever you previously
+  matched `BLOCKED_BY_ROBOTS`, and retry only `ROBOTS_UNAVAILABLE`. Gopher fails
+  open and so does not currently emit the new code; the branch exists there so
+  that flipping that choice cannot silently start claiming disallows that never
+  happened.
+
+- **Breaking:** a hostname that cannot be resolved now returns `DNS_ERROR`
+  instead of `BLOCKED`. `BLOCKED` is documented as "the SSRF guard refused the
+  target (loopback, private range, or a disallowed port)", and a name that does
+  not resolve was never refused — nothing was evaluated, because there was no
+  address to evaluate. A typo'd hostname was therefore reported as a security
+  block, sending the reader to hunt for an allowlist problem that did not exist.
+
+  `HostResolutionError` subclasses `SSRFError`, so any handler catching the base
+  still catches it and the fail-closed behaviour is unchanged; only the reported
+  code differs. A genuine policy refusal is still `BLOCKED`, and there is now a
+  test pinning that `DNS_ERROR` does not swallow it — that distinction is a
+  security signal and must not blur.
+
+- A robots refusal now says _why_. When the policy could not be retrieved, the
+  message names the underlying failure — `the connection timed out`, `the TLS
+connection failed`, `the reply was not a valid Gemini response`, or the status
+  by name (`41 SERVER UNAVAILABLE`, not `status 41`) — and says plainly that
+  this is not a rule the capsule wrote.
+
+  The remedy offered in that case has also changed. It previously suggested
+  `GEMINI_RESPECT_ROBOTS_TXT=false`, which is the right advice for a real
+  `Disallow` and the wrong advice here: disabling robots checking does not make
+  an unreachable capsule reachable, it just exchanges this error for the
+  transport one — while leaving a safety control switched off. It now says to
+  retry instead.
+
+- **Breaking:** three more error codes now describe what actually happened.
+  These were found by auditing every error path after the robots work, on the
+  principle that a code naming a plausible neighbour is worse than no code:
+
+  - A response over `GEMINI_MAX_RESPONSE_SIZE`, or one that hit the cap without
+    the peer closing, returned `TLS_ERROR` "TLS connection failed". A size cap is
+    this server's own policy, not a handshake fault. It is now `FETCH_ERROR`, and
+    the message names the cap instead of being discarded.
+  - A refused, unreachable or reset TCP connection returned `TLS_ERROR` too,
+    sending the reader to inspect certificates for a connection that never
+    reached a handshake. It is now `FETCH_ERROR` with the real reason. `TLS_ERROR`
+    now means an actual `ssl.SSLError`. This completes the correction 0.6.1 began
+    for connect timeouts.
+  - A `3x` redirect whose target will not parse (`31 //[::1`) escaped as a bare
+    `ValueError` into the `INVALID_REQUEST` arm — telling the model to fix a URL
+    that was never wrong. It is now `INVALID_REDIRECT`, alongside the empty-target
+    and redirect-loop cases it belongs with.
+
+  `GeminiConnectionError` and `GeminiResponseTooLargeError` both subclass
+  `TLSConnectionError`, so handlers catching the base are unaffected.
+
+### Fixed
+
+- **A truncated gemtext page could hand back a link URL the server never sent.**
+  The LLM-facing character cap sliced the raw gemtext mid-line and then parsed
+  it, so a cut landing inside a `=> gemini://host/some/long/path Title` line
+  produced a _complete_ link whose target was the surviving prefix — a fabricated
+  URL the caller could not distinguish from a real one, and would follow. The cut
+  is now taken at the last complete line, which is the same rule the `robots.txt`
+  reader already applied for the same reason.
+
+- **A Gemini query string could be reflected back in link URLs.** A query is the
+  user's INPUT response and may be a secret (status 11 `SENSITIVE_INPUT`), which
+  is why it is kept out of logs, error URLs and `requestInfo`. But RFC 3986
+  §5.3 has an empty or fragment-only reference inherit the base's query, so a
+  capsule serving `=> ` or `=> #anchor` on a page fetched with a password in the
+  query got that password handed straight back in a resolved link URL. The base's
+  query is now dropped before resolution. A reference supplying its own query
+  (`?x`) replaces rather than inherits and is unaffected.
+
+- **A hostname that fails to resolve no longer reports as an SSRF block.** See
+  `DNS_ERROR` above.
+
+- **`GOPHER_TIMEOUT_SECONDS` is now the single deadline it is documented to be.**
+  `docs/configuration.md` and `config/example.env` both promise it covers "DNS,
+  connect, send and read", but the DNS lookup and the transport were each handed
+  the full value, and with robots checking on by default the probe spent two more
+  full-length phases of its own — so one call could occupy four multiples of the
+  configured deadline against a server answering each phase just under the limit.
+  All four phases now draw down one budget, matching the Gemini client.
+
+- A Gemini `44 SLOW_DOWN` during a robots probe no longer costs two penalties.
+  The status was folded into the generic failure backoff on top of the
+  rate-limiter penalty it already triggers, so being asked to wait five seconds
+  refused every request for sixty. The capsule's own retry period is now used as
+  the robots backoff, since it already said when it would be ready. That period
+  is attacker-controlled, so it is clamped by the same bound the rate limiter
+  applies rather than being trusted as given.
+
 ## [0.7.0] - 2026-09-01
 
 ### Changed

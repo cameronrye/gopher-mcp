@@ -425,6 +425,9 @@ class ClientManager:
                     respect_robots_txt=gopher_config.respect_robots_txt,
                     robots_cache_ttl_seconds=gopher_config.robots_cache_ttl_seconds,
                     robots_honor_ai_tokens=gopher_config.robots_honor_ai_tokens,
+                    robots_failure_backoff_seconds=(
+                        gopher_config.robots_failure_backoff_seconds
+                    ),
                 )
                 logger.info(
                     "Gopher client initialized",
@@ -475,6 +478,9 @@ class ClientManager:
                     respect_robots_txt=gemini_config.respect_robots_txt,
                     robots_cache_ttl_seconds=gemini_config.robots_cache_ttl_seconds,
                     robots_honor_ai_tokens=gemini_config.robots_honor_ai_tokens,
+                    robots_failure_backoff_seconds=(
+                        gemini_config.robots_failure_backoff_seconds
+                    ),
                 )
                 logger.info(
                     "Gemini client initialized",

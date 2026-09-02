@@ -11,7 +11,14 @@ import structlog
 from .client_base import FetchClientBase
 from .client_certs import ClientCertificateManager
 from .gemini_parse import GeminiProtocolError, format_gemini_url
-from .gemini_tls import GeminiTLSClient, TLSConfig, TLSConnection, TLSConnectionError
+from .gemini_tls import (
+    GeminiConnectionError,
+    GeminiResponseTooLargeError,
+    GeminiTLSClient,
+    TLSConfig,
+    TLSConnection,
+    TLSConnectionError,
+)
 from .models import (
     GeminiCacheEntry,
     GeminiCertificateInfo,
@@ -21,12 +28,13 @@ from .models import (
     TOFUEntry,
     mark_from_cache,
 )
+from .ratelimit import sanitize_penalty_seconds
 from .robots import (
     GEMINI_TOKENS,
     ROBOTS_MAX_BYTES,
     RobotsUnavailable,
 )
-from .ssrf import SSRFError, validate_target
+from .ssrf import HostResolutionError, SSRFError, validate_target
 from .tofu import (
     TOFUExpiredError,
     TOFUManager,
@@ -55,6 +63,30 @@ DEFAULT_MAX_RENDERED_CHARS = 50000  # LLM-facing text cap; 0 = unlimited
 DEFAULT_REQUESTS_PER_MINUTE = 60.0  # one request per second, per host
 DEFAULT_MAX_CONCURRENT_REQUESTS = 5  # matches the batch tools' concurrency
 DEFAULT_ROBOTS_CACHE_TTL_SECONDS = 86400  # RFC 9309 s2.4 permits 24h
+DEFAULT_ROBOTS_FAILURE_BACKOFF_SECONDS = 60.0  # dead host: retry, not per request
+# Applied when a status-44 SLOW_DOWN does not name a usable number of seconds.
+# The capsule still asked us to back off, so a conservative period beats none.
+DEFAULT_SLOW_DOWN_SECONDS = 60.0
+
+
+# The 4x statuses, spelled the way the Gemini specification names them. A robots
+# probe that ends in one is reported with the status *named* rather than as a
+# bare number: "41 SERVER UNAVAILABLE" tells a reader the capsule is down, where
+# "status 41" reads as an internal code and invites the conclusion that the
+# refusal was a policy decision.
+_TEMPORARY_STATUS_NAMES: dict[int, str] = {
+    40: "TEMPORARY FAILURE",
+    41: "SERVER UNAVAILABLE",
+    42: "CGI ERROR",
+    43: "PROXY ERROR",
+    44: "SLOW_DOWN",
+}
+
+
+def _status_phrase(status: int) -> str:
+    """Render a status for a user-facing message: ``41 SERVER UNAVAILABLE``."""
+    name = _TEMPORARY_STATUS_NAMES.get(status)
+    return f"{status} {name}" if name else str(status)
 
 
 @dataclass
@@ -135,6 +167,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         respect_robots_txt: bool = True,
         robots_cache_ttl_seconds: int = DEFAULT_ROBOTS_CACHE_TTL_SECONDS,
         robots_honor_ai_tokens: bool = True,
+        robots_failure_backoff_seconds: float = DEFAULT_ROBOTS_FAILURE_BACKOFF_SECONDS,
     ) -> None:
         """Initialize the Gemini client.
 
@@ -157,6 +190,8 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             robots_cache_ttl_seconds: Lifetime of a cached robots policy
             robots_honor_ai_tokens: Also honour rules naming AI crawler tokens
                 (ClaudeBot, GPTBot, ...)
+            robots_failure_backoff_seconds: How long a host whose /robots.txt
+                probe failed is left alone before being probed again
         """
         super().__init__(
             max_response_size=max_response_size,
@@ -173,6 +208,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             respect_robots_txt=respect_robots_txt,
             robots_cache_ttl_seconds=robots_cache_ttl_seconds,
             robots_honor_ai_tokens=robots_honor_ai_tokens,
+            robots_failure_backoff_seconds=robots_failure_backoff_seconds,
         )
         self.denied_mime_types = frozenset(denied_mime_types or ())
         self.tofu_enabled = tofu_enabled
@@ -283,7 +319,9 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                     parsed_url.host, parsed_url.port, [parsed_url.path]
                 )
                 if not decision.allowed:
-                    return self._robots_denied_result(parsed_url, decision.reason)
+                    return self._robots_denied_result(
+                        parsed_url, decision.reason, decision.detail
+                    )
 
             # Canonical cache key (case-insensitive host) so requests differing
             # only in host case share one entry instead of duplicating.
@@ -372,6 +410,11 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
 
             return response
 
+        except HostResolutionError as e:
+            # Must precede SSRFError (its base): a name that does not resolve
+            # was never refused by the SSRF policy, and reporting it as BLOCKED
+            # sends the reader hunting for an allowlist problem.
+            return self._error_result(url, "DNS_ERROR", str(e), e)
         except SSRFError as e:
             # Policy messages name a host/category only (no internal detail).
             return self._error_result(url, "BLOCKED", str(e), e)
@@ -414,6 +457,18 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             # request deadline. The transport now reports a connect timeout AS a
             # timeout, so a firewalled host no longer masquerades as a TLS fault.
             return self._error_result(url, "FETCH_ERROR", "The request timed out", e)
+        except GeminiResponseTooLargeError as e:
+            # Must precede TLSConnectionError (its base). A size cap is the
+            # operator's own policy, not a transport fault -- the bytes arrived
+            # fine, there were simply too many of them. The message names the
+            # cap, which is the actionable part.
+            return self._error_result(url, "FETCH_ERROR", str(e), e)
+        except GeminiConnectionError as e:
+            # Must precede TLSConnectionError (its base). Refused, unreachable
+            # or reset: nothing is listening, and pointing the caller at TLS
+            # sends them to inspect certificates for a connection that never
+            # reached a handshake.
+            return self._error_result(url, "FETCH_ERROR", str(e), e)
         except TLSConnectionError as e:
             return self._error_result(url, "TLS_ERROR", "TLS connection failed", e)
         except GeminiProtocolError as e:
@@ -446,47 +501,99 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         """
         return url.split("?", 1)[0]
 
+    @staticmethod
+    def _slow_down_seconds(response: GeminiFetchResponse) -> float | None:
+        """Seconds a status-44 SLOW_DOWN actually named, or ``None``.
+
+        The Gemini spec says the meta of a 44 is that number. ``None`` means the
+        capsule named no usable period -- the meta was not a number at all, or
+        was NaN, negative or zero. Callers decide their own fallback, and the
+        distinction matters: the robots gate may only let a period the capsule
+        *actually named* override the operator's configured backoff, so an
+        invented default must not arrive looking like a server instruction.
+
+        The meta is attacker-controlled, so a usable value is clamped here
+        rather than at each use -- the gate takes it as a backoff, and an
+        unclamped ``inf`` would have it refuse the capsule for the maximum
+        window on the server's say-so.
+        """
+        message = getattr(response, "error", {}).get("message", "")
+        try:
+            seconds = float(str(message).strip())
+        except (TypeError, ValueError):
+            return None
+        seconds = sanitize_penalty_seconds(seconds)
+        return seconds if seconds > 0 else None
+
     def _maybe_honor_slow_down(self, host: str, response: GeminiFetchResponse) -> None:
         """If ``response`` is a status-44 SLOW_DOWN, back off this host.
 
-        The Gemini spec says the meta of a 44 is the number of seconds to wait;
-        fall back to a conservative default if it isn't a plain number.
+        A 44 with an unusable meta is still a 44: the capsule asked us to slow
+        down, it just did not say for how long, so a conservative default
+        applies rather than no penalty at all.
         """
         if not isinstance(response, GeminiErrorResult):
             return
         if response.error.get("status") != 44:
             return
-        message = response.error.get("message", "")
-        try:
-            seconds = float(str(message).strip())
-        except (TypeError, ValueError):
-            seconds = 60.0
-        self._rate_limiter.penalize(host, seconds)
+        named = self._slow_down_seconds(response)
+        self._rate_limiter.penalize(
+            host, named if named is not None else DEFAULT_SLOW_DOWN_SECONDS
+        )
 
     def _robots_denied_result(
-        self, parsed_url: GeminiURL, reason: str
+        self, parsed_url: GeminiURL, reason: str, detail: str | None = None
     ) -> GeminiErrorResult:
-        """Build the result returned when the robots gate blocks a resource."""
+        """Build the result returned when the robots gate blocks a resource.
+
+        The two cases this covers mean opposite things and call for opposite
+        responses, so they get separate error codes, wording and remedies. A
+        *disallow* is the operator's decision and will not change on a retry;
+        that is ``BLOCKED_BY_ROBOTS``. An *unavailable* policy is a transport or
+        availability failure that is reported here only because RFC 9309 section
+        2.3.1.4 makes it deny; that is ``ROBOTS_UNAVAILABLE``, and the useful
+        advice is to retry -- telling the caller to turn robots checking off
+        would trade a clear error for the underlying one while leaving a safety
+        control switched off.
+
+        The split is a code and not just a message because the retry decision
+        turns on it, and because naming an unreachable capsule "blocked by
+        robots" claims the operator wrote a rule they did not write. It follows
+        the same reasoning as ``CERTIFICATE_STORE_UNAVAILABLE`` beside
+        ``CERTIFICATE_UNVERIFIED``: "the check could not happen" is a different
+        answer from "the check says no", not a variant of it.
+        """
         logger.info(
-            "Blocked by robots.txt",
+            "Blocked by robots.txt"
+            if reason == "disallowed"
+            else "Robots probe failed",
             host=parsed_url.host,
             path=parsed_url.path,
             reason=reason,
+            detail=detail,
         )
         if reason == "unavailable":
+            cause = f" because {detail}" if detail else ""
             message = (
-                f"Could not retrieve robots.txt from {parsed_url.host}, so access "
-                f"is denied (RFC 9309 section 2.3.1.4 treats a temporary failure "
-                f"as a complete disallow). Set GEMINI_RESPECT_ROBOTS_TXT=false to "
-                f"disable robots checking."
+                f"Could not fetch robots.txt from {parsed_url.host}{cause}, so "
+                f"this request was refused: Gemini fails closed when a capsule's "
+                f"policy cannot be retrieved (RFC 9309 section 2.3.1.4 treats a "
+                f"temporary failure as a complete disallow). This is not a rule "
+                f"the capsule wrote against you -- most likely the capsule is "
+                f"down or unreachable, in which case the fetch would fail anyway "
+                f"with robots checking off. Retry shortly: the policy is "
+                f"re-probed once the failure backoff elapses (normally "
+                f"GEMINI_ROBOTS_FAILURE_BACKOFF_SECONDS, or the capsule's own "
+                f"period if it named one in a 44 SLOW_DOWN)."
             )
         else:
             message = (
                 f"{parsed_url.host} disallows this resource in its robots.txt. "
                 f"Set GEMINI_RESPECT_ROBOTS_TXT=false to disable robots checking."
             )
+        code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return GeminiErrorResult(
-            error={"code": "BLOCKED_BY_ROBOTS", "message": message},
+            error={"code": code, "message": message},
             requestInfo={
                 "url": _safe_display_url(parsed_url),
                 "host": parsed_url.host,
@@ -530,13 +637,21 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 apply_content_policy=False,
                 truncate_oversize=True,
             )
-        except (
-            GeminiProtocolError,
-            TLSConnectionError,
-            OSError,
-            TimeoutError,
-        ) as e:
-            raise RobotsUnavailable(f"could not reach {host}:{port}") from e
+        except TimeoutError as e:
+            raise RobotsUnavailable("the connection timed out") from e
+        except GeminiProtocolError as e:
+            # The capsule answered, but not with a Gemini response. Reporting
+            # that as a robots policy would blame the operator for a server
+            # that is simply broken.
+            raise RobotsUnavailable("the reply was not a valid Gemini response") from e
+        except GeminiResponseTooLargeError as e:
+            raise RobotsUnavailable("the robots.txt response was too large") from e
+        except GeminiConnectionError as e:
+            raise RobotsUnavailable("the connection was refused or unreachable") from e
+        except TLSConnectionError as e:
+            raise RobotsUnavailable("the TLS handshake failed") from e
+        except OSError as e:
+            raise RobotsUnavailable("the connection failed") from e
 
         # A 44 SLOW_DOWN here is still the server asking us to back off, and the
         # backoff must be recorded even though this response is discarded.
@@ -556,7 +671,26 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         if kind == "error":
             status = getattr(result, "error", {}).get("status")
             if isinstance(status, int) and 40 <= status <= 49:
-                raise RobotsUnavailable(f"status {status} fetching robots.txt")
+                # 44 is the one 4x that says when to come back. Honour that
+                # instead of the generic backoff -- the rate limiter has already
+                # been penalised for the same period (just above), and adding
+                # the backoff on top would keep refusing requests after the
+                # server was ready to serve them.
+                #
+                # Only a *usable* period counts. The meta is attacker-controlled
+                # and sanitizes to 0.0 for NaN, -inf, a negative or a literal
+                # zero; passing that through would read as "the server said
+                # retry immediately" and drop the backoff entirely, which is
+                # weaker than the default the operator configured. Fall back.
+                # Only a period the capsule ACTUALLY named may override the
+                # operator's configured backoff; _slow_down_seconds returns None
+                # for anything else, which falls through to the configured value
+                # rather than silently replacing it with an invented one.
+                retry_after = self._slow_down_seconds(result) if status == 44 else None
+                raise RobotsUnavailable(
+                    f"the capsule answered {_status_phrase(status)}",
+                    retry_after=retry_after,
+                )
             # 5x (including 51 NOT FOUND) and anything unclassifiable: no policy.
             return None
         # Redirect, input prompt, certificate request or a binary body: none of
