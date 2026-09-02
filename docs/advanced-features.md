@@ -73,7 +73,7 @@ provenance:
 | Field | Meaning |
 |-------|---------|
 | `cached` | `true` when the result was replayed from the local cache instead of fetched during this call |
-| `cached_at` | UNIX timestamp at which that copy was actually fetched from the server (`null` when `cached` is `false`) |
+| `cached_at` | ISO-8601 UTC timestamp at which that copy was actually fetched from the server (`null` when `cached` is `false`) |
 | `cache_age_seconds` | How old the copy was, in seconds, when the result was returned (`null` when `cached` is `false`) |
 
 Errors, redirects and the Gemini input/certificate prompts are never cached, so

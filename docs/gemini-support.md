@@ -74,7 +74,7 @@ extra fields so a replay is never mistaken for a live fetch:
 | Field | Meaning |
 |-------|---------|
 | `cached` | `true` when the result came from the local cache rather than the server |
-| `cached_at` | UNIX timestamp at which that copy was fetched (`null` when `cached` is `false`) |
+| `cached_at` | ISO-8601 UTC timestamp at which that copy was fetched (`null` when `cached` is `false`) |
 | `cache_age_seconds` | Age of that copy, in seconds, at the moment it was returned (`null` when `cached` is `false`) |
 
 Input prompts, redirects, certificate prompts and errors are never cached and do

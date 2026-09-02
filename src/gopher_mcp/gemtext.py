@@ -5,18 +5,14 @@ Parses ``text/gemini`` content into the structured ``GemtextDocument`` model
 models, so it sits below the protocol parsers in the import graph.
 """
 
-from typing import Any, Optional
+from typing import Optional
 
 from .helpers import resolve_gemini_reference, sanitize_display_text
 from .models import (
     GemtextDocument,
-    GemtextHeading,
     GemtextLine,
     GemtextLineType,
     GemtextLink,
-    GemtextList,
-    GemtextPreformat,
-    GemtextQuote,
 )
 
 
@@ -77,53 +73,6 @@ def _detect_language_from_alt_text(alt_text: str | None) -> str | None:
     return language_map.get(alt_lower)
 
 
-def _extract_preformat_metadata(alt_text: str | None, content: str) -> dict[str, Any]:
-    """Extract metadata from preformat block.
-
-    Args:
-        alt_text: Alt-text from preformat block
-        content: Preformat content
-
-    Returns:
-        Metadata dictionary
-
-    """
-    metadata = {
-        "language": _detect_language_from_alt_text(alt_text),
-        "alt_text": alt_text,
-        "line_count": len(content.splitlines()) if content else 0,
-        "char_count": len(content) if content else 0,
-        "is_code": False,
-        "is_data": False,
-    }
-
-    # Determine content type based on language
-    if metadata["language"]:
-        code_languages = {
-            "python",
-            "javascript",
-            "typescript",
-            "rust",
-            "go",
-            "c",
-            "cpp",
-            "java",
-            "kotlin",
-            "swift",
-            "ruby",
-            "php",
-            "bash",
-        }
-        data_languages = {"json", "xml", "yaml", "toml", "sql"}
-
-        if metadata["language"] in code_languages:
-            metadata["is_code"] = True
-        elif metadata["language"] in data_languages:
-            metadata["is_data"] = True
-
-    return metadata
-
-
 def _parse_gemtext_link_line(
     line: str, base_url: str | None = None
 ) -> Optional["GemtextLink"]:
@@ -174,30 +123,26 @@ def _create_gemtext_line(
     line_type: "GemtextLineType",
     content: str,
     link: Optional["GemtextLink"] = None,
-    heading: Optional["GemtextHeading"] = None,
-    list_item: Optional["GemtextList"] = None,
-    quote: Optional["GemtextQuote"] = None,
-    preformat: Optional["GemtextPreformat"] = None,
+    text: str | None = None,
     level: int | None = None,
     alt_text: str | None = None,
+    language: str | None = None,
 ) -> "GemtextLine":
     """Build a ``GemtextLine``, defaulting the fields this line type doesn't use.
 
     ``GemtextLine`` declares its optional fields as ``Field(None, ...)``, whose
     default mypy does not see through ``dataclass_transform`` -- it treats all
-    nine as required. This wrapper is the one place that spells them all out, so
-    a caller passes only the field its line type populates.
+    of them as required. This wrapper is the one place that spells them all out,
+    so a caller passes only the fields its line type populates.
 
     Args:
         line_type: Type of the line
-        content: Raw line content
-        link: Link object if this is a link line
-        heading: Heading object if this is a heading line
-        list_item: List object if this is a list item line
-        quote: Quote object if this is a quote line
-        preformat: Preformat object if this is a preformat line
+        content: Raw line content, marker included
+        link: Link target and text if this is a link line
+        text: Marker-stripped text for a heading, list item or quote
         level: Heading level if this is a heading line
-        alt_text: Alt text for preformat blocks
+        alt_text: Alt text of a preformat block, on its opening toggle
+        language: Language recognised from the alt text, on the same toggle
 
     Returns:
         GemtextLine object
@@ -206,13 +151,11 @@ def _create_gemtext_line(
     return GemtextLine(
         type=line_type,
         content=content,
+        text=text,
         link=link,
         level=level,
         alt_text=alt_text,
-        heading=heading,
-        list_item=list_item,
-        quote=quote,
-        preformat=preformat,
+        language=language,
     )
 
 
@@ -241,12 +184,7 @@ def _parse_heading(line_content: str) -> Optional["GemtextLine"]:
         3: GemtextLineType.HEADING_3,
     }[level]
 
-    heading_obj = GemtextHeading(
-        level=level, text=heading_text, raw_content=line_content
-    )
-    return _create_gemtext_line(
-        line_type, line_content, heading=heading_obj, level=level
-    )
+    return _create_gemtext_line(line_type, line_content, text=heading_text, level=level)
 
 
 def _parse_link(
@@ -287,9 +225,8 @@ def _parse_list_item(line_content: str) -> Optional["GemtextLine"]:
 
     if line_content.startswith("* "):
         list_text = line_content[2:].strip()
-        list_obj = GemtextList(text=list_text, raw_content=line_content)
         return _create_gemtext_line(
-            GemtextLineType.LIST_ITEM, line_content, list_item=list_obj
+            GemtextLineType.LIST_ITEM, line_content, text=list_text
         )
 
     return None
@@ -309,9 +246,8 @@ def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
         # Remove at most a single space after '>', preserving any intentional
         # inner indentation of the quoted text (the gemtext convention).
         quote_text = line_content[1:].removeprefix(" ")
-        quote_obj = GemtextQuote(text=quote_text, raw_content=line_content)
         return _create_gemtext_line(
-            GemtextLineType.QUOTE, line_content, quote=quote_obj
+            GemtextLineType.QUOTE, line_content, text=quote_text
         )
 
     return None
@@ -334,7 +270,6 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
     lines = []
     links = []
     in_preformat = False
-    current_alt_text = None
 
     # Strip control characters before splitting: the body is server-controlled
     # and reaches the model (and often a terminal) verbatim, and the latin-1
@@ -360,31 +295,15 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
 
         # Handle preformat mode
         if in_preformat:
-            # A closing ``` and the verbatim content between the toggles differ
-            # only in ``is_toggle``. Block-level metadata (language and the
-            # code/data flags) belongs on the opening toggle line, not on every
-            # line inside: repeating a 6-key metadata dict per line was pure
-            # serialized bloat (its ``line_count`` was always 1 and
-            # ``char_count`` just re-stated ``len(content)``).
-            closes_block = line_content.startswith("```")
-            if closes_block:
+            # A line inside a block carries nothing but its verbatim content:
+            # the alt text and the language it implies describe the block, and
+            # belong on the opening toggle that declared them. Repeating them
+            # (and, before that, a 6-key metadata dict) on every line was pure
+            # serialized bloat, and ``type`` already says a ``` line is a
+            # toggle.
+            if line_content.startswith("```"):
                 in_preformat = False
-                current_alt_text = None
-            preformat_obj = GemtextPreformat(
-                content=line_content,
-                alt_text=None,
-                is_toggle=closes_block,
-                language=None,
-                metadata={},
-            )
-            lines.append(
-                _create_gemtext_line(
-                    GemtextLineType.PREFORMAT,
-                    line_content,
-                    preformat=preformat_obj,
-                    alt_text=current_alt_text,
-                )
-            )
+            lines.append(_create_gemtext_line(GemtextLineType.PREFORMAT, line_content))
             continue
 
         # Normal mode - recognize line types
@@ -393,21 +312,13 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
             in_preformat = True
             # Extract alt text (everything after ``` and optional whitespace)
             alt_text_part = line_content[3:].strip()
-            current_alt_text = alt_text_part if alt_text_part else None
-            metadata = _extract_preformat_metadata(current_alt_text, line_content)
-            preformat_obj = GemtextPreformat(
-                content=line_content,
-                alt_text=current_alt_text,
-                is_toggle=True,
-                language=metadata["language"],
-                metadata=metadata,
-            )
+            alt_text = alt_text_part if alt_text_part else None
             lines.append(
                 _create_gemtext_line(
                     GemtextLineType.PREFORMAT,
                     line_content,
-                    preformat=preformat_obj,
-                    alt_text=current_alt_text,
+                    alt_text=alt_text,
+                    language=_detect_language_from_alt_text(alt_text),
                 )
             )
 

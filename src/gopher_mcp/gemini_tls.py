@@ -124,6 +124,13 @@ class GeminiTLSClient:
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context with secure defaults.
 
+        A client certificate loaded here is presented during the handshake, and
+        the handshake runs under ``CERT_NONE`` -- peer authentication in Gemini
+        is the TOFU pin, which ``GeminiClient._fetch_content`` can only check
+        once the connection is up. So the identity reaches the peer before it is
+        known to be the pinned one; see that method's docstring for what an
+        on-path attacker learns, and why the extra round trip is not paid.
+
         Returns:
             Configured SSL context
 

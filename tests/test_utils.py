@@ -156,6 +156,10 @@ class TestParseMenuLine:
         assert result.selector == ""
         assert result.host == "error.host"
         assert result.port == 1
+        # "error.host"/1 are the placeholders servers fill an info line's unused
+        # fields with, so a URL built from them is dead by construction. The
+        # item is display-only and says so with an empty nextUrl.
+        assert result.next_url == ""
 
     def test_hurl_web_link_selector(self):
         """The hURL convention encodes a web link as a 'URL:<target>' selector
@@ -394,7 +398,13 @@ class TestParseMenuLineIPv6:
 
 
 class TestParseMenuLineItemTypeRoundTrip:
-    """The item-type character is server-controlled and must survive nextUrl."""
+    """A server-controlled item type must survive nextUrl, or not be carried.
+
+    Every printable type -- including the URL-significant ones -- has to
+    round-trip through the constructed URL unchanged. A non-printable one is
+    the single exception: it is degraded rather than encoded, so there is
+    nothing to round-trip.
+    """
 
     def test_question_mark_type_does_not_become_a_search(self):
         """An unencoded '?' type turned the selector into a query string, so
@@ -417,12 +427,20 @@ class TestParseMenuLineItemTypeRoundTrip:
         assert parsed.gopher_type == "#"
         assert parsed.selector == "/sel"
 
-    def test_control_char_type_is_not_embedded_raw(self):
+    def test_control_char_type_is_degraded_to_the_info_type(self):
+        """A non-printable byte is not an item type, so it is not carried at
+        all: `type` degrades to "i", which leaves the item display-only and
+        therefore without a nextUrl to embed the byte in. Encoding it into a
+        URL instead would have handed the model a link whose type no client
+        can act on, built from an info line's placeholder host and port."""
         item = parse_menu_line("\x1bEsc\t/sel\texample.com\t70")
 
         assert item is not None
-        assert "\x1b" not in item.next_url
-        assert parse_gopher_url(item.next_url).gopher_type == "\x1b"
+        assert item.type == "i"
+        assert item.title == "Esc"
+        assert item.next_url == ""
+        # No field carries the escape onward, in any spelling.
+        assert not any("\x1b" in str(value) for value in item.model_dump().values())
 
     def test_ordinary_type_stays_literal(self):
         item = parse_menu_line("1About\t/about\texample.com\t70")

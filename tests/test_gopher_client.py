@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from gopher_mcp.gopher_client import GopherClient
-from gopher_mcp.gopher_transport import GopherProtocolError
+from gopher_mcp.gopher_transport import GopherProtocolError, GopherTimeoutError
 from gopher_mcp.models import (
     BinaryResult,
     CacheEntry,
@@ -583,14 +583,25 @@ class TestResponseProcessing:
         assert result.charset == "utf-8"
 
     def test_process_text_response_with_control_chars(self):
-        """Control characters are stripped except \\n, \\r and \\t."""
+        """Control characters are stripped except \\n and \\t; CR is folded into
+        the LF it framed."""
         client = GopherClient()
         raw = b"Hello\x00\x01\x02World\r\nTest\t"
 
         result = client._process_text_response(raw)
 
-        assert result.text == "HelloWorld\r\nTest\t"
+        assert result.text == "HelloWorld\nTest\t"
         assert result.charset == "utf-8"
+
+    def test_process_text_response_normalises_line_endings(self):
+        """CRLF and legacy bare CR both reach the model as LF: the CR carries no
+        information and cost an escaped "\\r" on every line of the JSON."""
+        client = GopherClient()
+
+        assert client._process_text_response(b"a\r\nb\r\nc").text == "a\nb\nc"
+        assert client._process_text_response(b"a\rb\rc").text == "a\nb\nc"
+        # A body that was already LF-framed is untouched.
+        assert client._process_text_response(b"a\nb\nc").text == "a\nb\nc"
 
     def test_process_text_response_strips_terminator_and_undot_stuffs(self):
         """RFC 1436 text framing is reversed: drop the lone '.' terminator and
@@ -600,7 +611,7 @@ class TestResponseProcessing:
 
         result = client._process_text_response(raw)
 
-        assert result.text == ".dotted\r\nnormal line\r\n"
+        assert result.text == ".dotted\nnormal line\n"
         assert result.bytes == len(raw)  # byte count still reflects raw input
 
     def test_process_text_response_without_terminator_unchanged(self):
@@ -1166,3 +1177,300 @@ class TestRobotsOversizeHandling:
             text = await client._fetch_robots("example.com", 70)
 
         assert text == "User-agent: *\nDisallow: /private/\n"
+
+
+class TestInfoLinesAreNotLinks:
+    """An 'i' line is banner text, not a navigable target."""
+
+    def test_info_item_carries_no_next_url(self):
+        """Servers park placeholders ("error.host"/1, "(NULL)"/0) in an info
+        line's unused host/port fields, so a URL built from them is dead by
+        construction -- and info lines are most of a real menu. The item is
+        still returned so the banner text reads."""
+        client = GopherClient()
+        raw = (
+            b"iWelcome to the server\t\terror.host\t1\r\n"
+            b"iSecond banner\tfake\t(NULL)\t0\r\n"
+            b"0Real file\t/real.txt\texample.com\t70\r\n"
+            b".\r\n"
+        )
+
+        items = client._process_menu_response(raw).items
+
+        assert [i.type for i in items] == ["i", "i", "0"]
+        assert items[0].title == "Welcome to the server"
+        assert items[0].next_url == ""
+        assert items[1].next_url == ""
+        # Navigable items are untouched.
+        assert items[2].next_url == "gopher://example.com:70/0/real.txt"
+
+    def test_info_line_keeps_an_explicit_hurl_target(self):
+        """A "URL:" selector states the destination outright rather than
+        deriving it from the placeholder host/port, so it survives the rule."""
+        client = GopherClient()
+        raw = b"iSee the website\tURL:https://example.org/\terror.host\t1\r\n"
+
+        item = client._process_menu_response(raw).items[0]
+
+        assert item.type == "i"
+        assert item.next_url == "https://example.org/"
+
+    def test_non_printable_item_type_degrades_to_info(self):
+        """The type is the one server-controlled field that never passed through
+        sanitize_display_text, so an ESC/NUL there reached the model raw."""
+        client = GopherClient()
+        raw = b"\x1b[31mRed\tsel\texample.com\t70\r\n\x00x\tsel\texample.com\t70\r\n"
+
+        items = client._process_menu_response(raw).items
+
+        assert [i.type for i in items] == ["i", "i"]
+        assert [i.next_url for i in items] == ["", ""]
+        assert items[0].title == "[31mRed"
+
+
+class TestLatin1SelectorRoundTrip:
+    """A latin-1 server's selector bytes must survive menu -> nextUrl -> wire."""
+
+    def test_latin1_selector_bytes_survive_the_url_round_trip(self):
+        from gopher_mcp.gopher_transport import build_request
+        from gopher_mcp.utils import parse_gopher_url
+
+        client = GopherClient()
+        # An unmistakably latin-1 menu: the accented bytes are invalid UTF-8.
+        raw = "0Café menu\t/café.txt\tgopher.example\t70\r\n.\r\n".encode("latin-1")
+
+        item = client._process_menu_response(raw).items[0]
+
+        # The selector is percent-encoded back to its ON-WIRE byte, not to the
+        # two UTF-8 bytes the character would encode to.
+        assert item.next_url == "gopher://gopher.example:70/0/caf%E9.txt"
+        parsed = parse_gopher_url(item.next_url)
+        assert build_request(parsed.selector) == b"/caf\xe9.txt\r\n"
+
+    def test_utf8_selector_still_round_trips_as_utf8(self):
+        from gopher_mcp.gopher_transport import build_request
+        from gopher_mcp.utils import parse_gopher_url
+
+        client = GopherClient()
+        raw = "0Café menu\t/café.txt\tgopher.example\t70\r\n.\r\n".encode()
+
+        item = client._process_menu_response(raw).items[0]
+
+        assert item.next_url == "gopher://gopher.example:70/0/caf%C3%A9.txt"
+        parsed = parse_gopher_url(item.next_url)
+        assert parsed.selector == "/café.txt"
+        assert build_request(parsed.selector) == "/café.txt\r\n".encode()
+
+    @pytest.mark.asyncio
+    async def test_request_info_selector_is_json_safe(self):
+        """A recovered latin-1 byte travels as a surrogate escape, which cannot
+        be encoded into JSON at all -- the echo must be the lossy form or the
+        whole response fails to serialize."""
+        client = GopherClient(respect_robots_txt=False)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"body"),
+        ):
+            result = await client.fetch("gopher://example.com/0/caf%E9.txt")
+
+        assert isinstance(result, TextResult)
+        assert result.request_info["selector"] == "/caf�.txt"
+        result.model_dump_json()  # must not raise
+
+
+class TestDamagedUtf8Decoding:
+    """One bad byte must not re-read a whole UTF-8 body as latin-1."""
+
+    def test_single_bad_byte_keeps_the_utf8_reading(self):
+        client = GopherClient()
+        raw = "café — naïve résumé".encode() + b"\xff" + b" fin"
+
+        result = client._process_text_response(raw)
+
+        assert result.charset == "utf-8"
+        assert result.text == "café — naïve résumé� fin"
+
+    def test_pervasive_high_bytes_still_decode_as_latin1(self):
+        client = GopherClient()
+        raw = "Café déjà vu".encode("latin-1")
+
+        result = client._process_text_response(raw)
+
+        assert result.charset == "latin-1"
+        assert result.text == "Café déjà vu"
+
+
+class TestBinaryItemTypeCoverage:
+    """'P' (PDF) and ':' (bitmap) are listed item types, not unknown ones."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("gopher_type", "body", "expected_mime"),
+        [
+            ("P", b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n1 0 obj", "application/pdf"),
+            (":", b"BM\x46\x00\x00\x00\x00\x00\x00\x00\x36\x00\x00\x00", "image/bmp"),
+        ],
+    )
+    async def test_binary_item_types_do_not_reach_the_text_path(
+        self, gopher_type, body, expected_mime
+    ):
+        client = GopherClient()
+        parsed_url = GopherURL(
+            host="example.com",
+            port=70,
+            gopherType=gopher_type,
+            selector="/file",
+            search=None,
+        )
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=body),
+        ):
+            result = await client._fetch_content(parsed_url)
+
+        assert isinstance(result, BinaryResult)
+        assert result.mime_type == expected_mime
+
+
+class TestIgnoredSearchIsVisible:
+    """Dropping a ?query on a non-type-7 URL is correct, but must be reported."""
+
+    @pytest.mark.asyncio
+    async def test_non_search_type_reports_search_ignored(self):
+        client = GopherClient(respect_robots_txt=False)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"plain file body"),
+        ):
+            result = await client.fetch("gopher://example.com/0file?zzz")
+
+        assert isinstance(result, TextResult)
+        assert result.request_info["search_ignored"] is True
+
+    @pytest.mark.asyncio
+    async def test_search_type_and_query_less_urls_carry_no_flag(self):
+        client = GopherClient(respect_robots_txt=False, cache_enabled=False)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b".\r\n"),
+        ):
+            searched = await client.fetch("gopher://example.com/7find?term")
+            plain = await client.fetch("gopher://example.com/1/")
+
+        assert "search_ignored" not in searched.request_info
+        assert "search_ignored" not in plain.request_info
+
+
+class TestTimeoutMessageNamesTheConfiguredDeadline:
+    """The transport is handed what is LEFT of the budget, not the setting."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_reports_configured_timeout_not_the_remainder(self):
+        client = GopherClient(respect_robots_txt=False, timeout_seconds=30.0)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(
+                side_effect=GopherTimeoutError(
+                    "Request timed out after 0.999915084001259 seconds"
+                )
+            ),
+        ):
+            result = await client.fetch("gopher://example.com/1/")
+
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "FETCH_ERROR"
+        assert result.error["message"] == "The request timed out after 30.0 seconds"
+
+    @pytest.mark.asyncio
+    async def test_other_transport_errors_are_untouched(self):
+        client = GopherClient(respect_robots_txt=False)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(
+                side_effect=GopherProtocolError("Response exceeds maximum size")
+            ),
+        ):
+            result = await client.fetch("gopher://example.com/1/")
+
+        assert isinstance(result, ErrorResult)
+        assert result.error["message"] == "Response exceeds maximum size"
+
+
+class TestInteractiveResultEchoesTheRequest:
+    """NOT_FETCHABLE was the one Gopher error returning an empty request_info."""
+
+    @pytest.mark.asyncio
+    async def test_interactive_error_echoes_url_and_selector(self):
+        client = GopherClient(respect_robots_txt=False)
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher", new=AsyncMock()
+        ) as mock_fetch:
+            result = await client.fetch("gopher://example.com/8/login")
+
+        # Still no connection: the answer comes from the item type alone.
+        mock_fetch.assert_not_awaited()
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "NOT_FETCHABLE"
+        assert result.request_info["url"] == "gopher://example.com/8/login"
+        assert result.request_info["host"] == "example.com"
+        assert result.request_info["port"] == 70
+        assert result.request_info["type"] == "8"
+        assert result.request_info["selector"] == "/login"
+        assert "timestamp" in result.request_info
+
+
+class TestRobotsProbeSharesOneRequestsWorthOfBudget:
+    """The probe and the fetch it guards are one user request to one host."""
+
+    @pytest.mark.asyncio
+    async def test_probe_and_fetch_take_one_rate_slot_and_one_lookup(self, monkeypatch):
+        resolved: list[str] = []
+
+        async def counting_resolve(host: str, port: int) -> list[str]:
+            resolved.append(host)
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", counting_resolve)
+
+        client = GopherClient(respect_robots_txt=True, cache_enabled=False)
+        client._rate_limiter.acquire = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"hello"),
+        ) as mock_fetch:
+            result = await client.fetch("gopher://example.com/0/f.txt")
+
+        assert isinstance(result, TextResult)
+        # Two wire exchanges (the /robots.txt probe, then the content), but one
+        # rate-limit token and one DNS lookup between them.
+        assert mock_fetch.await_count == 2
+        assert client._rate_limiter.acquire.await_count == 1
+        assert resolved == ["example.com"]
+
+    @pytest.mark.asyncio
+    async def test_a_later_fetch_does_not_inherit_the_probes_credit(self, monkeypatch):
+        """The credit lives in a ContextVar, which outlives the fetch that set
+        it; a second fetch on the same task must pay its own way."""
+        resolved: list[str] = []
+
+        async def counting_resolve(host: str, port: int) -> list[str]:
+            resolved.append(host)
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr("gopher_mcp.ssrf.resolve_host", counting_resolve)
+
+        client = GopherClient(respect_robots_txt=True, cache_enabled=False)
+        client._rate_limiter.acquire = AsyncMock()  # type: ignore[method-assign]
+
+        with patch(
+            "gopher_mcp.gopher_client.fetch_gopher",
+            new=AsyncMock(return_value=b"hello"),
+        ):
+            await client.fetch("gopher://example.com/0/one.txt")
+            await client.fetch("gopher://example.com/0/two.txt")
+
+        # The policy is cached after the first probe, so the second fetch runs
+        # alone -- and pays for its own slot and its own lookup.
+        assert client._rate_limiter.acquire.await_count == 2
+        assert resolved == ["example.com", "example.com"]

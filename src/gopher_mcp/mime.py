@@ -4,6 +4,8 @@
 parse, default, validate and deny-list Gemini MIME types.
 """
 
+import re
+
 from .models import GeminiMimeType
 
 
@@ -204,8 +206,6 @@ def validate_gemini_mime_type(mime_type: "GeminiMimeType") -> bool:
     # reject a spec-valid list, and the caller then discards the entire MIME type
     # (charset included) on that failure.
     if mime_type.lang:
-        import re
-
         tags = mime_type.lang.split(",")
         if not all(re.fullmatch(r"[a-zA-Z0-9-]+", tag) for tag in tags):
             return False

@@ -5,6 +5,7 @@ Gopher and Gemini resources safely and efficiently.
 """
 
 from importlib.metadata import PackageNotFoundError, version
+from typing import Any
 
 # Annotated because server.py imports this name back out of the package while
 # __init__ is still executing; without the annotation mypy cannot infer a type
@@ -21,14 +22,6 @@ __author__ = "Cameron Rye"
 __email__ = "c@meron.io"
 __license__ = "MIT"
 
-from .server import (
-    gemini_batch_fetch,
-    gemini_fetch,
-    gopher_batch_fetch,
-    gopher_fetch,
-    mcp,
-)
-
 __all__ = [
     "gemini_batch_fetch",
     "gemini_fetch",
@@ -36,3 +29,28 @@ __all__ = [
     "gopher_fetch",
     "mcp",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve the server's exports on first access (PEP 562).
+
+    Importing them here eagerly pulled FastMCP and cryptography -- 734 modules,
+    0.3 s -- into every ``import gopher_mcp.gemtext``, coupling the pure parsing
+    modules (whose own docstrings claim to sit at the bottom of the import
+    graph) to the MCP SDK for no benefit. The names stay importable from the
+    package; only the cost moves to whoever actually asks for them.
+
+    Args:
+        name: Attribute being looked up on the package.
+
+    Returns:
+        The named server export.
+
+    Raises:
+        AttributeError: If the package has no such attribute.
+    """
+    if name in __all__:
+        from . import server
+
+        return getattr(server, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

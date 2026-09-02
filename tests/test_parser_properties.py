@@ -169,9 +169,20 @@ def test_parse_gopher_url_never_crashes(s: str) -> None:
 @given(s=arbitrary_url_text)
 def test_parse_gemini_url_never_crashes(s: str) -> None:
     try:
-        parse_gemini_url(s)
+        result = parse_gemini_url(s)
     except ValueError:
-        return
+        return  # clean, expected failure
+    # The success path is the interesting one: these components become the
+    # on-wire ``<url>\r\n`` request line and the client-certificate scope
+    # decision, so a control byte or an un-normalized path reaching GeminiURL
+    # is exactly the regression this module exists to catch.
+    assert not _CONTROL_RE.search(result.host)
+    assert not _CONTROL_RE.search(result.path)
+    assert result.query is None or not _CONTROL_RE.search(result.query)
+    # Normalization is a fixed point: every path-scoped decision downstream
+    # assumes re-normalizing changes nothing.
+    assert result.path == normalize_gemini_path(result.path)
+    assert 1 <= result.port <= 65535
 
 
 @PROPERTY
@@ -255,8 +266,15 @@ def test_menu_item_next_url_round_trips(
     item = parse_menu_line(f"{item_type}Title\t{selector}\t{host}\t{port}")
     assert item is not None
 
+    if not item.next_url:
+        # An info line is banner text, not a link: its host/port fields are
+        # placeholders, so no URL is emitted and there is nothing to round-trip.
+        # A non-printable type degrades to info for the same reason.
+        assert item.type == "i"
+        return
+
     parsed = parse_gopher_url(item.next_url)
-    assert parsed.gopher_type == item_type
+    assert parsed.gopher_type == item.type
     assert parsed.selector == item.selector
     assert parsed.search is None
     assert parsed.host == host

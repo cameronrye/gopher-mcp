@@ -38,6 +38,51 @@ class TestNormalizeHost:
     def test_strips_ipv6_brackets(self):
         assert normalize_host("[::1]") == "::1"
 
+    @pytest.mark.parametrize(
+        "host",
+        ["example.com", "sub.example.com", "192.0.2.1", "xn--exmple-cua.org"],
+    )
+    def test_ascii_hosts_are_returned_unchanged(self, host):
+        assert normalize_host(host) == host
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            "exämple.org",  # U-label
+            "EXÄMPLE.ORG.",  # U-label, upper case, trailing dot
+            "xn--exmple-cua.org",  # A-label
+            "[xn--exmple-cua.org]",  # bracketed
+        ],
+    )
+    def test_idn_spellings_collapse_to_one_a_label(self, spelling):
+        """Every key derived from a host -- the TOFU pin, the client-certificate
+        scope, the rate-limit bucket, the robots policy cache -- must land on
+        one entry, because ``getaddrinfo`` and ``ssl`` apply this same codec and
+        reach one server. Without it a pinned capsule visited by its Unicode
+        spelling gets a fresh trust-on-first-use instead of CERTIFICATE_CHANGED.
+        """
+        assert normalize_host(spelling) == "xn--exmple-cua.org"
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "a\u0080b.org",  # nameprep-prohibited C1 control
+            "ä" * 60 + ".org",  # label too long once punycoded
+        ],
+    )
+    def test_unencodable_unicode_host_is_refused(self, host):
+        """Fail closed: returning the raw U-label would reopen exactly the split
+        the IDNA step closes, and there is no other canonical form to key on."""
+        with pytest.raises(SSRFError, match="IDNA"):
+            normalize_host(host)
+
+    @pytest.mark.parametrize("host", ["a..b", "a" * 64 + ".com"])
+    def test_ascii_hosts_the_codec_rejects_still_pass_through(self, host):
+        """``encodings.idna`` refuses an empty or over-long ASCII label. Those
+        spellings belong in front of the SSRF and allowlist checks unaltered
+        rather than raising out of a normalizer."""
+        assert normalize_host(host) == host
+
 
 class TestClassifyBlockedIp:
     @pytest.mark.parametrize(

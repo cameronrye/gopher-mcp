@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from gopher_mcp.ratelimit import MAX_PENALTY_SECONDS, RateLimiter
+from gopher_mcp.ratelimit import MAX_PENALTY_SECONDS, RateLimited, RateLimiter
 
 
 class _FakeClock:
@@ -157,3 +157,62 @@ class TestRateLimiterAcquire:
             await rl.acquire(f"host{i}.example")
 
         assert len(rl._next_allowed) == 50
+
+
+@pytest.mark.asyncio
+class TestRateLimiterWaitCeiling:
+    """Past a ceiling the limiter answers instead of sleeping.
+
+    A status-44 penalty runs up to MAX_PENALTY_SECONDS, which is far longer
+    than an MCP client waits for a tool call -- and inside a batch the sleeping
+    call also ties up one of the concurrency slots.
+    """
+
+    async def test_a_wait_over_the_ceiling_raises_instead_of_sleeping(self):
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep, max_wait_seconds=30.0)
+        rl.penalize("slow.example", MAX_PENALTY_SECONDS)
+
+        with pytest.raises(RateLimited) as excinfo:
+            await rl.acquire("slow.example")
+
+        sleep.assert_not_awaited()
+        assert excinfo.value.host == "slow.example"
+        assert excinfo.value.retry_after == pytest.approx(MAX_PENALTY_SECONDS)
+        assert "slow.example" in str(excinfo.value)
+
+    async def test_a_wait_under_the_ceiling_still_sleeps(self):
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep, max_wait_seconds=30.0)
+        rl.penalize("polite.example", 5)
+
+        await rl.acquire("polite.example")
+
+        sleep.assert_awaited_once()
+        assert sleep.await_args.args[0] == pytest.approx(5.0)
+
+    async def test_a_refused_request_does_not_reserve_a_slot(self):
+        """It never went out, so it must not push the next caller further back."""
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(60, clock=clock, sleep=sleep, max_wait_seconds=1.0)
+        rl.penalize("slow.example", 120)
+        before = rl._next_allowed["slow.example"]
+
+        with pytest.raises(RateLimited):
+            await rl.acquire("slow.example")
+
+        assert rl._next_allowed["slow.example"] == before
+
+    async def test_no_ceiling_by_default(self):
+        """The historical behaviour: sleep however long the reservation says."""
+        clock = _FakeClock(100.0)
+        sleep = AsyncMock()
+        rl = RateLimiter(0, clock=clock, sleep=sleep)
+        rl.penalize("slow.example", MAX_PENALTY_SECONDS)
+
+        await rl.acquire("slow.example")
+
+        assert sleep.await_args.args[0] == pytest.approx(MAX_PENALTY_SECONDS)

@@ -48,6 +48,8 @@ from urllib.parse import unquote
 
 import structlog
 
+from .ssrf import normalize_host
+
 logger = structlog.get_logger(__name__)
 
 # RFC 9309 §2.5 asks parsers to handle at least 500 KiB. A real robots.txt is a
@@ -442,10 +444,14 @@ class RobotsGate:
 
     @staticmethod
     def _key(host: str, port: int) -> str:
-        """Cache key for a host. Strips the FQDN trailing dot so
-        "example.com." and "example.com" share one policy rather than each
-        getting their own."""
-        return f"{host.lower().rstrip('.')}:{port}"
+        """Cache key for a host.
+
+        Uses the same normalization as the SSRF and TOFU layers -- case, FQDN
+        trailing dot, IPv6 brackets and IDNA -- so "example.com.",
+        "EXAMPLE.com" and the U-label spelling of an internationalized host all
+        share one policy and one probe rather than each getting their own.
+        """
+        return f"{normalize_host(host)}:{port}"
 
     async def allows(self, host: str, port: int, paths: list[str]) -> RobotsDecision:
         """Return whether ``paths`` on ``host:port`` may be fetched."""
@@ -491,6 +497,15 @@ class RobotsGate:
                 cached = self._cache.get(key)
                 if cached is not None and cached.expires_at > self._clock():
                     return cached.policy
+
+                # Re-check the backoff for the same reason. The waiter ahead of
+                # us may have just failed against a dead host, and without this
+                # every queued coroutine probes it again in turn -- a 5-URL
+                # batch paying five connect timeouts, serially, inside the very
+                # lock that exists to make it one request.
+                retry_after = self._retry_after.get(key)
+                if retry_after is not None and retry_after > self._clock():
+                    return cached.policy if cached is not None else None
 
                 try:
                     text = await self._fetcher(host, port)

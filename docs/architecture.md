@@ -454,6 +454,9 @@ answer may be a secret).
 **Cache provenance**: a cache hit does not hand back the stored object. The
 client copies it and stamps `cached=True`, `cached_at` (the entry's own
 `timestamp` — when the copy was actually fetched) and `cache_age_seconds`. The
+entry keeps epoch seconds because the TTL and the age are arithmetic; the
+reported `cached_at` is rendered as an ISO-8601 UTC string, like every other
+instant a result reports. The
 copy matters: tagging in place would also mark the stored entry, and with it the
 response already returned by the fetch that populated it. Only the cacheable
 result kinds declare these fields, so an error or prompt never carries three

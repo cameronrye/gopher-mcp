@@ -99,10 +99,46 @@ class TestGeminiURLParsing:
         with pytest.raises(ValueError, match="URL must not contain userinfo"):
             parse_gemini_url("gemini://user:pass@example.org/")
 
-    def test_fragment_forbidden(self):
-        """Test that URLs with fragments are rejected."""
-        with pytest.raises(ValueError, match="URL must not contain fragment"):
-            parse_gemini_url("gemini://example.org/path#fragment")
+    def test_fragment_is_stripped_not_refused(self):
+        """The spec makes stripping the client's duty and rejection the
+        server's, and it permits a fragment in a 3x redirect target. Refusing
+        here made the tool decline `=> /page#section` links it had just
+        emitted itself."""
+        parsed = parse_gemini_url("gemini://example.org/path#fragment")
+
+        assert parsed.host == "example.org"
+        assert parsed.path == "/path"
+        assert parsed.query is None
+        assert "#" not in format_gemini_url(
+            parsed.host, parsed.port, parsed.path, parsed.query
+        )
+
+    def test_fragment_after_a_query_is_stripped_too(self):
+        parsed = parse_gemini_url("gemini://example.org/p?answer#frag")
+
+        assert parsed.path == "/p"
+        assert parsed.query == "answer"
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "GEMINI://example.org/path",
+            "Gemini://example.org/path",
+            "gEmInI://example.org/path",
+        ],
+    )
+    def test_scheme_is_case_insensitive(self, url):
+        """RFC 3986 s3.1 makes the scheme case-insensitive. Refusing a
+        capitalised one told the caller a valid Gemini URL -- possibly a link
+        this server surfaced -- was not a Gemini URL at all."""
+        parsed = parse_gemini_url(url)
+
+        assert parsed.host == "example.org"
+        assert parsed.path == "/path"
+
+    def test_a_non_gemini_scheme_is_still_refused(self):
+        with pytest.raises(ValueError, match="URL must start with 'gemini://'"):
+            parse_gemini_url("GOPHER://example.org/1/x")
 
     def test_url_length_limit(self):
         """Test that URLs exceeding 1024 bytes are rejected."""
@@ -213,6 +249,75 @@ class TestGeminiPathNormalization:
 
         assert parsed.path == "/app/"
         assert parsed.query == "a/../b"
+
+
+class TestGeminiWireForm:
+    """What goes on the wire is an RFC 3986 absolute-URI: ASCII reg-name, and
+    percent-encoded path/query bytes."""
+
+    def test_idn_host_becomes_its_a_label(self):
+        """Python's TLS layer already sends the A-label as SNI, so leaving the
+        U-label here made the request-line host disagree with SNI (and with the
+        TOFU pin) -- which a virtual-hosting capsule answers with 53."""
+        parsed = parse_gemini_url("gemini://例え.jp/path")
+
+        assert parsed.host == "xn--r8jz45g.jp"
+        assert (
+            format_gemini_url(parsed.host, parsed.port, parsed.path)
+            == "gemini://xn--r8jz45g.jp/path"
+        )
+
+    def test_an_a_label_host_passes_through_unchanged(self):
+        assert parse_gemini_url("gemini://xn--r8jz45g.jp/").host == "xn--r8jz45g.jp"
+
+    def test_an_unencodable_idn_host_is_a_clear_error(self):
+        long_label = "a" * 64
+        with pytest.raises(ValueError, match="internationalized hostname"):
+            parse_gemini_url(f"gemini://é{long_label}.example/")
+
+    def test_non_ascii_path_and_query_are_percent_encoded(self):
+        parsed = parse_gemini_url("gemini://example.org/café?crème")
+
+        assert (
+            format_gemini_url(parsed.host, parsed.port, parsed.path, parsed.query)
+            == "gemini://example.org/caf%C3%A9?cr%C3%A8me"
+        )
+
+    def test_ascii_paths_are_left_byte_for_byte_alone(self):
+        """Only non-ASCII is touched: an already-encoded component, and every
+        ASCII delimiter the caller chose, must survive verbatim."""
+        assert (
+            format_gemini_url("example.org", 1965, "/a%20b/c~d", "x=1&y=2")
+            == "gemini://example.org/a%20b/c~d?x=1&y=2"
+        )
+
+
+class TestGeminiEmptyQuery:
+    """An empty answer to a status-10/11 prompt is a real answer.
+
+    The Gopher path already draws this distinction deliberately (see
+    ``gopher_transport.build_request``); collapsing ``?`` to None here resent
+    the bare URL, so a "press enter to continue" prompt could never be
+    satisfied -- the capsule just replied 10 again.
+    """
+
+    def test_empty_query_is_present_not_absent(self):
+        assert parse_gemini_url("gemini://example.org/guess?").query == ""
+
+    def test_absent_query_is_none(self):
+        assert parse_gemini_url("gemini://example.org/guess").query is None
+
+    def test_empty_query_survives_onto_the_wire(self):
+        parsed = parse_gemini_url("gemini://example.org/guess?")
+
+        assert (
+            format_gemini_url(parsed.host, parsed.port, parsed.path, parsed.query)
+            == "gemini://example.org/guess?"
+        )
+
+    def test_a_fragment_only_question_mark_is_not_a_query(self):
+        """The query begins at the first ``?`` BEFORE any ``#``."""
+        assert parse_gemini_url("gemini://example.org/p#a?b").query is None
 
 
 class TestGeminiURLFormatting:
@@ -502,9 +607,9 @@ class TestGemtextParsingRobustness:
         assert "code with trailing   " in pre_contents
 
     def test_preformat_content_lines_serialize_lean(self):
-        """A code block must not repeat a 6-key metadata dict (plus duplicated
-        alt_text/language) on every content line -- that tripled the serialized
-        size of code blocks. Content lines serialize to just content+is_toggle."""
+        """A code block must not repeat the block's alt text and language on
+        every line inside it -- that tripled the serialized size of code
+        blocks. A content line serializes to just type + content."""
         from gopher_mcp.utils import parse_gemtext
 
         document = parse_gemtext("```python\nprint(1)\nprint(2)\n```")
@@ -512,18 +617,16 @@ class TestGemtextParsingRobustness:
         content_lines = [
             line
             for line in dumped["lines"]
-            if line["type"] == "preformat" and line["preformat"]["is_toggle"] is False
+            if line["type"] == "preformat" and not line["content"].startswith("```")
         ]
         assert len(content_lines) == 2
         for line in content_lines:
-            assert set(line["preformat"].keys()) == {"content", "is_toggle"}
+            assert set(line.keys()) == {"type", "content"}
         # The opening toggle still carries the block-level language/metadata.
-        opening = next(
-            line
-            for line in dumped["lines"]
-            if line["type"] == "preformat" and line["preformat"]["is_toggle"] is True
-        )
-        assert opening["preformat"]["language"] == "python"
+        opening = dumped["lines"][0]
+        assert opening["type"] == "preformat"
+        assert opening["alt_text"] == "python"
+        assert opening["language"] == "python"
 
     def test_does_not_split_on_vertical_tab(self):
         from gopher_mcp.utils import parse_gemtext
@@ -549,7 +652,7 @@ class TestGemtextParsingRobustness:
 
         line = parse_gemtext("#NoSpace").lines[0]
         assert line.type == "heading1"
-        assert line.heading.text == "NoSpace"
+        assert line.text == "NoSpace"
 
     def test_extra_hash_is_heading_content(self):
         from gopher_mcp.utils import parse_gemtext
@@ -558,7 +661,7 @@ class TestGemtextParsingRobustness:
         # keep the remaining '#' as the first character of the heading text.
         line = parse_gemtext("#### four").lines[0]
         assert line.type == "heading3"
-        assert line.heading.text == "# four"
+        assert line.text == "# four"
 
     def test_heading_content_hash_is_not_deleted(self):
         """'####note' is an H3 whose text is '#note' -- the extra marker must not
@@ -567,18 +670,18 @@ class TestGemtextParsingRobustness:
 
         line = parse_gemtext("####note").lines[0]
         assert line.type == "heading3"
-        assert line.heading.text == "#note"
+        assert line.text == "#note"
 
     def test_heading_content_hash_preserved_at_lower_levels(self):
         from gopher_mcp.utils import parse_gemtext
 
-        assert parse_gemtext("##note").lines[0].heading.text == "note"
-        assert parse_gemtext("###note").lines[0].heading.text == "note"
+        assert parse_gemtext("##note").lines[0].text == "note"
+        assert parse_gemtext("###note").lines[0].text == "note"
         # Two markers then content: level 2 with a literal '#' kept is only
         # possible from three markers, so check the H1 case explicitly.
         line = parse_gemtext("#####x").lines[0]
-        assert line.heading.level == 3
-        assert line.heading.text == "##x"
+        assert line.level == 3
+        assert line.text == "##x"
 
     def test_bare_cr_line_endings_are_normalized(self):
         """A legacy CR-only page must still split into lines; otherwise every
@@ -601,7 +704,7 @@ class TestGemtextParsingRobustness:
         # inner indentation of the quoted text.
         line = parse_gemtext(">  two leading spaces").lines[0]
         assert line.type == "quote"
-        assert line.quote.text == " two leading spaces"
+        assert line.text == " two leading spaces"
 
 
 class TestGeminiResponseErrorMessages:

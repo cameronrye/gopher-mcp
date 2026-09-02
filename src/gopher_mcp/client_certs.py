@@ -16,7 +16,8 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from .models import GeminiCertificateInfo
-from .utils import atomic_write_json, get_home_directory
+from .tofu import default_state_directory, legacy_state_path
+from .utils import atomic_write_json
 
 logger = structlog.get_logger(__name__)
 
@@ -44,6 +45,18 @@ class ClientCertificateError(Exception):
     pass
 
 
+class ClientCertificateStorageError(ClientCertificateError):
+    """The certificate store could not be created, read or written.
+
+    Distinct from a certificate problem: nothing was wrong with the identity,
+    the store underneath it was simply unusable. Deliberately not an
+    ``OSError`` -- one escaping this module is caught by a transport handler
+    upstream and reported as an unreachable capsule, turning a read-only disk
+    or a misdirected GEMINI_CLIENT_CERTS_STORAGE_PATH into retry-forever advice
+    for a permanent local fault.
+    """
+
+
 class ClientCertificateKeyRetainedError(ClientCertificateError):
     """Raised when a removal completed but the private key file survived.
 
@@ -60,16 +73,36 @@ class ClientCertificateManager:
         """Initialize client certificate manager.
 
         Args:
-            storage_path: Path to certificate storage directory (default: ~/.gemini/certs/)
+            storage_path: Path to certificate storage directory. Defaults to
+                ``certs`` under gopher-mcp's own per-user data directory, or to
+                an existing legacy ``~/.gemini/certs`` when one is present.
+
+        Raises:
+            ClientCertificateError: If no storage location can be determined.
+            ClientCertificateStorageError: If the store cannot be created.
         """
         if storage_path is None:
-            home_dir = get_home_directory()
-            if home_dir is None:
-                raise ClientCertificateError("Could not determine home directory")
-            storage_path = str(home_dir / ".gemini" / "certs")
+            # An existing ~/.gemini/certs keeps being used exactly where it is:
+            # the private keys in it are unrecoverable, so relocating them
+            # behind the user's back would silently detach every identity from
+            # the scope it authenticates.
+            legacy = legacy_state_path("certs")
+            if legacy is not None:
+                storage_path = str(legacy)
+            else:
+                state_dir = default_state_directory()
+                if state_dir is None:
+                    raise ClientCertificateError("Could not determine home directory")
+                storage_path = str(state_dir / "certs")
 
         self.storage_path = Path(storage_path)
-        self.storage_path.mkdir(parents=True, exist_ok=True)
+        try:
+            self.storage_path.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise ClientCertificateStorageError(
+                f"Could not create the client certificate store at "
+                f"{self.storage_path}: {e}"
+            ) from e
         # Harden directory permissions (mkdir mode is subject to umask).
         with contextlib.suppress(OSError):  # non-POSIX or restricted FS
             self.storage_path.chmod(0o700)
@@ -124,7 +157,11 @@ class ClientCertificateManager:
         )
 
     def _save_registry(self) -> None:
-        """Save certificate registry to storage."""
+        """Save certificate registry to storage.
+
+        Raises:
+            ClientCertificateStorageError: If the registry could not be written.
+        """
         try:
             # Convert certificates to dict for JSON serialization
             data = {}
@@ -135,6 +172,18 @@ class ClientCertificateManager:
             atomic_write_json(str(self.registry_path), data)
 
             logger.debug("Certificate registry saved", count=len(self._certificates))
+        except OSError as e:
+            # A store that cannot be written is a storage failure, not a
+            # transport one -- see ClientCertificateStorageError.
+            logger.error(
+                "Failed to save certificate registry",
+                error=str(e),
+                storage_path=str(self.storage_path),
+            )
+            raise ClientCertificateStorageError(
+                f"Could not write the client certificate registry at "
+                f"{self.registry_path}: {e}"
+            ) from e
         except Exception as e:
             logger.error("Failed to save certificate registry", error=str(e))
             raise
@@ -311,6 +360,21 @@ class ClientCertificateManager:
 
             return str(cert_path), str(key_path)
 
+        except ClientCertificateStorageError:
+            # Already says the store, not the certificate, was the problem;
+            # flattening it into a generic ClientCertificateError would lose
+            # the only distinction a caller can act on.
+            logger.error("Failed to generate client certificate: store unusable")
+            raise
+        except OSError as e:
+            # Writing the certificate or its key failed (read-only store, full
+            # disk, denied path). Same reasoning as _save_registry: report it as
+            # storage, and never as a bare OSError.
+            logger.error("Failed to generate client certificate", error=str(e))
+            raise ClientCertificateStorageError(
+                f"Certificate generation failed: the certificate store at "
+                f"{self.storage_path} could not be written: {e}"
+            ) from e
         except Exception as e:
             logger.error("Failed to generate client certificate", error=str(e))
             raise ClientCertificateError(f"Certificate generation failed: {e}") from e

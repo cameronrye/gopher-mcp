@@ -9,13 +9,32 @@ import contextlib
 import json
 import os
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 # Whitespace that carries meaning in a multi-line body and therefore survives
-# ``sanitize_display_text`` even though it is not "printable".
+# ``sanitize_display_text`` even though it is a control character.
 _MEANINGFUL_WHITESPACE = ("\n", "\t", "\r")
+
+# Unicode general categories dropped by ``sanitize_display_text``: C0/C1
+# controls (Cc -- NUL, DEL and every byte an ANSI CSI/OSC sequence is built
+# from), format characters (Cf), lone surrogates (Cs), private-use code points
+# (Co) and the line/paragraph separators a terminal acts on (Zl/Zp).
+#
+# The predicate used to be ``str.isprintable()``, which additionally reports
+# False for every space separator other than U+0020: NBSP, U+2009 and the CJK
+# ideographic space U+3000 were being deleted outright, fusing words and losing
+# the paragraph indent of a Japanese page. Zs is visible text, so it is kept.
+_DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
+
+# The two Cf characters that are load-bearing rather than invisible padding:
+# U+200D joins a ZWJ emoji sequence into one glyph (dropping it turns a family
+# emoji into three separate people) and U+200C separates letters in Persian and
+# Indic scripts. Every other Cf -- U+200B and friends -- stays stripped, which
+# is the deliberate choice the zero-width test pins.
+_KEPT_FORMAT_CHARACTERS = ("\u200c", "\u200d")
 
 
 def atomic_write_json(file_path: str, data: Any) -> None:
@@ -98,13 +117,20 @@ def bracket_host(host: str) -> str:
 
 
 def sanitize_display_text(text: str, *, keep_whitespace: bool = True) -> str:
-    """Strip non-printable characters from server-supplied text bound for the LLM.
+    """Strip dangerous invisible characters from server-supplied display text.
 
     Every string a remote gopher/gemini server controls -- menu titles, decoded
     bodies, gemtext link labels, a Gemini ``<META>`` -- reaches the model (and
     often a terminal) verbatim. ANSI escapes (CSI/OSC), NUL and other C0/C1
     control characters in that text are a display-injection vector, so drop them
     everywhere rather than at individual call sites.
+
+    Removed: control characters (Cc), format characters (Cf), lone surrogates
+    (Cs), private-use code points (Co) and line/paragraph separators (Zl, Zp).
+    Kept: everything else, including every space separator (Zs -- NBSP, thin
+    space, the CJK ideographic space) and the two format characters a reader can
+    see the effect of, ZWJ (U+200D) and ZWNJ (U+200C). Sanitising must not
+    silently rewrite the text it is protecting.
 
     Args:
         text: Raw server-supplied text.
@@ -113,11 +139,17 @@ def sanitize_display_text(text: str, *, keep_whitespace: bool = True) -> str:
             single field (a menu title, a ``<META>``) where they are noise.
 
     Returns:
-        ``text`` with every non-printable character removed.
+        ``text`` with every dangerous invisible character removed.
 
     """
-    allowed = _MEANINGFUL_WHITESPACE if keep_whitespace else ()
-    return "".join(char for char in text if char.isprintable() or char in allowed)
+    allowed = _KEPT_FORMAT_CHARACTERS + (
+        _MEANINGFUL_WHITESPACE if keep_whitespace else ()
+    )
+    return "".join(
+        char
+        for char in text
+        if char in allowed or unicodedata.category(char) not in _DROPPED_CATEGORIES
+    )
 
 
 def resolve_gemini_reference(base_url: str, target: str) -> str:

@@ -4,12 +4,14 @@ import time
 from datetime import UTC, datetime
 from enum import Enum, IntEnum
 from typing import Annotated, Any, Generic, Literal, TypeVar
+from urllib.parse import urlsplit
 
 from pydantic import (
     BaseModel,
     Field,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 # Cache provenance. Only the result kinds the clients actually cache carry these
@@ -30,10 +32,10 @@ _CachedFlag = Annotated[
     ),
 ]
 _CachedAt = Annotated[
-    float | None,
+    str | None,
     Field(
         description=(
-            "UNIX timestamp (seconds) at which the cached copy was actually "
+            "ISO-8601 UTC timestamp at which the cached copy was actually "
             "fetched from the server. Null when `cached` is false."
         )
     ),
@@ -50,7 +52,73 @@ _CacheAgeSeconds = Annotated[
     ),
 ]
 
+# Continuation contract for the render caps. `truncated` alone is a dead end:
+# it tells the model something is missing but not how much, and gives it nothing
+# to pass back to see the rest. These three say how big the whole resource is
+# and where the next window starts, in the same unit the caller counts in --
+# items for a menu, characters for a page body (`bytes`/`size` are byte counts,
+# which an offset cannot be expressed in without splitting a UTF-8 sequence).
+_TotalItems = Annotated[
+    int | None,
+    Field(
+        description=(
+            "How many items the menu holds in total, before the render limit "
+            "was applied. Null when the total was not counted."
+        )
+    ),
+]
+_TotalChars = Annotated[
+    int | None,
+    Field(
+        description=(
+            "How many characters the full body holds, before the render limit "
+            "was applied. Null when the total was not counted."
+        )
+    ),
+]
+_NextOffset = Annotated[
+    int | None,
+    Field(
+        description=(
+            "Where the part that was cut begins. Pass it back as `offset` to "
+            "fetch the next window of the same resource. Null when nothing was "
+            "cut and there is no more to fetch."
+        )
+    ),
+]
+
 _ResultT = TypeVar("_ResultT", bound=BaseModel)
+
+
+def iso_utc(timestamp: float | None) -> str | None:
+    """Render a UNIX timestamp the way tool results report instants.
+
+    Results speak ISO-8601 UTC (``2026-09-02T12:00:00+00:00``) rather than epoch
+    seconds: the client-certificate tools already report validity windows that
+    way, so an epoch float elsewhere made the identical `expires` concept arrive
+    in two incompatible formats, and left a model doing arithmetic to answer
+    "when was this pinned" or "has this expired". Sub-second precision is
+    dropped -- it is noise to every reader of a payload.
+
+    EVERY instant a result reports goes through here -- ``cached_at``, the trust
+    store's ``first_seen``/``last_seen``/``expires``, and the ``timestamp`` in
+    each result's ``request_info`` -- so one payload can never carry two
+    spellings of the same concept. Times that are *computed with* rather than
+    reported stay floats: cache entry timestamps and ``cache_age_seconds``, the
+    rate limiter and robots clocks, the deadline and budget arithmetic, and the
+    on-disk ``tofu.json`` epoch format (docs/architecture.md). Only the wire
+    changes.
+
+    Args:
+        timestamp: UNIX timestamp in seconds, or None.
+
+    Returns:
+        The ISO-8601 UTC rendering, or None when ``timestamp`` is None.
+
+    """
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, UTC).replace(microsecond=0).isoformat()
 
 
 def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
@@ -62,7 +130,8 @@ def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
 
     Args:
         response: The cached result to tag.
-        cached_at: When the cached copy was fetched from the server.
+        cached_at: When the cached copy was fetched from the server, as a UNIX
+            timestamp. Reported to the caller as an ISO-8601 UTC string.
 
     Returns:
         A copy of ``response`` carrying the cache-provenance fields.
@@ -71,7 +140,7 @@ def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
     return response.model_copy(
         update={
             "cached": True,
-            "cached_at": cached_at,
+            "cached_at": iso_utc(cached_at),
             "cache_age_seconds": round(time.time() - cached_at, 1),
         }
     )
@@ -124,6 +193,8 @@ class MenuResult(BaseModel):
         description="True if the menu had more items than the render limit and "
         "`items` was truncated",
     )
+    total_items: _TotalItems = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
@@ -146,6 +217,8 @@ class TextResult(BaseModel):
         description="True if `text` was truncated to the render limit (`bytes` "
         "still reports the full original size)",
     )
+    total_chars: _TotalChars = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
@@ -392,7 +465,14 @@ class GeminiResponse(BaseModel):
         return v
 
 
-# Response result models following Gopher patterns
+# Response result models following Gopher patterns.
+#
+# One deliberate exception to "following": the Gemini results name the content
+# length `size` where the Gopher results name the same fact `bytes`. It is one
+# concept under two wire names, and it is kept only because renaming either
+# would break every consumer of the tool output that already reads it. Anything
+# protocol-agnostic (the clients' log lines, docs) must therefore handle both
+# spellings; converge on one name only in a release that is already breaking.
 class GeminiSuccessResult(BaseModel):
     """Result model for a successful Gemini response carrying TEXT content.
 
@@ -411,6 +491,8 @@ class GeminiSuccessResult(BaseModel):
         description="True if `content` was truncated to the render limit "
         "(`size` still reports the full original size).",
     )
+    total_chars: _TotalChars = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
@@ -465,16 +547,68 @@ class GeminiInputResult(BaseModel):
 
 
 class GeminiRedirectResult(BaseModel):
-    """Result model for redirect responses (status 30/31)."""
+    """Result model for redirect responses (status 30/31).
+
+    This server does not follow redirects: the caller does, by fetching
+    ``new_url``. So the payload has to carry what a caller needs to decide
+    whether following is safe -- the Gemini spec's five-hop limit is only
+    enforceable by whoever is counting the hops, and a target on another host
+    or in another scheme is the one worth stopping on.
+    """
 
     kind: Literal["redirect"] = "redirect"
-    new_url: str = Field(..., alias="newUrl", description="Redirect target URL")
+    new_url: str = Field(
+        ...,
+        alias="newUrl",
+        description="Redirect target URL. Follow at most five in a row, and "
+        "stop if a URL you have already visited comes back: a capsule can "
+        "otherwise spin a client through an unbounded chain of fetches",
+    )
     permanent: bool = Field(default=False, description="Whether redirect is permanent")
+    cross_host: bool | None = Field(
+        default=None,
+        description="True when `new_url` names a host other than the one that "
+        "was requested, so the content it serves is a different party's. Null "
+        "when the target could not be compared with the request",
+    )
+    scheme: str | None = Field(
+        default=None,
+        description="Scheme of `new_url`. Anything other than `gemini` leaves "
+        "Geminispace and cannot be fetched with this tool. Null when the "
+        "target names no scheme and the request's is unknown",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",
         description="Information about the original request",
     )
+
+    @model_validator(mode="after")
+    def describe_target(self) -> "GeminiRedirectResult":
+        """Fill ``scheme`` and ``cross_host`` from the target and the request.
+
+        Derived here rather than at the call site so every redirect result
+        carries them, whichever code path built it.
+        """
+        try:
+            target = urlsplit(self.new_url)
+            requested = self.request_info.get("url")
+            source = urlsplit(requested) if isinstance(requested, str) else None
+        except ValueError:  # a target too malformed to split tells us nothing
+            return self
+
+        if self.scheme is None:
+            # A relative target ("/elsewhere") stays in the request's scheme.
+            inherited = source.scheme if source is not None else ""
+            self.scheme = (target.scheme or inherited).lower() or None
+
+        if self.cross_host is None:
+            if not target.netloc:
+                self.cross_host = False
+            elif source is not None and source.hostname:
+                self.cross_host = target.hostname != source.hostname
+
+        return self
 
 
 # The Gemini error result IS :class:`ErrorResult`; the alias keeps the
@@ -551,84 +685,60 @@ class GemtextLink(BaseModel):
         return v.strip()
 
 
-class GemtextHeading(BaseModel):
-    """Model for gemtext heading lines."""
-
-    level: int = Field(..., description="Heading level (1-3)", ge=1, le=3)
-    text: str = Field(..., description="Heading text content")
-    raw_content: str = Field(..., description="Raw line content including # markers")
-
-
-class GemtextList(BaseModel):
-    """Model for gemtext list items."""
-
-    text: str = Field(..., description="List item text content")
-    raw_content: str = Field(..., description="Raw line content including * marker")
-
-
-class GemtextQuote(BaseModel):
-    """Model for gemtext quote lines."""
-
-    text: str = Field(..., description="Quote text content")
-    raw_content: str = Field(..., description="Raw line content including > marker")
-
-
-class GemtextPreformat(BaseModel):
-    """Model for gemtext preformat content."""
-
-    content: str = Field(..., description="Preformat content")
-    alt_text: str | None = Field(None, description="Alt text for accessibility")
-    is_toggle: bool = Field(
-        default=False, description="Whether this is a toggle line (```)"
-    )
-    language: str | None = Field(None, description="Detected programming language")
-    metadata: dict[str, Any] = Field(
-        default_factory=dict, description="Additional metadata"
-    )
-
-    @model_serializer(mode="wrap")
-    def _serialize(self, handler: Any) -> dict[str, Any]:
-        """Drop null/empty fields on serialization.
-
-        Block-level metadata (alt_text/language/metadata) is populated only on
-        the opening toggle line; a content line then serializes to just its
-        ``content`` and ``is_toggle`` instead of repeating empty alt_text,
-        language and an empty metadata dict on every line. Attribute access is
-        unaffected; only the serialized dict is trimmed.
-        """
-        data: dict[str, Any] = handler(self)
-        return {k: v for k, v in data.items() if v is not None and v != {}}
-
-
 class GemtextLine(BaseModel):
-    """Model for a single line in gemtext format."""
+    """Model for a single line in gemtext format.
+
+    One fact, one field, all of them on the line itself. Each line type used to
+    nest a second object as well (``heading``/``list_item``/``quote``/
+    ``preformat``), and every one of those carried a ``raw_content`` (or
+    ``content``) that repeated this line's ``content`` verbatim -- so a parsed
+    page serialized each of its lines two or three times, and the whole body
+    once more in ``GeminiGemtextResult.raw_content``. Context is the scarce
+    resource for a model reading a capsule, so only what ``type`` and
+    ``content`` cannot already say is kept: the resolved link target, the
+    heading level, the marker-stripped ``text``, and a preformatted block's
+    alt-text and detected language.
+    """
 
     type: GemtextLineType = Field(..., description="Type of gemtext line")
-    content: str = Field(..., description="Line content")
-    link: GemtextLink | None = Field(None, description="Link data (for link lines)")
+    content: str = Field(
+        ..., description="The line as the server sent it, leading marker included"
+    )
+    text: str | None = Field(
+        None,
+        description=(
+            "The line's text with its leading marker removed, for heading, "
+            "list-item and quote lines. Absent where `content` is already the "
+            "text"
+        ),
+    )
+    link: GemtextLink | None = Field(
+        None, description="Link target and text (for link lines)"
+    )
     level: int | None = Field(None, description="Heading level (1-3, for headings)")
-    alt_text: str | None = Field(None, description="Alt text (for preformat blocks)")
-
-    # Structured content for specific line types
-    heading: GemtextHeading | None = Field(
-        None, description="Heading data (for heading lines)"
+    alt_text: str | None = Field(
+        None,
+        description=(
+            "Alt text of a preformatted block, carried on the opening ``` "
+            "toggle that declares it rather than repeated on every line inside"
+        ),
     )
-    list_item: GemtextList | None = Field(
-        None, description="List data (for list lines)"
-    )
-    quote: GemtextQuote | None = Field(None, description="Quote data (for quote lines)")
-    preformat: GemtextPreformat | None = Field(
-        None, description="Preformat data (for preformat lines)"
+    language: str | None = Field(
+        None,
+        description=(
+            "Programming language recognised from `alt_text`, on the opening "
+            "toggle of a preformatted block"
+        ),
     )
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         """Drop the always-null per-line fields on serialization.
 
-        Every line only populates the one structured field matching its type, so
-        the other six (link/level/alt_text/heading/list_item/quote/preformat)
-        were emitted as ``null`` on every line -- pure token bloat for the LLM.
-        Attribute access is unaffected; only the serialized dict is trimmed.
+        A line populates only the fields its type uses, so the rest were
+        emitted as ``null`` on every line -- pure token bloat for the LLM. A
+        plain text line serializes to just ``type`` and ``content``. Attribute
+        access is unaffected; only the serialized dict is trimmed.
         """
         data: dict[str, Any] = handler(self)
         return {k: v for k, v in data.items() if v is not None}
@@ -648,7 +758,16 @@ class GeminiGemtextResult(BaseModel):
 
     kind: Literal["gemtext"] = "gemtext"
     document: GemtextDocument = Field(..., description="Parsed gemtext document")
-    raw_content: str = Field(..., alias="rawContent", description="Raw gemtext content")
+    # Held for callers that need the body as one string -- the robots.txt reader
+    # in gemini_client.py parses it -- but deliberately NOT serialized: every
+    # line of it is already in `document.lines[*].content`, and shipping the
+    # whole page a second time was a third of the payload the model paid for.
+    raw_content: str = Field(
+        ...,
+        alias="rawContent",
+        exclude=True,
+        description="Raw gemtext content (server-side only; see `document`)",
+    )
     charset: str = Field(default="utf-8", description="Character encoding")
     lang: str | None = Field(None, description="Language tag")
     size: int = Field(..., description="Content size in bytes")
@@ -657,6 +776,8 @@ class GeminiGemtextResult(BaseModel):
         description="True if the gemtext was truncated to the render limit "
         "(`size` still reports the full original byte size)",
     )
+    total_chars: _TotalChars = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
@@ -770,7 +891,11 @@ class GeminiClientCertificateEntry(BaseModel):
 
 
 class TOFUEntry(BaseModel):
-    """Model for Trust-on-First-Use certificate storage."""
+    """Model for Trust-on-First-Use certificate storage.
+
+    The on-disk record, kept in epoch seconds because that is what ``tofu.json``
+    holds. What ``gemini_trust_list`` reports is :class:`TOFUTrustEntry`.
+    """
 
     host: str = Field(..., description="Hostname")
     port: int = Field(default=1965, description="Port number")
@@ -784,6 +909,72 @@ class TOFUEntry(BaseModel):
         return self.expires is not None and current_time > self.expires
 
 
+class TOFUTrustEntry(BaseModel):
+    """A pinned certificate as reported by ``gemini_trust_list``.
+
+    A result-side projection of :class:`TOFUEntry`, following the
+    :class:`GeminiClientCertificateEntry` precedent: the store keeps epoch
+    seconds, but the tool that explains a CERTIFICATE_CHANGED failure has to be
+    read by a model, and epoch floats made it answer "was this reissue routine?"
+    by arithmetic -- while the client-certificate tools reported the very same
+    `expires` concept as an ISO-8601 string, so the two disagreed about what a
+    timestamp looks like. ``expired`` is precomputed for the same reason.
+    """
+
+    host: str = Field(..., description="Host this certificate is pinned for")
+    port: int = Field(default=1965, description="Port this certificate is pinned for")
+    fingerprint: str = Field(
+        ...,
+        description="SHA-256 fingerprint of the pinned certificate. This is the "
+        "value gemini_trust_update requires before it will drop the pin",
+    )
+    first_seen: str = Field(
+        ...,
+        description="ISO-8601 UTC time this certificate was first seen, i.e. "
+        "when the pin was established",
+    )
+    last_seen: str = Field(
+        ...,
+        description="ISO-8601 UTC time this certificate was last presented",
+    )
+    expires: str | None = Field(
+        None,
+        description="ISO-8601 UTC end of the certificate's validity window. "
+        "Null when the certificate carries no expiry",
+    )
+    expired: bool = Field(
+        default=False,
+        description="True if the validity window has ended, which makes a "
+        "reissue -- and so a changed fingerprint -- the likely explanation",
+    )
+
+    @classmethod
+    def from_entry(cls, entry: TOFUEntry, now: float | None = None) -> "TOFUTrustEntry":
+        """Project a stored :class:`TOFUEntry` onto the reported shape.
+
+        Args:
+            entry: The stored trust-store record.
+            now: UNIX timestamp to judge expiry against (default: now).
+
+        Returns:
+            The entry as ``gemini_trust_list`` reports it.
+
+        """
+        current_time = time.time() if now is None else now
+        first_seen = iso_utc(entry.first_seen)
+        last_seen = iso_utc(entry.last_seen)
+        return cls(
+            host=entry.host,
+            port=entry.port,
+            fingerprint=entry.fingerprint,
+            # iso_utc only returns None for a None input, and both are floats.
+            first_seen=first_seen or "",
+            last_seen=last_seen or "",
+            expires=iso_utc(entry.expires),
+            expired=entry.is_expired(current_time),
+        )
+
+
 class TOFUTrustListResult(BaseModel):
     """Result model for a read-only inspection of the TOFU trust store.
 
@@ -793,10 +984,27 @@ class TOFUTrustListResult(BaseModel):
     """
 
     kind: Literal["trust_list"] = "trust_list"
-    entries: list[TOFUEntry] = Field(
+    entries: list[TOFUTrustEntry] = Field(
         ...,
         description="Pinned certificates matching the request, ordered by host",
     )
+
+    @field_validator("entries", mode="before")
+    @classmethod
+    def project_stored_entries(cls, v: Any) -> Any:
+        """Accept stored :class:`TOFUEntry` records and project them.
+
+        The projection happens here rather than at the call site so the store's
+        epoch timestamps cannot reach the wire by anyone assembling this result
+        from what the trust manager hands back.
+        """
+        if isinstance(v, list):
+            return [
+                TOFUTrustEntry.from_entry(item) if isinstance(item, TOFUEntry) else item
+                for item in v
+            ]
+        return v
+
     request_info: dict[str, Any] = Field(
         default_factory=dict,
         alias="requestInfo",

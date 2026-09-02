@@ -15,6 +15,7 @@ from gopher_mcp.client_certs import (
     ClientCertificateError,
     ClientCertificateKeyRetainedError,
     ClientCertificateManager,
+    ClientCertificateStorageError,
 )
 from gopher_mcp.models import GeminiCertificateInfo
 
@@ -32,26 +33,42 @@ class TestClientCertificateError:
 class TestClientCertificateManager:
     """Test ClientCertificateManager class."""
 
-    def test_initialization_default_path(self):
-        """Test manager initialization with default path."""
-        with (
-            patch("gopher_mcp.client_certs.get_home_directory") as mock_home,
-            patch("pathlib.Path.mkdir") as mock_mkdir,
-            patch.object(ClientCertificateManager, "_load_registry"),
-        ):
-            mock_home.return_value = Path("/home/user")
+    def test_initialization_default_path(self, monkeypatch, tmp_path):
+        """A fresh install keeps its identities in gopher-mcp's own data dir.
 
-            manager = ClientCertificateManager()
+        ~/.gemini is Google's Gemini CLI configuration directory, so private
+        keys are no longer written into it (nor is its mode tightened).
+        """
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.setattr("gopher_mcp.tofu.get_home_directory", lambda: tmp_path)
 
-            # Use os.path.normpath to handle platform differences
-            expected_path = str(Path("/home/user/.gemini/certs"))
-            assert str(manager.storage_path) == expected_path
-            mock_mkdir.assert_called_once_with(parents=True, exist_ok=True)
+        manager = ClientCertificateManager()
 
-    def test_initialization_no_home_directory(self):
+        assert manager.storage_path == tmp_path / "data" / "gopher-mcp" / "certs"
+        assert manager.storage_path.is_dir()
+        assert not (tmp_path / ".gemini").exists()
+
+    def test_initialization_uses_existing_legacy_store(self, monkeypatch, tmp_path):
+        """Identities already minted under ~/.gemini/certs stay where they are.
+
+        The private keys there are unrecoverable, so relocating them behind the
+        user's back would detach every identity from the scope it authenticates.
+        """
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        monkeypatch.setattr("gopher_mcp.tofu.get_home_directory", lambda: tmp_path)
+        legacy = tmp_path / ".gemini" / "certs"
+        legacy.mkdir(parents=True)
+
+        manager = ClientCertificateManager()
+
+        assert manager.storage_path == legacy
+        assert not (tmp_path / "data").exists()
+
+    def test_initialization_no_home_directory(self, monkeypatch):
         """Test manager initialization when home directory cannot be determined."""
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
         with (
-            patch("gopher_mcp.client_certs.get_home_directory") as mock_home,
+            patch("gopher_mcp.tofu.get_home_directory") as mock_home,
             patch.object(ClientCertificateManager, "_load_registry"),
         ):
             mock_home.return_value = None
@@ -168,7 +185,12 @@ class TestClientCertificateManager:
             assert data["example.com:1965/"]["fingerprint"] == "sha256:abc123"
 
     def test_save_registry_error(self):
-        """Test save registry error handling."""
+        """A failed registry write surfaces as a storage error, not an OSError.
+
+        An OSError leaving this module is caught upstream by a blanket
+        transport handler and reported as an unreachable capsule, which turns a
+        permanent local fault into advice to retry.
+        """
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = ClientCertificateManager(temp_dir)
 
@@ -178,9 +200,12 @@ class TestClientCertificateManager:
                     "gopher_mcp.client_certs.atomic_write_json",
                     side_effect=OSError("Permission denied"),
                 ),
-                pytest.raises(OSError),
+                pytest.raises(ClientCertificateStorageError) as exc_info,
             ):
                 manager._save_registry()
+
+            assert not isinstance(exc_info.value, OSError)
+            assert "Permission denied" in str(exc_info.value)
 
     def test_generate_certificate_invalid_host(self):
         """Test certificate generation with invalid host."""
@@ -651,7 +676,7 @@ class TestStoreChangesAreTransactional:
                     "gopher_mcp.client_certs.atomic_write_json",
                     side_effect=OSError("Read-only file system"),
                 ),
-                pytest.raises(OSError),
+                pytest.raises(ClientCertificateStorageError),
             ):
                 manager.remove_certificate("example.com", 1965, "/app/")
 
@@ -733,3 +758,63 @@ class TestClientCertScopeNormalization:
             assert mgr._get_cert_key("Example.COM.", 1965, "/") == mgr._get_cert_key(
                 "example.com", 1965, "/"
             )
+
+
+class TestClientCertStoreWriteFailures:
+    """An unusable certificate store must be reported as exactly that."""
+
+    @staticmethod
+    def _guard_root() -> None:
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root ignores directory permissions")
+
+    def test_uncreatable_store_raises_storage_error_not_oserror(self, tmp_path):
+        """A raw OSError out of the manager reaches a transport handler upstream
+        and is reported as an unreachable capsule -- retry-forever advice for a
+        permanent local fault."""
+        self._guard_root()
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        parent.chmod(0o500)
+        try:
+            with pytest.raises(ClientCertificateStorageError) as exc_info:
+                ClientCertificateManager(str(parent / "certs"))
+        finally:
+            parent.chmod(0o700)
+
+        assert not isinstance(exc_info.value, OSError)
+        assert isinstance(exc_info.value, ClientCertificateError)
+
+    def test_unwritable_registry_raises_storage_error_not_oserror(self, tmp_path):
+        """Same for the registry write behind gemini_client_cert_update."""
+        self._guard_root()
+        manager = ClientCertificateManager(str(tmp_path / "certs"))
+        manager.storage_path.chmod(0o500)
+        try:
+            with pytest.raises(ClientCertificateStorageError) as exc_info:
+                manager.generate_certificate("example.com", 1965, "/", validity_days=30)
+        finally:
+            manager.storage_path.chmod(0o700)
+
+        assert not isinstance(exc_info.value, OSError)
+        # And nothing is left claiming an identity that was never stored.
+        assert manager.list_certificates() == []
+
+    def test_generation_reports_a_registry_failure_as_storage(self, tmp_path):
+        """The key pair was written but the registry was not, so the identity
+        does not exist: the caller must hear "store", not a generic failure it
+        cannot distinguish from a bad certificate request."""
+        manager = ClientCertificateManager(str(tmp_path / "certs"))
+
+        with (
+            patch(
+                "gopher_mcp.client_certs.atomic_write_json",
+                side_effect=OSError("Read-only file system"),
+            ),
+            pytest.raises(ClientCertificateStorageError),
+        ):
+            manager.generate_certificate("example.com", 1965, "/", validity_days=30)
+
+        assert manager.list_certificates() == []
+        # The orphaned key pair is cleaned up rather than left at rest.
+        assert list(manager.storage_path.glob("*.key")) == []

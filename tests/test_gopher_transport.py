@@ -44,6 +44,34 @@ def test_decode_latin1_fallback():
     assert text == "café"
 
 
+def test_decode_keeps_utf8_when_only_a_byte_or_two_is_damaged():
+    """Falling back on the FIRST bad byte re-read an otherwise valid UTF-8 page
+    as latin-1, mojibaking every accented character in it (and caching that for
+    the whole TTL). Only the damaged byte becomes U+FFFD."""
+    raw = "café — naïve résumé".encode() + b"\xff" + b" fin"
+    text, charset = decode_gopher_text(raw)
+    assert charset == "utf-8"
+    assert text == "café — naïve résumé\ufffd fin"
+
+
+def test_decode_falls_back_when_the_body_is_pervasively_8_bit():
+    """A real latin-1 document fails on essentially every non-ASCII byte, so it
+    still decodes as latin-1 rather than becoming a wall of U+FFFD."""
+    raw = "Café déjà vu, à côté".encode("latin-1")
+    text, charset = decode_gopher_text(raw)
+    assert charset == "latin-1"
+    assert text == "Café déjà vu, à côté"
+
+
+def test_build_request_preserves_non_utf8_selector_bytes():
+    """A selector recovered from a latin-1 menu carries its original bytes as
+    surrogate escapes; the wire must get those bytes, not a fresh UTF-8 encode
+    of the characters they happened to decode to."""
+    recovered = b"/caf\xe9.txt".decode("utf-8", errors="surrogateescape")
+    assert build_request(recovered) == b"/caf\xe9.txt\r\n"
+    assert build_request(recovered, "q") == b"/caf\xe9.txt\tq\r\n"
+
+
 async def _serve(
     payload: bytes,
     record: list[bytes] | None = None,

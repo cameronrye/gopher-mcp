@@ -680,6 +680,11 @@ Every result includes a `request_info` field — a free-form object
 URL, host, port, and timing. It is not a fixed schema, so treat its keys as
 best-effort metadata rather than a guaranteed contract.
 
+Its `timestamp` is an ISO-8601 UTC string (`"2026-09-02T12:00:00+00:00"`), the
+same spelling `cached_at` and the certificate tools' validity windows use: no
+result reports an instant as an epoch number, so no two fields of one payload
+need reading differently.
+
 The trust-store tools echo back only what the caller supplied (the `host`, and
 the `port` for an update) plus a timestamp, so an error can never become a way to
 read state the caller did not ask about.
@@ -694,7 +699,7 @@ now say so:
 | Field | Type | Meaning |
 |-------|------|---------|
 | `cached` | boolean | `true` when the result was replayed from the local cache instead of fetched during this call |
-| `cached_at` | float \| null | UNIX timestamp at which the cached copy was actually fetched from the server. `null` when `cached` is `false` |
+| `cached_at` | string \| null | ISO-8601 UTC timestamp at which the cached copy was actually fetched from the server. `null` when `cached` is `false` |
 | `cache_age_seconds` | float \| null | How old that copy was, in seconds, when the result was returned. `null` when `cached` is `false` |
 
 These three fields appear **only on the result kinds the clients actually

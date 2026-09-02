@@ -26,9 +26,10 @@ from .models import (
     GeminiFetchResponse,
     GeminiURL,
     TOFUEntry,
+    iso_utc,
     mark_from_cache,
 )
-from .ratelimit import sanitize_penalty_seconds
+from .ratelimit import RateLimited, sanitize_penalty_seconds
 from .robots import (
     GEMINI_TOKENS,
     ROBOTS_MAX_BYTES,
@@ -43,7 +44,6 @@ from .tofu import (
     TOFUValidationError,
 )
 from .utils import (
-    normalize_cache_key,
     parse_gemini_response,
     parse_gemini_url,
     process_gemini_response,
@@ -108,6 +108,35 @@ class _FetchBudget:
 # their own budget.
 _FETCH_BUDGET: ContextVar[_FetchBudget | None] = ContextVar(
     "gemini_fetch_budget", default=None
+)
+
+
+@dataclass
+class _ProbeCredit:
+    """What the robots probe already paid for, on behalf of the fetch it guards.
+
+    The probe and the fetch it precedes are one user-visible request to one
+    capsule, but each used to take its own rate-limit token and run its own DNS
+    lookup -- so with the shipped defaults (60 rpm, robots on) every first fetch
+    to a host slept a full second before anything could be sent, and resolved
+    the same name twice. Both halves are handed straight to the fetch that
+    follows, which is the only thing that ever runs after a probe. Mirrors the
+    Gopher client, which carries the identical structure for the same reason.
+    """
+
+    host: str
+    port: int
+    #: Vetted connect addresses, filled in by the probe's own ``_fetch_content``
+    #: (which is where Gemini resolves) and read by the fetch that follows.
+    addresses: list[str] | None
+    rate_slot: bool
+
+
+# Set by the robots probe, consumed by the fetch it guards. A ContextVar for the
+# same reason as the budget above: the probe is invoked through RobotsGate, which
+# owns its fetcher signature, and awaits it inside the calling task.
+_PROBE_CREDIT: ContextVar[_ProbeCredit | None] = ContextVar(
+    "gemini_probe_credit", default=None
 )
 
 
@@ -210,6 +239,13 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             robots_honor_ai_tokens=robots_honor_ai_tokens,
             robots_failure_backoff_seconds=robots_failure_backoff_seconds,
         )
+        # A status-44 penalty is capped at MAX_PENALTY_SECONDS (300), which is
+        # far longer than one tool call may spend asleep: the MCP client's own
+        # call timeout fires first, and in a batch the sleeping call also ties up
+        # a concurrency slot. Past the configured request deadline the limiter
+        # answers with RateLimited instead, which fetch() turns into a structured
+        # "backing off, retry in N seconds" the model can act on.
+        self._rate_limiter.max_wait_seconds = timeout_seconds
         self.denied_mime_types = frozenset(denied_mime_types or ())
         self.tofu_enabled = tofu_enabled
         self.client_certs_enabled = client_certs_enabled
@@ -305,6 +341,11 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         # runs the same multi-phase exchange as the fetch it guards, so a tarpit
         # host could spend the configured timeout twice over in one tool call.
         budget_token = _FETCH_BUDGET.set(_FetchBudget(self.timeout_seconds))
+        # Cleared for the same reason the budget is: a ContextVar set inside one
+        # fetch outlives it in the caller's context, so a second fetch on the
+        # same task would otherwise inherit the first one's rate-limit slot and
+        # its already-resolved addresses.
+        credit_token = _PROBE_CREDIT.set(None)
         try:
             # Parse the URL
             parsed_url = parse_gemini_url(url)
@@ -323,9 +364,17 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                         parsed_url, decision.reason, decision.detail
                     )
 
-            # Canonical cache key (case-insensitive host) so requests differing
-            # only in host case share one entry instead of duplicating.
-            cache_key = normalize_cache_key(url)
+            # Key on the request that will actually go on the wire, not on the
+            # string the caller typed. Five spellings of the same resource
+            # ("gemini://h", "gemini://h/", "gemini://H/a/../", an explicit
+            # ":1965", a "%2e" segment) all rebuild to one request line, and
+            # keying on the raw URL gave each its own entry -- a re-fetch from a
+            # small capsule plus a wasted LRU slot for identical content.
+            # The query stays in the key so the deliberate "never store a
+            # query-bearing response" rule below still misses.
+            cache_key = format_gemini_url(
+                parsed_url.host, parsed_url.port, parsed_url.path, parsed_url.query
+            )
 
             # Check cache first, unless the caller asked for the current state.
             if self.cache_enabled and not refresh:
@@ -342,7 +391,11 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                         "Cache hit",
                         url=f"gemini://{parsed_url.host}:{parsed_url.port}{parsed_url.path}",
                         cached=True,
-                        response_type=getattr(cached_response, "kind", "unknown"),
+                        # Direct attribute access, not getattr with a default:
+                        # every member of the response union declares ``kind``,
+                        # so a rename or a typo must fail mypy rather than
+                        # silently logging "unknown" forever.
+                        response_type=cached_response.kind,
                         response_size=getattr(cached_response, "size", 0),
                     )
                     return cached_response
@@ -357,8 +410,11 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 "host": parsed_url.host,
                 "port": parsed_url.port,
                 "path": parsed_url.path,
-                "has_query": bool(parsed_url.query),
-                "timestamp": time.time(),
+                # ``is not None``: an empty answer to a status-10/11 prompt is a
+                # present query, and reporting it as absent contradicts the
+                # request that was actually sent.
+                "has_query": parsed_url.query is not None,
+                "timestamp": iso_utc(time.time()),
             }
 
             # Fetch the content (optionally bounded by the concurrency cap)
@@ -369,9 +425,10 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             # rate limit, so we don't keep hammering a server asking us to wait.
             self._maybe_honor_slow_down(parsed_url.host, response)
 
-            # Add request info to response
-            if hasattr(response, "request_info"):
-                response.request_info.update(request_info)
+            # Add request info to response. Every union member declares
+            # ``request_info``, so access it directly rather than behind a
+            # hasattr guard mypy can never check.
+            response.request_info.update(request_info)
 
             # Cache the response. Skip transient/non-content results: error
             # and redirect targets can change moment to moment, and
@@ -382,8 +439,8 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             # key for the full TTL.
             if (
                 self.cache_enabled
-                and not parsed_url.query
-                and getattr(response, "kind", None)
+                and parsed_url.query is None
+                and response.kind
                 not in (
                     "error",
                     "redirect",
@@ -402,8 +459,8 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 host=parsed_url.host,
                 port=parsed_url.port,
                 path=parsed_url.path,
-                has_query=bool(parsed_url.query),
-                response_type=getattr(response, "kind", "unknown"),
+                has_query=parsed_url.query is not None,
+                response_type=response.kind,
                 response_size=getattr(response, "size", 0),
                 cached=False,
             )
@@ -452,6 +509,13 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 "server certificate could not be recorded",
                 e,
             )
+        except RateLimited as e:
+            # The host is backing off (almost always after its own status-44
+            # SLOW_DOWN) for longer than one call may spend asleep. Answer with
+            # the wait instead of sitting in it: the MCP client's call timeout
+            # would otherwise fire first, and in a batch the sleeping call also
+            # holds one of the concurrency slots.
+            return self._slow_down_result(url, e)
         except TimeoutError as e:
             # DNS resolution, connect/handshake, send or read exceeded the one
             # request deadline. The transport now reports a connect timeout AS a
@@ -492,6 +556,51 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             )
         finally:
             _FETCH_BUDGET.reset(budget_token)
+            _PROBE_CREDIT.reset(credit_token)
+
+    async def _bounded_fetch(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
+        """Run the guarded fetch, spending what the robots probe already paid.
+
+        Overrides the base only to skip a *second* per-host rate-limit token:
+        the probe and the fetch it guards are one user request to one capsule,
+        and charging both made every first fetch to a host sleep a full interval
+        -- a second, with the shipped defaults -- before anything could be sent.
+        The probe's reservation still spaces the *next* request, and the
+        concurrency cap is applied here exactly as the base applies it.
+        """
+        credit = _PROBE_CREDIT.get()
+        if credit is None or not credit.rate_slot or credit.host != parsed_url.host:
+            return await super()._bounded_fetch(parsed_url)
+        credit.rate_slot = False
+        if self._fetch_semaphore is None:
+            return await self._fetch_content(parsed_url)
+        async with self._fetch_semaphore:
+            return await self._fetch_content(parsed_url)
+
+    def _slow_down_result(self, url: str, exc: RateLimited) -> GeminiErrorResult:
+        """Build the structured answer for a host that is still backing off."""
+        retry_after = round(exc.retry_after, 1)
+        safe_url = self._safe_error_url(url)
+        logger.info(
+            "Gemini fetch deferred: host is backing off",
+            url=safe_url,
+            host=exc.host,
+            retry_after_seconds=retry_after,
+        )
+        return GeminiErrorResult(
+            error={
+                "code": "SLOW_DOWN",
+                "message": (
+                    f"{exc.host} asked this client to slow down, and the backoff "
+                    f"has {retry_after} seconds left to run. Nothing was sent. "
+                    f"Fetch something else and come back after that, or tell the "
+                    f"user how long the wait is -- retrying immediately only "
+                    f"gets this same answer."
+                ),
+                "retry_after_seconds": retry_after,
+            },
+            requestInfo={"url": safe_url, "timestamp": iso_utc(time.time())},
+        )
 
     def _safe_error_url(self, url: str) -> str:
         """Drop the query string before an error URL is logged or returned.
@@ -515,11 +624,13 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         The meta is attacker-controlled, so a usable value is clamped here
         rather than at each use -- the gate takes it as a backoff, and an
         unclamped ``inf`` would have it refuse the capsule for the maximum
-        window on the server's say-so.
+        window on the server's say-so. It is read from ``error["meta"]``, which
+        is where the capsule's own text lives; ``error["message"]`` is this
+        server's explanation and never a number.
         """
-        message = getattr(response, "error", {}).get("message", "")
+        meta = getattr(response, "error", {}).get("meta", "")
         try:
-            seconds = float(str(message).strip())
+            seconds = float(str(meta).strip())
         except (TypeError, ValueError):
             return None
         seconds = sanitize_penalty_seconds(seconds)
@@ -587,9 +698,22 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 f"period if it named one in a 44 SLOW_DOWN)."
             )
         else:
+            # The single actionable sentence used to be an unconditional "set
+            # GEMINI_RESPECT_ROBOTS_TXT=false", which is read by the model, not
+            # the operator -- so the natural next step became telling the user to
+            # switch off a politeness control the capsule explicitly opted into.
+            # docs/ai-assistant-guide.md says the opposite ("do not suggest
+            # disabling robots checking unless the user has said they operate the
+            # host"), and every comparable remedy in this file is qualified the
+            # same way. State the decision and the correct next step first; keep
+            # the env-var pointer, under its condition.
             message = (
                 f"{parsed_url.host} disallows this resource in its robots.txt. "
-                f"Set GEMINI_RESPECT_ROBOTS_TXT=false to disable robots checking."
+                f"This is the capsule operator's decision and will not change on "
+                f"a retry: do not retry, and do not try a different spelling of "
+                f"the path. Tell the user the resource is excluded and stop. "
+                f"GEMINI_RESPECT_ROBOTS_TXT=false overrides the check, but only "
+                f"for a host the user has said they operate."
             )
         code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return GeminiErrorResult(
@@ -599,7 +723,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 "host": parsed_url.host,
                 "port": parsed_url.port,
                 "path": parsed_url.path,
-                "timestamp": time.time(),
+                "timestamp": iso_utc(time.time()),
             },
         )
 
@@ -629,6 +753,14 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         # This bypasses _bounded_fetch (see above), which is where the per-host
         # spacing is now applied, so throttle here instead.
         await self._rate_limiter.acquire(host)
+        # The fetch this probe guards is the same user request to the same
+        # capsule, so it inherits this slot -- and the addresses the probe's own
+        # _fetch_content is about to vet -- instead of paying for a second of
+        # each. Recorded before the probe's own read: even a probe that then
+        # fails has already spent the rate-limit token.
+        _PROBE_CREDIT.set(
+            _ProbeCredit(host=host, port=port, addresses=None, rate_slot=True)
+        )
         try:
             result = await self._fetch_content(
                 robots_url,
@@ -657,7 +789,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         # backoff must be recorded even though this response is discarded.
         self._maybe_honor_slow_down(host, result)
 
-        kind = getattr(result, "kind", None)
+        kind = result.kind
         if kind in ("success", "gemtext"):
             # text/gemini is the Gemini default MIME -- it is what an absent,
             # empty or unparseable meta falls back to -- so a policy served that
@@ -727,6 +859,18 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         Returns:
             Appropriate response based on status code
 
+        Note:
+            A client certificate applying to this scope is presented DURING the
+            handshake, which completes before ``tofu_manager.validate_certificate``
+            runs below -- Gemini TLS uses ``CERT_NONE``, so the pin can only be
+            checked once the peer certificate is in hand. A rogue or on-path
+            server whose fingerprint TOFU then rejects has therefore already
+            received the user's persistent pseudonymous identity for that scope,
+            and learned that the user was active at that moment. The request
+            itself is still withheld, but the identity disclosure has happened.
+            Closing that window costs an extra certificate-less round trip on
+            every cert-bearing request; it is documented rather than paid for.
+
         """
         loop = asyncio.get_running_loop()
         budget = _FETCH_BUDGET.get()
@@ -753,12 +897,29 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 # otherwise unbounded (a tarpit nameserver could stall a worker
                 # indefinitely); the stalled worker itself is confined to
                 # ssrf.py's own bounded DNS pool, never the loop's executor.
-                connect_addresses = await validate_target(
-                    parsed_url.host,
-                    parsed_url.port,
-                    allow_local=self.allow_local_hosts,
-                    allowed_ports=self.allowed_ports,
+                #
+                # The robots probe that just ran resolved and vetted this very
+                # host:port, so reuse its answer rather than paying for a second
+                # getaddrinfo on the same name microseconds later.
+                credit = _PROBE_CREDIT.get()
+                same_target = (
+                    credit is not None
+                    and credit.host == parsed_url.host
+                    and credit.port == parsed_url.port
                 )
+                if credit is not None and same_target and credit.addresses is not None:
+                    connect_addresses = credit.addresses
+                else:
+                    connect_addresses = await validate_target(
+                        parsed_url.host,
+                        parsed_url.port,
+                        allow_local=self.allow_local_hosts,
+                        allowed_ports=self.allowed_ports,
+                    )
+                    if credit is not None and same_target:
+                        # This IS the probe's own fetch; hand what it vetted to
+                        # the guarded fetch that follows it.
+                        credit.addresses = connect_addresses
 
                 # Check for client certificate
                 client_cert_path = None
@@ -790,21 +951,53 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 # was AF_INET-only). Attempting only one left a dual-homed
                 # capsule whose first A record is down unreachable over Gemini
                 # while the Gopher transport, which iterates, still reached it.
-                last_error: TLSConnectionError | None = None
-                for connect_ip in _ipv4_first(connect_addresses):
+                #
+                # Each attempt gets its own share of what is LEFT of the
+                # deadline, and a TimeoutError is caught alongside
+                # TLSConnectionError. A host that is down overwhelmingly DROPS
+                # SYNs rather than refusing them, and a dropped SYN raises a bare
+                # TimeoutError -- so with one shared deadline and no TimeoutError
+                # arm the first black-holed address burned the whole budget and
+                # the remaining vetted addresses were never tried at all, which
+                # is the one case the fail-over exists for. Re-raising the last
+                # error preserves "a timeout is reported AS a timeout".
+                addresses = _ipv4_first(connect_addresses)
+                last_error: Exception | None = None
+                for attempt, connect_ip in enumerate(addresses):
+                    remaining = timeout - (loop.time() - started)
+                    per_attempt = max(0.001, remaining / (len(addresses) - attempt))
                     try:
                         connection, connection_info = await tls_client.connect(
                             parsed_url.host,
                             parsed_url.port,
-                            timeout=self.timeout_seconds,
+                            timeout=per_attempt,
                             connect_ip=connect_ip,
                         )
                         break
-                    except TLSConnectionError as e:
+                    except (TLSConnectionError, TimeoutError) as e:
                         last_error = e
                 if connection is None:
                     raise last_error or TLSConnectionError(
                         f"Could not connect to {parsed_url.host}:{parsed_url.port}"
+                    )
+
+                # TLS 1.2 sends the client certificate in the clear, so an
+                # identity minted for this scope is visible to any passive
+                # observer of the connection. The Gemini specification makes
+                # warning about that a client SHOULD, and nothing said so before:
+                # neither the tool result nor the logs mentioned it.
+                client_cert_warning = None
+                if client_cert_path and connection_info.get("tls_version") == "TLSv1.2":
+                    client_cert_warning = (
+                        "Identity certificate was transmitted in the clear: the "
+                        "server negotiated TLS 1.2, which sends client "
+                        "certificates unencrypted"
+                    )
+                    logger.warning(
+                        "Client certificate sent over TLS 1.2",
+                        host=parsed_url.host,
+                        port=parsed_url.port,
+                        path=parsed_url.path,
                     )
 
                 # Validate certificate using TOFU if enabled (fail CLOSED).
@@ -898,16 +1091,18 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                     ),
                 )
 
-                # Add connection info to request info
-                if hasattr(result, "request_info"):
-                    result.request_info.update(
-                        {
-                            "tls_version": connection_info.get("tls_version"),
-                            "cipher": connection_info.get("cipher"),
-                            "cert_fingerprint": connection_info.get("cert_fingerprint"),
-                            "tofu_warning": tofu_warning,
-                        }
-                    )
+                # Add connection info to request info. Every union member
+                # declares ``request_info``, so no hasattr guard is needed.
+                result.request_info.update(
+                    {
+                        "tls_version": connection_info.get("tls_version"),
+                        "cipher": connection_info.get("cipher"),
+                        "cert_fingerprint": connection_info.get("cert_fingerprint"),
+                        "tofu_warning": tofu_warning,
+                    }
+                )
+                if client_cert_warning is not None:
+                    result.request_info["client_cert_warning"] = client_cert_warning
 
                 return result
 
