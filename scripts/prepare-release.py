@@ -346,9 +346,23 @@ class ReleasePreparation:
             )
             test_results.append(("Unit tests", unit_result.returncode == 0))
 
-            # Integration tests (if any)
+            # Integration tests (if any). --no-cov because this is a SUBSET of
+            # the suite: the 85% gate in pyproject.toml is a whole-suite figure,
+            # so running ~19 integration tests against it always fails on
+            # coverage and reported "Integration tests had failures" on every
+            # release even when all of them passed. Coverage is measured by the
+            # unit run above.
             integration_result = subprocess.run(
-                [sys.executable, "-m", "pytest", "tests/", "-v", "-m", "integration"],
+                [
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    "tests/",
+                    "-v",
+                    "-m",
+                    "integration",
+                    "--no-cov",
+                ],
                 check=False,
                 cwd=self.project_root,
                 capture_output=True,
