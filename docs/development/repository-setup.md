@@ -14,26 +14,31 @@ Configure the following settings for the `main` branch:
 - ✅ Require branches to be up to date before merging
 - Required checks (the context names come from the `name:` of each job in
   `.github/workflows/ci.yml`; keep them in step with that file):
-  - `test` (Test Python 3.11 on ubuntu-latest)
-  - `test` (Test Python 3.12 on ubuntu-latest)
-  - `test` (Test Python 3.13 on ubuntu-latest)
-  - `test` (Test Python 3.14 on ubuntu-latest)
+  - `test` (Test Python 3.11-3.14 on ubuntu-latest, windows-latest and
+    macos-latest — all twelve legs are configured)
   - `lint` (Lint, type check and package)
   - `security` (Security checks)
-  - `minimum-versions` (Declared minimum dependencies)
+  - `minimum-versions` (Declared minimum dependencies on Python 3.11, and the
+    same on Python 3.14 — this job is a matrix, so it reports two contexts and
+    the old single `Declared minimum dependencies` name no longer exists)
   - `docker` (Build Docker image)
   - `docs` (Build documentation)
 
 The `test` job runs a 12-way matrix — 3.11 through 3.14 on ubuntu, windows and
-macos — so the four contexts above cover only the Linux leg. Add the
-`windows-latest` and `macos-latest` contexts too if you want branch protection
-to catch a platform-specific regression; the release gate below is what
-currently catches one.
+macos — and all twelve are required, so branch protection catches a
+platform-specific regression on its own. The release gate below is a second,
+independent check on the same thing.
 
-Two names to watch for when reviewing an existing configuration:
+A renamed job silently breaks this list: the context is the job's `name:`, so a
+rename leaves a required check that no run will ever report, and merges wait
+forever on it. Three names to watch for when reviewing an existing
+configuration:
 
 - `Lint and type check` was renamed to `Lint, type check and package` when the
   distribution build and `twine check` moved into that job.
+- `Declared minimum dependencies` was split into `Declared minimum dependencies
+  on Python 3.11` and `... on Python 3.14` when that job became a matrix. The
+  bare name never reports again.
 - `Validate PR` / `Packaging` no longer exists. `.github/workflows/validate-pr.yml`
   was deleted and its work folded into `lint`, so a required check by either
   name will never report and must be removed.

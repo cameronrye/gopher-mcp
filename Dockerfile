@@ -1,27 +1,30 @@
 # syntax=docker/dockerfile:1
 
-# Both stages sit one minor behind the top of the CI test matrix, which now
-# covers 3.11-3.14. Do not bump past a version the matrix covers: an
-# interpreter the locked dependencies have no wheels for breaks only the
-# container, never a test run.
+# Both stages must stay on an interpreter the CI test matrix covers, which is
+# 3.11-3.14 (ci.yml). Never bump past the top of that matrix. ci.yml's `docker`
+# job does build this image and run `gopher-mcp --help` in it, so a base image
+# whose dependencies have no wheels fails CI -- but `--help` is all it runs.
+# The 1548-test suite never runs inside this image at all; the matrix leg for
+# the base image's Python version is the only place it is ever exercised on
+# that interpreter. Bump ahead of the matrix and the container ships an
+# interpreter nothing has tested beyond one line of argument parsing.
 #
-# 3.13, not 3.14, on purpose. The 3.14 matrix leg is new and has not yet been
-# seen green on GitHub's runners -- only locally, on macOS/arm64. This image
-# was already rolled back from python:3.14-slim once (CHANGELOG: "outside the
-# tested matrix"), and the whole point of the rule above is that the container
-# is the one artifact whose breakage no test run can catch. Bump both FROM
-# lines to python:3.14-slim once the `Test Python 3.14 on ubuntu-latest` leg
-# has passed on CI; nothing else is blocking it.
+# 3.14 is that top as of this bump, and the condition the previous comment set
+# is met: the `Test Python 3.14 on ubuntu-latest` leg -- and its windows and
+# macos siblings -- passed on GitHub's runners on main (CI run 33757222563).
+# The earlier rollback from python:3.14-slim (CHANGELOG: "outside the tested
+# matrix") predates the matrix covering 3.14 at all, so it does not apply now.
+# Next stop is 3.15, and only once ci.yml's matrix carries it green.
 
 # --- build stage: produce a wheel from the source tree ---
-FROM python:3.13-slim AS build
+FROM python:3.14-slim AS build
 RUN pip install --no-cache-dir uv
 WORKDIR /src
 COPY . .
 RUN uv build --wheel --out-dir /dist
 
 # --- runtime stage: install just the wheel, run as a non-root user ---
-FROM python:3.13-slim
+FROM python:3.14-slim
 RUN useradd --create-home --uid 10001 app
 COPY --from=build /dist/*.whl /tmp/
 RUN pip install --no-cache-dir /tmp/*.whl && rm -f /tmp/*.whl

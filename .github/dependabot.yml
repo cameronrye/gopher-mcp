@@ -80,13 +80,52 @@ updates:
     labels:
       - "dependencies"
       - "docker"
-    # The base image must stay on an interpreter the CI matrix covers, and the
-    # Dockerfile comment saying so is invisible here. Left unpinned, the image
-    # drifts ahead of the tested versions and only breaks for whoever runs the
-    # container. Patch bumps are still welcome; widening the matrix is what
-    # unblocks a minor or major one.
+    # Only semver-major is ignored here, and the absence of semver-minor is the
+    # whole point of this block.
+    #
+    # The Dockerfile's tag is `python:3.14-slim`: major and minor, and nothing
+    # else. A tag with no patch component can never produce a
+    # `version-update:semver-patch`, so the only updates that exist for it are
+    # minor (3.14 -> 3.15) and major (3 -> 4). Ignoring both, as this block used
+    # to, left the docker ecosystem structurally unable to propose anything at
+    # all: the entry ran every Monday and could not, even in principle, open a
+    # PR. The "patch bumps are still welcome" the old comment promised needed a
+    # three-component tag such as `python:3.14.2-slim`, which this Dockerfile
+    # does not use.
+    #
+    # That argument is structural, and it has to be, because this repo's own
+    # history cannot settle it either way. #67, "deps(deps): bump python from
+    # 3.12-slim to 3.14-slim" (2026-06-11), is this ecosystem doing exactly the
+    # job it exists for, and it is the only base-image PR it has ever produced
+    # -- but the silence since then proves nothing about the ignore rule. #67
+    # left the tag on 3.14-slim, still the newest two-component `-slim` line
+    # Docker Hub publishes (3.15 exists only as `3.15-rc-slim`), so from June
+    # until da73e1f rolled the tag back to 3.13-slim on 2026-08-31 there was
+    # simply nothing to propose; and da73e1f landed at 20:31, after that
+    # Monday's 09:00 run, so no scheduled pass has ever yet seen a 3.13 tag.
+    # The by-hand 3.13 -> 3.14 bump in 0.9.1 is the PR the next Monday would
+    # have owed us and, under the old two-line ignore, could not have opened.
+    #
+    # #67 also shows the shape to expect: Dependabot proposes the newest line,
+    # not the next one (3.12 straight to 3.14, skipping 3.13), so a proposal can
+    # arrive ahead of the test matrix. With 3.15 already at rc that is not
+    # hypothetical, and it is what the review note below exists for.
+    #
+    # semver-major stays ignored: a python 4.x image line is not a base-image
+    # refresh, it is a port, and it should not arrive as a Monday PR.
+    #
+    # What still protects the invariant -- the base image must stay on an
+    # interpreter ci.yml's test matrix covers (3.11-3.14 today) -- is now review
+    # rather than this file, which is the trade this change makes deliberately.
+    # A minor bump arrives as a PR, not a merge; CODEOWNERS requests review on
+    # it; and ci.yml's `docker` job builds the image and runs the installed
+    # entrypoint on every PR, so a base image whose dependencies have no wheels
+    # fails before anyone reads it. What that job does NOT check is matrix
+    # coverage, and only the test matrix ever runs the suite on the container's
+    # interpreter. So: read the Dockerfile's base-image comment before merging
+    # one of these. If ci.yml's matrix does not already carry that Python
+    # version green, widen the matrix first and close the PR.
     ignore:
       - dependency-name: "python"
         update-types:
           - "version-update:semver-major"
-          - "version-update:semver-minor"

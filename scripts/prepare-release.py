@@ -51,8 +51,10 @@ class ReleasePreparation:
         """Update the version in pyproject.toml and server.json.
 
         The release workflow validates that pyproject.toml AND server.json (its
-        two version fields) all match the tag, so both must be bumped here -- a
-        pyproject-only bump produces a tag push that fails at validate-release.
+        top-level version, each package version, and the image tag inside the
+        OCI package's identifier) all match the tag, so every one must be bumped
+        here -- a pyproject-only bump produces a tag push that fails at
+        validate-release.
         """
         # pyproject.toml: anchor to the start of a line and replace only the
         # first match, so we don't rewrite target-version / python_version /
@@ -72,9 +74,19 @@ class ReleasePreparation:
         pyproject_path.write_text(content)
         print(f"✅ Updated version to {new_version} in pyproject.toml")
 
-        # server.json: the MCP registry manifest carries the version twice (the
-        # top-level field and each package entry). Use json load/dump so we touch
-        # only the version fields and preserve formatting elsewhere.
+        # server.json: the MCP registry manifest carries the version in three
+        # shapes, not two. The top-level field and each package's `version` key
+        # are the obvious ones; the third is the image tag inside the OCI
+        # package's `identifier`, because the registry REJECTS a `version` key
+        # on an OCI package ("include version in identifier instead") -- so for
+        # that entry the tag is the version.
+        #
+        # Missing it does not fail the run, which is why it needs code rather
+        # than a checklist line: publish-image pushes the new tag while
+        # publish-registry verifies the stale one, finds a real image left over
+        # from the previous release, and publishes a registry entry pointing
+        # every client at the wrong container. Use json load/dump so we touch
+        # only version fields and preserve formatting elsewhere.
         server_json_path = self.project_root / "server.json"
         if server_json_path.exists():
             import json
@@ -84,6 +96,13 @@ class ReleasePreparation:
             for package in data.get("packages", []):
                 if "version" in package:
                     package["version"] = new_version
+                identifier = package.get("identifier", "")
+                if package.get("registryType") == "oci" and ":" in identifier:
+                    # rsplit: the registry host may carry a :port, and only the
+                    # last colon introduces the tag.
+                    package["identifier"] = (
+                        f"{identifier.rsplit(':', 1)[0]}:{new_version}"
+                    )
             server_json_path.write_text(json.dumps(data, indent=2) + "\n")
             print(f"✅ Updated version to {new_version} in server.json")
 

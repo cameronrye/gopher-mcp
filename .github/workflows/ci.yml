@@ -34,10 +34,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         # 3.14 is here because the Docker base image and the trove classifiers
-        # are gated on it: dependabot.yml holds python:3.x-slim to "an
-        # interpreter the CI matrix covers", and the 3.14 image was rolled back
-        # once (CHANGELOG "outside the tested matrix") for exactly that reason.
-        # Dropping a version from this list re-freezes those.
+        # already depend on it: the Dockerfile ships python:3.14-slim and
+        # pyproject.toml advertises the 3.14 classifier to PyPI. This matrix is
+        # the only thing that runs the suite on that interpreter -- the `docker`
+        # job below builds the image but only runs `gopher-mcp --help` in it --
+        # so dropping 3.14 from this list does not roll either of them back the
+        # way it once would have. It strands a shipped image and a published
+        # classifier with nothing testing them. Note that dependabot.yml no
+        # longer blocks a base-image minor bump either (see the comment there):
+        # this list is what a reviewer checks a proposed bump against, not a
+        # lock on one.
         python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
@@ -167,17 +173,43 @@ jobs:
             pip-audit-report.json
 
   minimum-versions:
-    name: Declared minimum dependencies
+    name: Declared minimum dependencies on Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both ends of `requires-python = ">=3.11"`, because "the declared
+        # floors" are not one set of versions -- they differ by interpreter,
+        # and a 3.11-only job silently tested a combination no 3.14 user can
+        # install.
+        #
+        # Measured, not assumed, with
+        # `uv pip install --resolution lowest-direct --dry-run .` against a
+        # 3.11 and a 3.14 venv at gopher-mcp 0.9.0:
+        #   3.11 -> pydantic 2.11.0, the floor pyproject.toml declares
+        #   3.14 -> pydantic 2.12.0
+        # The split comes from mcp 1.28.1, which markers its own requirement by
+        # interpreter -- `pydantic>=2.11.0; python_version < '3.14'` and
+        # `pydantic>=2.12.0; python_version >= '3.14'` -- so pinning
+        # pydantic==2.11.0 on 3.14 is not merely untested, it is unsolvable
+        # ("Because mcp>=1.28.1 depends on pydantic>=2.12.0 ..."). Everything
+        # else -- mcp 1.28.1, pydantic-settings 2.7.0, cryptography 50.0.0,
+        # structlog 23.2.0, uvicorn 0.31.1 -- resolves identically on both.
+        #
+        # 3.12 and 3.13 are deliberately absent: they resolve the same floor
+        # set as 3.11, so they would only spend runner time. Add the newest
+        # interpreter here whenever the test matrix above grows one, or this
+        # job goes back to testing floors nobody runs.
+        python-version: ["3.11", "3.14"]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v7
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -199,8 +231,15 @@ jobs:
       # additionally resolve every linter to its oldest permitted release and
       # fail on tooling that has nothing to do with the declared runtime
       # floors. This installs exactly the `test` group and the runtime deps.
+      #
+      # --python is explicit rather than trusting the step above: uv picks its
+      # own interpreter, and any of 3.11-3.14 satisfies `requires-python`, so
+      # without this a leg could resolve floors for a version it was not asked
+      # about and the matrix would report a result it never measured.
       - name: Resolve the declared floors
-        run: uv sync --resolution lowest-direct --no-default-groups --group test
+        run: >-
+          uv sync --resolution lowest-direct --no-default-groups --group test
+          --python "${{ matrix.python-version }}"
 
       # The sync alone proves nothing: a bogus floor still resolves fine. Only
       # importing and running the code catches it, so this job must execute

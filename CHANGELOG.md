@@ -38,6 +38,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The container image is built for `linux/arm64` as well as `linux/amd64`. The
+  0.9.0 image was a single-platform amd64 manifest because the publish step
+  declared no platforms at all, so every Apple Silicon and ARM-server user ran
+  it under emulation.
+- The release path runs the image before pushing it. `publish-image` built and
+  pushed in one step and never started the container; the image it pushes is
+  also not the one CI smoke-tested, because the Dockerfile resolves its
+  dependency closure fresh from PyPI at build time. It now builds the host
+  architecture, asserts `--version` matches the tag being released and that the
+  registry annotation is present, and only then builds and pushes both
+  platforms.
+- `server.json` advertises the container as an `oci` package, so the MCP
+  registry lists it alongside the PyPI one. This needed three things that were
+  all missing: the image carries the `io.modelcontextprotocol.server.name`
+  annotation the registry verifies ownership with, `publish-registry` now waits
+  for `publish-image` instead of racing it, and `scripts/prepare-release.py`
+  bumps the version inside the image tag -- the registry forbids a `version`
+  key on an OCI package, so the tag is the version, and nothing was moving it.
+- The container base image moves to `python:3.14-slim`, the top of the test
+  matrix, now that the 3.14 legs have been green on CI.
+- The minimum-versions CI job runs on Python 3.14 as well as 3.11. The declared
+  floors are not one set of versions: `mcp` markers its pydantic requirement by
+  interpreter, so `pydantic==2.11.0` is not merely untested on 3.14, it is
+  unsolvable there.
+- **Dependabot can propose a base-image minor bump again**, reversing what 0.9.0
+  said. The old rule ignored both major and minor updates for `python`, and the
+  Dockerfile's tag has no patch component -- so no update of any kind could ever
+  be proposed and the entry was structurally inert rather than conservative.
+  Major stays ignored. What now protects the "base image must stay on an
+  interpreter the matrix covers" rule is review rather than configuration, so
+  check the matrix before merging one.
 - `pyproject.toml` records what should end the `mcp<2` hold instead of leaving
   it open-ended, and notes that the first condition has already fired:
   `llama-index-tools-mcp` requires `mcp>=2` as of 0.5.0, so installing it beside

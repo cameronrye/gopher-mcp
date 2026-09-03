@@ -18,6 +18,23 @@
       "transport": {
         "type": "stdio"
       }
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/cameronrye/gopher-mcp:0.9.0",
+      "runtimeHint": "docker",
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio",
+          "isRequired": true,
+          "description": "Serve over stdio. The image's default command starts the streamable-http transport on port 8000, so a client running this image as a local stdio server must override it."
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
     }
   ]
 }
