@@ -7,7 +7,7 @@ import inspect
 import re
 import time
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, Literal, NamedTuple, Optional
+from typing import Annotated, Any, Literal, NamedTuple, Optional, cast
 from urllib.parse import quote
 
 import structlog
@@ -46,12 +46,18 @@ from .identity import (
 )
 from .models import (
     ErrorResult,
+    GeminiBatchResponse,
     GeminiCertificateInfo,
     GeminiClientCertificateEntry,
+    GeminiClientCertListOutput,
     GeminiClientCertListResult,
+    GeminiClientCertUpdateOutput,
     GeminiClientCertUpdateResult,
     GeminiFetchOutput,
     GeminiFetchRequest,
+    GeminiTrustListOutput,
+    GeminiTrustUpdateOutput,
+    GopherBatchResponse,
     GopherFetchOutput,
     GopherFetchRequest,
     RequestInfo,
@@ -1061,7 +1067,7 @@ async def _batch_fetch(
 )
 async def gopher_batch_fetch(
     urls: _GopherUrlList, refresh: _Refresh = False
-) -> list[dict[str, Any]]:
+) -> GopherBatchResponse:
     """Fetch multiple Gopher URLs concurrently.
 
     Useful for fetching several menu items or related resources at once.
@@ -1083,12 +1089,23 @@ async def gopher_batch_fetch(
         URLs, so callers can zip responses to requests by index.
 
     """
-    return await _batch_fetch(
-        urls,
-        request_cls=GopherFetchRequest,
-        resolve_client=_gopher_client,
-        label="Gopher",
-        refresh=refresh,
+    # The payloads ARE these shapes -- each item is whatever `gopher_fetch`
+    # would have returned for that URL -- but they are built as dicts all the
+    # way down, so the annotation that makes the advertised schema true is one
+    # mypy cannot check. Same trade as `_flag_errors`'s
+    # `Annotated[CallToolResult, ...]`: the annotation describes the wire, and
+    # tests/test_output_schema_roundtrip.py is what actually verifies it, by
+    # validating real payloads against the advertised schema the way a client
+    # does.
+    return cast(
+        "GopherBatchResponse",
+        await _batch_fetch(
+            urls,
+            request_cls=GopherFetchRequest,
+            resolve_client=_gopher_client,
+            label="Gopher",
+            refresh=refresh,
+        ),
     )
 
 
@@ -1099,7 +1116,7 @@ async def gopher_batch_fetch(
 )
 async def gemini_batch_fetch(
     urls: _GeminiUrlList, refresh: _Refresh = False
-) -> list[dict[str, Any]]:
+) -> GeminiBatchResponse:
     """Fetch multiple Gemini URLs concurrently.
 
     Useful for fetching several pages or related resources at once.
@@ -1121,12 +1138,17 @@ async def gemini_batch_fetch(
         URLs, so callers can zip responses to requests by index.
 
     """
-    return await _batch_fetch(
-        urls,
-        request_cls=GeminiFetchRequest,
-        resolve_client=_gemini_client,
-        label="Gemini",
-        refresh=refresh,
+    # See the note in `gopher_batch_fetch`: the annotation is the wire contract,
+    # and the schema round-trip test is what checks it.
+    return cast(
+        "GeminiBatchResponse",
+        await _batch_fetch(
+            urls,
+            request_cls=GeminiFetchRequest,
+            resolve_client=_gemini_client,
+            label="Gemini",
+            refresh=refresh,
+        ),
     )
 
 
@@ -1152,7 +1174,11 @@ async def _tofu_manager_client(
     return client
 
 
-@_tool(title="Inspect Gemini trust store", annotations=_TRUST_READ_ANNOTATIONS)
+@_tool(
+    title="Inspect Gemini trust store",
+    annotations=_TRUST_READ_ANNOTATIONS,
+    output=Annotated[CallToolResult, GeminiTrustListOutput],
+)
 async def gemini_trust_list(host: _TrustHostFilter = None) -> dict[str, Any]:
     """List the Gemini server certificates this server has pinned.
 
@@ -1213,7 +1239,11 @@ async def gemini_trust_list(host: _TrustHostFilter = None) -> dict[str, Any]:
     ).model_dump()
 
 
-@_tool(title="Change a Gemini certificate pin", annotations=_TRUST_WRITE_ANNOTATIONS)
+@_tool(
+    title="Change a Gemini certificate pin",
+    annotations=_TRUST_WRITE_ANNOTATIONS,
+    output=Annotated[CallToolResult, GeminiTrustUpdateOutput],
+)
 async def gemini_trust_update(
     action: _TrustAction,
     host: _TrustHost,
@@ -1402,6 +1432,7 @@ async def _client_cert_manager_client(
 @_tool(
     title="Inspect Gemini client certificates",
     annotations=_CLIENT_CERT_READ_ANNOTATIONS,
+    output=Annotated[CallToolResult, GeminiClientCertListOutput],
 )
 async def gemini_client_cert_list(host: _CertHostFilter = None) -> dict[str, Any]:
     """List the Gemini client certificates (identities) this server holds.
@@ -1682,6 +1713,7 @@ async def _remove_identity(
 @_tool(
     title="Create or remove a Gemini client certificate",
     annotations=_CLIENT_CERT_WRITE_ANNOTATIONS,
+    output=Annotated[CallToolResult, GeminiClientCertUpdateOutput],
 )
 async def gemini_client_cert_update(
     action: _CertAction,

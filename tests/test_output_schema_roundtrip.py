@@ -694,3 +694,46 @@ def test_a_cache_replay_still_validates_against_the_advertised_schema(
             f"advertises, so every cache hit fails at the client while the "
             f"first, uncached fetch succeeds:\n{exc}"
         )
+
+
+class TestEveryToolAdvertisesASchemaThatConstrains:
+    """An `outputSchema` that accepts anything is not a schema, it is a shrug.
+
+    0.9.0 gave the two fetch tools a real discriminated union. The other six
+    tools kept the default -- an open object, or for the batch tools an array of
+    open objects -- while their docstrings tell the model exactly what each item
+    is. A client cannot check any of it, and `jsonschema.validate` on the way in
+    (which the MCP SDK's own ClientSession runs on every call) passes anything at
+    all, including a payload from a completely different tool.
+    """
+
+    @staticmethod
+    def _foreign_payload() -> dict[str, Any]:
+        """A payload no tool in this server can return."""
+        return {"kind": "definitely_not_a_real_kind", "nonsense": True}
+
+    @pytest.mark.parametrize(
+        "tool_name",
+        [
+            "gemini_trust_list",
+            "gemini_trust_update",
+            "gemini_client_cert_list",
+            "gemini_client_cert_update",
+        ],
+    )
+    def test_a_single_result_tool_rejects_a_payload_it_cannot_return(self, tool_name):
+        """These four already get the CallToolResult wrapper; they just never
+        told it what they return, so it advertised ``dict[str, Any]``."""
+        schema = _schema(tool_name)
+
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(self._foreign_payload(), schema)
+
+    @pytest.mark.parametrize("tool_name", ["gopher_batch_fetch", "gemini_batch_fetch"])
+    def test_a_batch_tool_rejects_an_item_it_cannot_return(self, tool_name):
+        """The batch tools promise, in prose, that each item is exactly what the
+        single-URL tool returns. The schema says ``array of any object``."""
+        schema = _schema(tool_name)
+
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({"result": [self._foreign_payload()]}, schema)

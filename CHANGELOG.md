@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- All six remaining tools advertise a real `outputSchema`. 0.9.0 gave the two
+  fetch tools a discriminated union and left the rest on the default: the four
+  trust-store and client-identity tools advertised a bare open object, and the
+  two batch tools an array of open objects, while their docstrings told the
+  model each item is exactly what the single-URL tool returns. A client could
+  not check any of it -- and the MCP SDK's `ClientSession` validates every
+  result against the advertised schema, so an open schema means that check
+  passes on a payload from a different tool entirely. Each schema is now the
+  union of what that tool can actually return, the success shape and
+  `ErrorResult` both, since every one of them can also fail. No payload moves:
+  the batch wire already carried `{"result": [...]}` and still does, byte for
+  byte, and the schemas grew from 88-202 bytes to 5.9-20kB of description.
+
 - **Breaking:** `request_info` is a described object rather than an open one. It
   was the last unconstrained `dict[str, Any]` on the wire, declared identically
   on fourteen result models, so the `outputSchema` 0.9.0 worked to make precise

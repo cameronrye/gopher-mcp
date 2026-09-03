@@ -1417,3 +1417,47 @@ class GeminiClientCertUpdateResult(BaseModel):
 
 class GeminiCacheEntry(_BaseCacheEntry[GeminiFetchResponse]):
     """Model for Gemini cache entries."""
+
+
+# The trust-store and client-identity tools are wrapped the same way the fetch
+# tools are, but until now they never said what they return, so each advertised
+# the default `dict[str, Any]` -- an open object that validates a payload from
+# any other tool just as happily as its own. Each is a two-branch union because
+# every one of them can also fail: `_error(...)` returns an `ErrorResult`, and a
+# schema naming only the success model would be a promise the tool breaks the
+# first time it rejects an argument.
+GeminiTrustListResponse = TOFUTrustListResult | ErrorResult
+GeminiTrustUpdateResponse = TOFUTrustUpdateResult | ErrorResult
+GeminiClientCertListResponse = GeminiClientCertListResult | ErrorResult
+GeminiClientCertUpdateResponse = GeminiClientCertUpdateResult | ErrorResult
+
+
+class GeminiTrustListOutput(RootModel[Annotated[GeminiTrustListResponse, _KIND]]):
+    """The pinned certificates asked about, or an error."""
+
+
+class GeminiTrustUpdateOutput(RootModel[Annotated[GeminiTrustUpdateResponse, _KIND]]):
+    """The outcome of changing the trust store, or an error."""
+
+
+class GeminiClientCertListOutput(
+    RootModel[Annotated[GeminiClientCertListResponse, _KIND]]
+):
+    """The client identities asked about, or an error."""
+
+
+class GeminiClientCertUpdateOutput(
+    RootModel[Annotated[GeminiClientCertUpdateResponse, _KIND]]
+):
+    """The outcome of minting or removing an identity, or an error."""
+
+
+# The batch tools return a list, which the MCP SDK wraps in ``{"result": [...]}``
+# -- so unlike the single-fetch tools they cannot use a ``RootModel``, and the
+# wrapper is already part of the wire. What was missing is what the ITEMS are:
+# the annotation said ``list[dict[str, Any]]``, so the advertised schema was an
+# array of open objects while the docstring promised each item is exactly what
+# the single-URL tool returns. Naming the same discriminated union here makes the
+# schema say what the prose already did, without moving a byte of the payload.
+GopherBatchResponse = list[Annotated[GopherFetchResponse, _KIND]]
+GeminiBatchResponse = list[Annotated[GeminiFetchResponse, _KIND]]
