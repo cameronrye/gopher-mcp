@@ -141,5 +141,10 @@ repos:
 # an app that was never installed on it -- no check run has ever come from
 # pre-commit.ci -- which made the revs above look self-maintaining when in fact
 # nothing bumps them (Dependabot has no pre-commit ecosystem). They are
-# hand-maintained: run `uv run pre-commit autoupdate` as part of the release
-# checklist. Re-add this block only together with installing the app.
+# hand-maintained as part of the release checklist -- but a BARE
+# `uv run pre-commit autoupdate` is the wrong command: it bumps every rev,
+# including the two above that deliberately track `uv.lock`, which is the one
+# thing those comments ask you not to do. The checklist in
+# docs/development/releasing.md spells out the `--repo`-scoped invocation that
+# moves only the revs with no lockfile counterpart. Re-add this block only
+# together with installing the app.

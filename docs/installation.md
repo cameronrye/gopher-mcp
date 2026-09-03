@@ -81,9 +81,8 @@ docker run --rm -i --no-healthcheck \
   ghcr.io/cameronrye/gopher-mcp:latest --transport stdio
 ```
 
-Registry publishing is new, so the first image lands with the next tagged
-release. Until then — or to run a modified tree — build from a checkout, which
-produces the same image:
+To run a modified tree, build from a checkout — the repository ships the
+`Dockerfile` the published image is built from:
 
 ```bash
 git clone https://github.com/cameronrye/gopher-mcp.git
@@ -150,10 +149,10 @@ they still work when an environment variable holds a value the server would
 reject at startup.
 
 !!! note "`--version` needs 0.9.0 or newer"
-    The flag is new. Against the version currently on PyPI, `gopher-mcp
-    --version` answers `error: unrecognized arguments: --version`, which means
-    the install worked and predates the flag — `gopher-mcp --help` verifies it
-    either way. The same applies to `--allowed-host` and to `GET /health`.
+    The flag landed in 0.9.0. An install predating it answers `error:
+    unrecognized arguments: --version` instead — which means the install worked
+    and is simply older; `gopher-mcp --help` verifies it either way. The same
+    applies to `--allowed-host` and to `GET /health`.
 
 ## Configuration
 

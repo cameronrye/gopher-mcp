@@ -60,7 +60,13 @@ stops before it validates anything else.
 #### Additional Restrictions
 
 - ✅ Restrict pushes that create files larger than 100 MB
-- ✅ Include administrators (recommended for consistency)
+- Include administrators: **not in effect** — the `main` ruleset lists the
+  `admin` repository role as a bypass actor with `bypass_mode: always`, so every
+  rule in this section is advisory for the owner. That is deliberate for a
+  single-maintainer repo, where the release flow pushes tags and the occasional
+  docs commit straight to `main`; it does mean these rules catch a mistake
+  rather than stop a determined push. Drop the bypass actor if a second
+  maintainer joins
 - ✅ Allow force pushes: **Disabled**
 - ✅ Allow deletions: **Disabled**
 
@@ -87,6 +93,24 @@ stops before it validates anything else.
 - ✅ Allow auto-merge: **Enabled**
 - ✅ Automatically delete head branches: **Enabled**
 
+#### Checking this page against the repository
+
+This page is a runbook, and a runbook drifts silently — every line above was
+true when written and several had stopped being true within a few releases.
+Each claim is one API call, so verify rather than assume:
+
+```bash
+# The Pull Requests settings above
+gh api repos/cameronrye/gopher-mcp \
+  --jq '{allow_update_branch, allow_auto_merge, delete_branch_on_merge,
+         allow_squash_merge, allow_merge_commit, allow_rebase_merge}'
+
+# Branch protection: a ruleset that exists but reads "disabled" enforces nothing
+gh api repos/cameronrye/gopher-mcp/rulesets --jq '.[] | {name, enforcement}'
+gh api repos/cameronrye/gopher-mcp/rulesets/8224458 \
+  --jq '{enforcement, bypass_actors, rules: [.rules[].type]}'
+```
+
 ### Security Settings
 
 #### Security & Analysis
@@ -110,8 +134,9 @@ length: the `pip` ecosystem edits only the version ranges in `pyproject.toml`,
 which are deliberately open floors, so it had almost nothing to propose — while
 `uv.lock`, the file every CI job installs from with `uv sync --locked`, never
 moved on a schedule at all. There is no `pre-commit` ecosystem, so the hook
-revisions in `.pre-commit-config.yaml` are hand-maintained; `uv run pre-commit
-autoupdate` is a step in the [release checklist](releasing.md#pre-release-checklist).
+revisions in `.pre-commit-config.yaml` are hand-maintained; refreshing them is a
+step in the [release checklist](releasing.md#pre-release-checklist), which scopes
+the update so the two revs that track `uv.lock` are not bumped out from under it.
 
 #### Dependency advisories
 

@@ -122,9 +122,8 @@ docker run --rm -i --no-healthcheck \
   ghcr.io/cameronrye/gopher-mcp:latest --transport stdio
 ```
 
-Registry publishing is new, so the first image lands with the next tagged
-release. Until then — or to run a modified tree — the repository ships the
-`Dockerfile` it is built from: `docker build -t gopher-mcp .`
+To run a modified tree, the repository ships the `Dockerfile` the published
+image is built from: `docker build -t gopher-mcp .`
 
 **Mount a volume, or Gemini trust is meaningless.** Without one, the TOFU pins
 and the client certificates' private keys die with the container, so every start

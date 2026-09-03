@@ -53,7 +53,7 @@ gopher-mcp --version
 gopher-mcp --help
 ```
 
-`--version` and `--help` are parsed before the configuration is loaded, so they answer even when an environment variable holds a value the server would reject at startup — which makes `gopher-mcp --version` the first thing to run on any bug report. It also works for installs that have no importable package on your `PATH`: `uvx gopher-mcp --version`, or `docker run --rm --no-healthcheck ghcr.io/cameronrye/gopher-mcp:latest --version`. `--version` is newer than the release on PyPI today, so `error: unrecognized arguments: --version` is itself an answer — the install works and predates the flag; use `gopher-mcp --help` instead.
+`--version` and `--help` are parsed before the configuration is loaded, so they answer even when an environment variable holds a value the server would reject at startup — which makes `gopher-mcp --version` the first thing to run on any bug report. It also works for installs that have no importable package on your `PATH`: `uvx gopher-mcp --version`, or `docker run --rm --no-healthcheck ghcr.io/cameronrye/gopher-mcp:latest --version`. `--version` landed in 0.9.0, so `error: unrecognized arguments: --version` is itself an answer — the install works and predates that release; use `gopher-mcp --help` instead.
 
 You can also start the server directly via `python -m gopher_mcp` or, without installing, via `uvx gopher-mcp`.
 

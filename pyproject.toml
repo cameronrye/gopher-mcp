@@ -57,6 +57,28 @@ dependencies = [
     # plain `pip install gopher-mcp` resolves the newest mcp and would crash on
     # startup. Lift the cap only together with the migration.
     #
+    # What should trigger that migration, recorded because "later" is how a cap
+    # becomes permanent and this one has now been re-investigated from scratch
+    # twice:
+    #   1. Something a user would plausibly install alongside this requires
+    #      mcp>=2. ALREADY TRUE as of 2026-09-03, so this is a countdown rather
+    #      than a tripwire: llama-index-tools-mcp moved to `mcp<3,>=2.0.0` at
+    #      0.5.0 (2026-08-11), and `uv pip install gopher-mcp==0.9.0
+    #      llama-index-tools-mcp==0.6.0` already reports the two incompatible.
+    #      Unpinned, the resolver quietly walks that package back to 0.4.8
+    #      (2026-02-24) to keep mcp at 1.x, which is worse than an error.
+    #   2. An advisory lands against 1.x that 2.x fixes and 1.x does not
+    #      backport. Not the case today -- 1.x is still patched in lockstep with
+    #      2.x, and `pip-audit` is clean above this floor.
+    #   3. The MCP registry, or a client this server is documented against,
+    #      stops accepting a 1.x server.
+    # The port is scoped, not open-ended: ~35 source lines across server.py and
+    # __main__.py, `mypy --strict` clean, with the test fallout mechanical
+    # (camelCase -> snake_case keyword renames). Two traps found by executing
+    # it: `ruff format` fails on a snake_case line that crosses 88 chars, and
+    # mcp 2.x requires pydantic>=2.12.0, so the floor below moves with it.
+    # tests/test_mcp_protocol.py is the wire-level guard written for this port.
+    #
     # The floor is the real minimum, not a guess. It started at 1.10.0, the
     # first release whose `FastMCP.tool()` accepts `title=`, which every tool
     # here passes; below that the failures are import-time and
@@ -65,9 +87,18 @@ dependencies = [
     # release clear of four high advisories the old `>=1.10.0` range admitted --
     # GHSA-9h52-p55h-vw2f (DNS-rebinding protection off by default),
     # GHSA-jpw9-pfvf-9f58, GHSA-hvrp-rf83-w775 and GHSA-vj7q-gjh5-988w.
-    # The rebinding one is not theoretical here: server.py builds FastMCP
-    # without `transport_security`, so the SDK default is the only protection,
-    # and the Dockerfile's default CMD serves streamable-http on 0.0.0.0.
+    # Only the last of those actually sets this number -- the rebinding one was
+    # fixed in 1.23.0 and the middle two in 1.27.2, so 1.28.1 is
+    # GHSA-vj7q-gjh5-988w's floor and the rest are already covered by it.
+    # Rebinding still deserves the word, because which deployment it protects is
+    # easy to read backwards: server.py builds FastMCP without
+    # `transport_security`, so a plain `gopher-mcp --transport streamable-http`
+    # inherits the SDK's own loopback allowlist and that default is the only
+    # thing guarding it. The container is the exception rather than the example
+    # -- its CMD passes `--host 0.0.0.0` with no `--allowed-host`, which
+    # deliberately yields `enable_dns_rebinding_protection=False` rather than
+    # guess the name clients will use for a wildcard bind. Pass `--allowed-host`
+    # when exposing it.
     # A fresh `pip install` resolves the newest mcp and was always safe; this
     # floor is what stops the server running inside an agent venv that already
     # pins an old SDK -- the case the minimum-versions CI job exercises.

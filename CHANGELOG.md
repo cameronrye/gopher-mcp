@@ -23,6 +23,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   target the capsule never offered. Both are one missing bit of state, and both
   contradicted what `models.py` and the API reference promise the model on every
   call.
+- The install docs no longer deny that the container image exists. README,
+  `docs/installation.md` and `docs/troubleshooting.md` all said registry
+  publishing was still to come and that the release on PyPI predated
+  `--version`; both stopped being true when 0.9.0 published the image to
+  `ghcr.io/cameronrye/gopher-mcp` and shipped the flag. The PyPI long
+  description is immutable per release, so 0.9.0's copy keeps the old text and
+  only a new release replaces it.
+- The changelog's own pre-0.3 tail. `0.2.1` and `0.2.2` carried January dates
+  that were 8-11 months off their tags, `0.1.0` was dated `2025-01-XX`, and the
+  link definitions for `0.1.0` and `0.4.0` pointed at `v0.1.0` and `v0.4.1` tags
+  in ways that 404'd or misnamed the release. Neither version was ever tagged,
+  which is now stated rather than papered over.
+
+### Changed
+
+- `pyproject.toml` records what should end the `mcp<2` hold instead of leaving
+  it open-ended, and notes that the first condition has already fired:
+  `llama-index-tools-mcp` requires `mcp>=2` as of 0.5.0, so installing it beside
+  this package is already unsatisfiable. It also corrects which advisory sets
+  the `mcp>=1.28.1` floor -- the DNS-rebinding one was fixed in 1.23.0 and is
+  not it -- and stops citing the container as the deployment the SDK's rebinding
+  default protects, since the container's own `CMD` disables that check.
+- The release checklist no longer tells you to run a bare `pre-commit
+autoupdate`. Two hook revs deliberately track `uv.lock`, and a bare
+  `autoupdate` bumps them out from under it; the checklist now scopes the
+  update to the revs with no lockfile counterpart.
+- `docs/development/repository-setup.md` describes the branch protection that
+  actually exists -- the `main` ruleset lists the admin role as an
+  always-bypass actor -- and carries the API calls to re-check every claim on
+  the page.
 
 ## [0.9.0] - 2026-09-03
 
@@ -1037,7 +1067,7 @@ connection failed`, `the reply was not a valid Gemini response`, or the status
 - Enforce the project's full ruff ruleset (it was silently shadowed by a stray
   config file) and clear a transitive `jaraco-context` advisory.
 
-## [0.2.2] - 2025-01-16
+## [0.2.2] - 2025-11-15
 
 ### Added
 
@@ -1056,7 +1086,7 @@ connection failed`, `the reply was not a valid Gemini response`, or the status
 - Fixed code formatting issues
 - Fixed trailing whitespace in markdown and yaml files
 
-## [0.2.1] - 2025-01-18
+## [0.2.1] - 2025-09-18
 
 ### Added
 
@@ -1116,7 +1146,7 @@ connection failed`, `the reply was not a valid Gemini response`, or the status
 - Enhanced input validation for both protocols
 - Connection timeout and size limit enforcement
 
-## [0.1.0] - 2025-01-XX
+## [0.1.0] - 2025-09-16
 
 ### Added
 
@@ -1134,6 +1164,16 @@ connection failed`, `the reply was not a valid Gemini response`, or the status
 - Extensive test suite with >90% coverage
 - Complete documentation and examples
 
+<!--
+Link definitions. 0.1.0 and 0.4.0 were never tagged -- `git ls-remote --tags`
+starts at v0.2.0 -- so neither can have a `compare/vX...vY` range of its own and
+both definitions used to 404. They point instead at the history that actually
+carries their changes: everything up to the first tag for 0.1.0, and the range
+ending at v0.4.1 for 0.4.0, which shipped them together. Dates come from the tag
+they were cut at (`git log -1 --format=%ai vX.Y.Z`); the pre-0.3 tail carried
+January placeholders that were wrong by 8-11 months.
+-->
+
 [Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.9.0...HEAD
 [0.9.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.7.0...v0.8.0
@@ -1145,8 +1185,8 @@ connection failed`, `the reply was not a valid Gemini response`, or the status
 [0.4.3]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/cameronrye/gopher-mcp/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.1
-[0.4.0]: https://github.com/cameronrye/gopher-mcp/releases/tag/v0.4.1
+[0.4.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.3.0...v0.4.1
 [0.3.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.2...v0.3.0
 [0.2.2]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.1...v0.2.2
-[0.2.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.1.0...v0.2.1
-[0.1.0]: https://github.com/cameronrye/gopher-mcp/releases/tag/v0.1.0
+[0.2.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.2.0...v0.2.1
+[0.1.0]: https://github.com/cameronrye/gopher-mcp/commits/v0.2.0

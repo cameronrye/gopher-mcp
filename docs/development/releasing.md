@@ -252,7 +252,27 @@ checking locally avoids a failed release run.)
 
 - [ ] Decide the version number per SemVer (major / minor / patch).
 - [ ] All intended PRs are merged to `main`; no pending work that belongs in the release.
-- [ ] Hook revisions refreshed: `uv run pre-commit autoupdate`, then `uv run pre-commit run --all-files`. Nothing else bumps them — Dependabot has no `pre-commit` ecosystem and no pre-commit.ci app is installed on this repo — so without this step the local gate drifts away from CI between releases.
+- [ ] Hook revisions refreshed, but **not with a bare `autoupdate`**. Two of the
+  revs deliberately track `uv.lock` (`ruff-pre-commit` and `bandit`, so the hook
+  and CI's `uv run ruff check .` / `uv run bandit` agree on the rule set), and a
+  bare `uv run pre-commit autoupdate` bumps those to the newest upstream tag and
+  breaks exactly that. Update only the revs with no lockfile counterpart:
+
+  ```bash
+  uv run pre-commit autoupdate \
+    --repo https://github.com/pre-commit/pre-commit-hooks \
+    --repo https://github.com/compilerla/conventional-pre-commit \
+    --repo https://github.com/igorshubovych/markdownlint-cli \
+    --repo https://github.com/rbubley/mirrors-prettier
+  uv run pre-commit run --all-files
+  ```
+
+  Move `ruff-pre-commit` and `bandit` only together with `uv lock --upgrade`, so
+  the rev and the locked version land in the same commit. Nothing else bumps any
+  of them — Dependabot has no `pre-commit` ecosystem and no pre-commit.ci app is
+  installed here — so without this step the local gate drifts away from CI
+  between releases.
+
 - [ ] Lint and format pass: `uv run ruff check .` and `uv run ruff format --check .`.
 - [ ] Type checking passes: `uv run mypy src`.
 - [ ] Tests pass with coverage ≥95%: `uv run pytest`.

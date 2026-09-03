@@ -15,7 +15,7 @@ the real server object over an in-memory transport, so what follows travels the
 same request path a stdio client does, JSON-RPC framing and all.
 
 These are also the guard for the mcp 2.x port this project is deliberately
-holding off (``mcp>=1.10.0,<2`` in pyproject.toml). Last time the wire surface
+holding off (``mcp>=1.28.1,<2`` in pyproject.toml). Last time the wire surface
 had to be checked by hand-diffing raw JSON-RPC bytes, because nothing automated
 it; the point of this file is that the port does not need that again.
 """
