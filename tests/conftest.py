@@ -6,6 +6,21 @@ from pathlib import Path
 import pytest
 
 
+def redirect_state_environment(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point every environment input of the state-directory resolver at ``home``.
+
+    Separate from the fixture so ``tests/test_home_isolation.py`` can re-apply
+    it over a deliberately hostile environment and prove the coverage is
+    complete -- a check that would otherwise silently pass on any machine (CI
+    included) that happens to leave these variables unset.
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
+
+
 @pytest.fixture(autouse=True)
 def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Redirect the home directory to a per-test tmp dir.
@@ -31,13 +46,23 @@ def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     such fallback, errors outright. Do not drop the ``setattr`` -- see
     ``tests/test_home_isolation.py``, which pins this.
 
+    Redirecting home is likewise not isolation on its own, because
+    ``default_state_directory()`` consults the *environment* before it ever asks
+    for a home: ``XDG_DATA_HOME`` first on every platform, then
+    ``LOCALAPPDATA``/``APPDATA`` on Windows. On a machine that sets
+    ``XDG_DATA_HOME`` -- ordinary on Linux, and invisible on CI, which does not
+    -- every default client in the suite would share one real store and mint
+    trust pins and client-certificate private keys into the developer's data
+    directory. ``XDG_DATA_HOME`` is pointed *under* ``home`` rather than deleted
+    so the branch production actually takes on Linux stays exercised; the few
+    tests that assert the unset behaviour ``delenv`` it themselves.
+
     Returned so tests that assert on the isolated location can request it by
     name.
     """
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+    redirect_state_environment(monkeypatch, home)
     monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
     return home
 

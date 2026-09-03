@@ -413,7 +413,7 @@ the operator's decision about automated clients, not a misconfiguration.
 
 1. **Start with menus**: Begin exploration with directory listings
 2. **Understand item types**: Different types require different handling
-3. **Handle search servers**: Type 7 items need the terms appended as a query string — `gopher://host/7/selector?your search terms`, never as extra path segments
+3. **Handle search servers**: Type 7 items need search terms — pass them in `gopher_fetch`'s `search` argument, never hand-built into the URL. A `?query` already on the URL is still honoured, but building one yourself truncates the terms at a `#` and misreads a literal `%xx`; `search` percent-encodes them so they reach the server intact
 4. **Respect the vintage nature**: Gopher content often reflects historical computing
 
 ### Gemini-Specific
@@ -462,8 +462,8 @@ if result["kind"] == "menu":
 
 `search` percent-encodes the user's words for you and replaces any query already
 in the URL. Writing the query by hand is what goes wrong: `#` truncates the terms
-at the fragment and a literal `+` reaches the server as a space, so the server
-answers a search that was never asked.
+at the fragment, and a literal `%xx` in the terms is decoded as the character it
+would escape, so the server answers a search that was never asked.
 
 Only type 7 (Index-Search) selectors have a query field. Send `search` to any
 other item type and it is dropped — the result says so via

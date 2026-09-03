@@ -892,6 +892,20 @@ class GeminiGemtextResult(BaseModel):
         "windows abut exactly; `size` still reports the full original byte "
         "size (bytes are not the unit an offset counts in).",
     )
+    partial_line: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("partial_line", "partialLine"),
+        serialization_alias="partial_line",
+        description=(
+            "True when this window both begins and ends inside a single line "
+            "that is longer than the render limit. That line is delivered as a "
+            "plain `text` line here and continues in the next window, so join "
+            "it to the next window's first line rather than reading the two as "
+            "separate lines. It is deliberately not parsed: half of a "
+            "`=> url text` line would otherwise look like a complete link to a "
+            "target the server never sent"
+        ),
+    )
     total_chars: _TotalChars = None
     next_offset: _NextOffset = None
     cached: _CachedFlag = False

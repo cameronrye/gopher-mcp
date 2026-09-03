@@ -312,8 +312,13 @@ addopts = [
 ]
 testpaths = ["tests"]
 # A per-test ceiling, on top of the per-job `timeout-minutes` in the workflows.
-# Those cap a hung job at 20 minutes but say nothing about which test hung;
-# this fails the individual test and names it. 60s is ~6x the slowest test in
+# Those cap a hung job at 20 minutes but say nothing about WHICH test hung; this
+# names it. Note what it does not do: the "thread" method below cannot fail one
+# test and carry on -- it kills the process, so the run ends at the offending
+# test with a stack dump and no pytest summary, and the tests after it never
+# run. That is the right trade for a hang (a name and a stack beat a silent
+# 20-minute wall) but it means a timeout aborts the build rather than reporting
+# one failure among many. 60s is ~6x the slowest test in
 # the suite (the whole suite runs in well under two minutes), so it can only
 # fire on a genuine hang -- a socket read that stops honouring its deadline, a
 # TLS handshake stalled on a runner. Raise it if a legitimately slow test

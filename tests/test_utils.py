@@ -595,10 +595,18 @@ class TestWindowText:
         text = "".join(f"line {i}\n" for i in range(50))
         seen = ""
         offset = 0
-        while offset is not None:
+        # Bounded, not `while offset is not None`: a next_offset that stops
+        # advancing must fail this one test, not spin until the suite-wide
+        # timeout kills the process without a pytest summary. 400 characters in
+        # 37-character windows needs 11 iterations.
+        for _ in range(30):
+            if offset is None:
+                break
             window = window_text(text, offset, 37)
             seen += window.text
             offset = window.next_offset
+        else:
+            pytest.fail(f"windows never terminated: next_offset stuck at {offset}")
 
         assert seen == text
 

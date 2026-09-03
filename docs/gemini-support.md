@@ -576,12 +576,14 @@ transport.
 
 `gemini_fetch` normalizes the URL before anything goes on the wire, and the
 normalized form is what the cache, the TOFU pin and the robots policy are all
-keyed on — so the spellings below are one resource, not several:
+keyed on — so most of the spellings below collapse to one resource rather than
+several. The trailing-dot row is the exception, and is called out as such:
 
 | Input | What happens |
 |-------|--------------|
 | `GEMINI://`, `Gemini://` | Accepted; RFC 3986 makes the scheme case-insensitive. Canonicalized to lowercase |
-| `EXAMPLE.org`, `example.org.` | Host lowercased and the trailing dot dropped |
+| `EXAMPLE.org` | Host lowercased, so the request line, the SNI, the pin and the cache key all agree |
+| `example.org.` | **Not** normalized. A trailing dot is passed through to both the request line and the SNI, so it is a separate cache entry and most capsules abort the handshake — drop the dot yourself. (`normalize_host` does strip it, but only for comparison keys — allowlist, TOFU pin, client-cert scope, robots policy — never for the URL that is fetched.) |
 | `exämple.org` | IDNA-encoded to its A-label (`xn--exmple-cua.org`), so the request line, the SNI, the pin and the cache key all agree. A non-ASCII host that will not encode is refused rather than sent raw |
 | `#fragment` | Dropped. Fragments are a client-side concept the wire request never carried; refusing them made this server's own gemtext links unfollowable |
 | trailing `?` with nothing after it | **Preserved.** An empty query is not the same as no query — it is how an empty answer to a status-10 prompt reaches the capsule, and resending the bare URL would just get the same 10 back |

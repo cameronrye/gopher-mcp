@@ -1640,12 +1640,19 @@ class TestOffsetContinuation:
 
             seen = result.text
             offset = result.next_offset
-            while offset is not None:
+            # Bounded, not `while offset is not None`: a next_offset that stops
+            # advancing must fail this one test, not spin until the suite-wide
+            # timeout kills the process without a pytest summary.
+            for _ in range(20):
+                if offset is None:
+                    break
                 window = await client.fetch(
                     "gopher://example.com/0/a.txt", offset=offset
                 )
                 seen += window.text
                 offset = window.next_offset
+            else:
+                pytest.fail(f"windows never terminated: next_offset stuck at {offset}")
 
         assert seen == self.TEXT.decode()
 

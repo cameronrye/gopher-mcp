@@ -60,7 +60,7 @@ jobs:
 
       # ci.yml never triggers on tags, and this workflow's own test-and-build
       # job runs a single ubuntu-latest/3.11 leg -- so without this step nothing
-      # in the release path ever sees the 9-way OS/Python matrix, and a
+      # in the release path ever sees the 12-way OS/Python matrix, and a
       # Windows- or macOS-only regression can publish to PyPI with a fully
       # green Release run. That nearly happened for 0.8.0: CI run 33590282556
       # on b0c3c8b had all three windows-latest jobs red while every ubuntu job

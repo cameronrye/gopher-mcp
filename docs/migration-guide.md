@@ -60,8 +60,9 @@ why the duplication went rather than being kept for compatibility.
 
 **Timestamps are ISO-8601 UTC strings, not epoch seconds.** `cached_at` on
 every cacheable result changed from a float to a string like
-`2026-09-02T14:03:11Z`. `gemini_trust_list` entries now report `first_seen`,
-`last_seen` and `expires` the same way — matching what the client-certificate
+`2026-09-02T14:03:11+00:00`. `gemini_trust_list` entries now report
+`first_seen`, `last_seen` and `expires` the same way — matching what the
+client-certificate
 tools already did — plus a precomputed `expired` boolean, so "was this reissue
 routine?" is answered by reading a field rather than by epoch arithmetic. The
 `tofu.json` file on disk keeps its epoch format; only the wire changed.
@@ -131,7 +132,7 @@ meaning. Anything switching on `error["code"]` needs these branches:
 | `SLOW_DOWN` | **New.** A host that answered `44 SLOW_DOWN` is still inside its backoff. The result carries `error.retry_after_seconds`; nothing was sent. The client used to sleep out the wait inside the call. |
 | `CERTIFICATE_STORE_UNAVAILABLE` | **Widened.** It used to mean only "the store is locked by another process". It now also covers a store that cannot be *written* — a read-only disk, a misdirected `GEMINI_TOFU_STORAGE_PATH`. That `OSError` previously escaped into the robots probe's transport handler and was reported as an unreachable capsule whose stated remedy was to retry, advice that could never succeed. The trust and client-certificate tools return this code too, where they used to return `FETCH_ERROR`. |
 | `BLOCKED` | **Widened.** A non-ASCII hostname that cannot be IDNA-encoded is refused here rather than being passed through raw. |
-| `INVALID_REQUEST` | **Narrowed.** A `#fragment` on a Gemini URL is now stripped instead of refused, so a gemtext link or redirect target this server emitted is one the tool will follow. A negative `offset` is rejected with this code. |
+| `INVALID_REQUEST` | **Narrowed.** A `#fragment` on a Gemini URL is now stripped instead of refused, so a gemtext link or redirect target this server emitted is one the tool will follow. A negative `offset` reaches this code only on a direct Python call: over MCP the published input schema carries `minimum: 0`, so the SDK refuses the arguments as a tool error (`isError`, no `structuredContent`) before the tool body runs. |
 | `NOT_FETCHABLE` | Unchanged in meaning, but the result now echoes the request in `request_info`, so a batch entry for an interactive item can be matched to the URL that produced it. |
 
 `error.code` on a `SLOW_DOWN` or a widened `CERTIFICATE_STORE_UNAVAILABLE` is

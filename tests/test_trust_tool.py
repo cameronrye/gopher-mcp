@@ -337,6 +337,31 @@ class TestTrustToolsFailSafely:
         assert "/home/u" not in str(result)
 
     @pytest.mark.asyncio
+    async def test_a_host_that_will_not_idna_encode_is_reported_not_raised(
+        self, client
+    ):
+        """Host normalization refuses a host with an empty or over-long label.
+
+        Both tools normalize the caller's host to match it against the store, so
+        that refusal reaches them as an exception. Uncaught it escaped the tool
+        entirely: the client saw isError with no structuredContent at all, on a
+        call whose outputSchema promises one -- and the update tool's catch-all
+        relabelled it CERTIFICATE_STORE_UNAVAILABLE, sending the operator to
+        inspect a store that is fine.
+        """
+        with _serving(client):
+            listed = await gemini_trust_list(host="\u00e4..com")
+            updated = await gemini_trust_update(
+                action="remove", host="\u00e4..com", fingerprint=FINGERPRINT_A
+            )
+
+        for result in (listed, updated):
+            assert result["kind"] == "error"
+            assert result["error"]["code"] == "INVALID_REQUEST"
+        # The store was healthy throughout; nothing changed.
+        assert _pinned(client, "example.org") == FINGERPRINT_A
+
+    @pytest.mark.asyncio
     async def test_an_unexpected_store_failure_is_reported_not_raised(self, client):
         with (
             _serving(client),

@@ -38,6 +38,9 @@ from .models import (
     GeminiStatusCode,
     GeminiSuccessResult,
     GeminiURL,
+    GemtextDocument,
+    GemtextLine,
+    GemtextLineType,
     iso_utc,
 )
 
@@ -627,6 +630,8 @@ def _process_success_response(
         content = window.text
         truncated = window.next_offset is not None
         next_offset = window.next_offset
+        parsed_source: str | None = content
+        partial_line = False
         if truncated:
             # Drop the trailing partial line before parsing -- the same rule the
             # robots.txt reader applies, and for the same reason. A cut landing
@@ -634,21 +639,55 @@ def _process_success_response(
             # is the surviving prefix, so the caller is handed a URL the server
             # never sent and cannot tell it apart from a real one. Half a link
             # must not be presented as a whole one.
-            #
-            # A cut before the first newline leaves nothing: that is a single
-            # line longer than the entire character budget, and there is no
-            # complete line to show. ``truncated`` still reports why -- and
-            # ``next_offset`` then stays at the window's own end rather than at
-            # the (nonexistent) line break, so a continuation still moves
-            # forward instead of asking for this same window forever.
             cut = content.rfind("\n") + 1
-            content = content[:cut]
             if cut:
+                content = content[:cut]
+                parsed_source = content
                 next_offset = window.start + cut
+            else:
+                # A single line longer than the entire character budget, so
+                # there is no complete line to structure. The span still has to
+                # be returned: ``next_offset`` must advance past it (a window
+                # pulled back to its own start would be requested forever), so
+                # anything withheld here is unreachable at every later offset.
+                #
+                # What was actually unsafe is PARSING, not returning: a cut
+                # inside a "=> url text" line parses as a COMPLETE link whose
+                # target is the surviving prefix, handing the caller a URL the
+                # server never sent. So the span is emitted as one TEXT line,
+                # built directly rather than parsed. TEXT carries no target, so
+                # a fragment can never be presented as a whole link, and the
+                # characters still reach the model.
+                #
+                # Returning it only in ``raw_content`` is not enough and was the
+                # first attempt at this fix: that field is ``exclude=True``, so
+                # a walk over a 3019-character line at a 1000-character cap
+                # reassembled 16 of them from ``document.lines`` and reported
+                # nothing wrong.
+                partial_line = True
+                parsed_source = None
         # Parse gemtext into structured format, resolving each link against the
         # request URL: relative references are the norm in gemtext, and an
         # unresolved one is not fetchable by the caller.
-        document = parse_gemtext(content, str(request_info.get("url", "")) or None)
+        if parsed_source is None:
+            document = GemtextDocument(
+                lines=[
+                    GemtextLine(
+                        type=GemtextLineType.TEXT,
+                        content=content,
+                        text=None,
+                        link=None,
+                        level=None,
+                        alt_text=None,
+                        language=None,
+                    )
+                ],
+                links=[],
+            )
+        else:
+            document = parse_gemtext(
+                parsed_source, str(request_info.get("url", "")) or None
+            )
 
         return GeminiGemtextResult(
             document=document,
@@ -657,6 +696,7 @@ def _process_success_response(
             lang=mime_type.lang,
             size=size,
             truncated=truncated,
+            partial_line=partial_line,
             # Characters, not bytes: `size` is the body's byte length, which an
             # offset cannot be expressed in without splitting a UTF-8 sequence.
             total_chars=window.total,

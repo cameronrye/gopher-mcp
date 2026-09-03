@@ -561,10 +561,22 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 f"resource -- its policy could not be read. Retry shortly."
             )
         else:
+            # The single actionable sentence used to be an unconditional "set
+            # GOPHER_RESPECT_ROBOTS_TXT=false", which is read by the model, not
+            # the operator -- so the natural next step became telling the user to
+            # switch off a politeness control the server explicitly opted into.
+            # docs/ai-assistant-guide.md says the opposite ("do not suggest
+            # disabling robots checking unless the user has said they operate the
+            # host"). State the decision and the correct next step first; keep
+            # the env-var pointer, under its condition. Kept word-for-word in
+            # step with the Gemini wording, which was fixed first.
             message = (
                 f"{host} disallows this resource in its robots.txt. "
-                f"Set GOPHER_RESPECT_ROBOTS_TXT=false to disable robots "
-                f"checking."
+                f"This is the server operator's decision and will not change on "
+                f"a retry: do not retry, and do not try a different spelling of "
+                f"the selector. Tell the user the resource is excluded and stop. "
+                f"GOPHER_RESPECT_ROBOTS_TXT=false overrides the check, but only "
+                f"for a host the user has said they operate."
             )
         code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return ErrorResult(

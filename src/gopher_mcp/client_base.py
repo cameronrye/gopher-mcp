@@ -8,15 +8,20 @@ twice. This base class holds the one implementation, parameterised by the few
 things that genuinely differ (agent tokens, the robots fail-open/closed choice,
 the parsed-URL type); each client supplies only ``_fetch_content`` and
 ``_fetch_robots``.
+
+The per-fetch wire-time budget is deliberately NOT one of those things. Each
+client still owns its own (``gopher_client``'s ``_spend_budget``, and
+``gemini_client``'s inline arithmetic), because unifying them rewires both
+timeout paths and deserves its own change and tests. A third copy did live here
+for a while, unused by anything -- which is worse than two, since it reads like
+the shared implementation and a fix applied to it would change no behaviour at
+all. Move the clients onto a copy here, or leave the copy out; do not park one
+here unwired.
 """
 
 import asyncio
-import contextlib
 import time
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Iterator
-from contextvars import ContextVar
-from dataclasses import dataclass
 from typing import ClassVar, Generic, Protocol, TypeVar
 
 import structlog
@@ -39,84 +44,6 @@ class ParsedURL(Protocol):
 
 ResponseT = TypeVar("ResponseT")
 UrlT = TypeVar("UrlT", bound=ParsedURL)
-
-
-@dataclass
-class _FetchBudget:
-    """Network time still available to one ``fetch()`` call.
-
-    ``timeout_seconds`` is documented -- in ``docs/configuration.md`` and in
-    ``config/example.env`` -- as the "overall deadline for one fetch, covering
-    DNS, connect, send and read". Handing each phase the full value instead let
-    one call against a tarpit, answering every phase just under the limit,
-    occupy several multiples of the configured deadline; with robots checking on
-    by default the probe added phases of its own. This makes the documented
-    sentence true.
-    """
-
-    remaining: float
-
-
-# Budget for the fetch currently running in this task. A ContextVar rather than
-# an argument because the robots probe is invoked through RobotsGate, which owns
-# its fetcher signature; each task copies the context, so concurrent fetches get
-# their own budget.
-_FETCH_BUDGET: ContextVar[_FetchBudget | None] = ContextVar(
-    "fetch_budget", default=None
-)
-
-
-class _BudgetExhausted(TimeoutError):
-    """The fetch deadline ran out before this phase could start.
-
-    Subclasses :class:`TimeoutError` because that is what it is, and because
-    both clients already have a handler arm that maps a timeout to "the request
-    timed out" rather than to their generic "malformed reply" message. A client
-    whose error mapping keys off a protocol-specific base (Gopher's
-    ``GopherProtocolError``) subclasses this alongside it and passes the
-    subclass to :func:`_spend_budget`.
-    """
-
-
-@contextlib.asynccontextmanager
-async def _spend_budget(
-    default_timeout: float,
-    exhausted_cls: type[_BudgetExhausted] = _BudgetExhausted,
-) -> AsyncIterator[float]:
-    """Yield the timeout for one wire phase, then charge what it used.
-
-    Every phase that touches the network goes through here -- the robots
-    probe's DNS lookup and transport read, then the guarded fetch's own two --
-    so all of them draw down one deadline instead of each being handed a full
-    one. Outside a fetch (no budget in the context) it yields the configured
-    timeout unchanged, which is what a direct call to a client's internals gets.
-
-    Args:
-        default_timeout: The configured per-fetch deadline, yielded when no
-            budget is active and quoted in the exhausted message.
-        exhausted_cls: Exception raised when the budget is already spent; a
-            client overrides it to keep its own error-mapping lineage.
-
-    Yields:
-        The number of seconds this phase may take.
-
-    Raises:
-        _BudgetExhausted: If nothing is left of the deadline. Only the phase
-            that has not started yet is refused; a phase already running is
-            bounded by the timeout it was handed.
-    """
-    budget = _FETCH_BUDGET.get()
-    if budget is None:
-        yield default_timeout
-        return
-    if budget.remaining <= 0:
-        raise exhausted_cls(f"The request timed out after {default_timeout} seconds")
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    try:
-        yield budget.remaining
-    finally:
-        budget.remaining -= loop.time() - started
 
 
 class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
@@ -251,28 +178,6 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
             if respect_robots_txt
             else None
         )
-
-    @contextlib.contextmanager
-    def _budget(self) -> Iterator[None]:
-        """Open ONE deadline for the whole call, for the duration of the block.
-
-        Entered at the top of ``fetch()`` rather than in ``_bounded_fetch``: the
-        robots.txt probe runs before that, on the way to deciding whether the
-        fetch may happen at all, and would otherwise be granted a full deadline
-        of its own on top of the one the fetch gets.
-
-        Yields:
-            None; the budget lives in a ContextVar, read by
-            :func:`_spend_budget` at each wire phase.
-        """
-        token = _FETCH_BUDGET.set(_FetchBudget(self.timeout_seconds))
-        try:
-            yield
-        finally:
-            # A ContextVar set inside one fetch outlives it in the caller's
-            # context, so a second fetch on the same task would otherwise
-            # inherit whatever the first one had left.
-            _FETCH_BUDGET.reset(token)
 
     def _response_size(self, response: ResponseT) -> int:
         """Return ``response``'s content length, whatever this protocol calls it.

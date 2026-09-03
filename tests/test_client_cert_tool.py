@@ -496,6 +496,20 @@ class TestClientCertToolsFailSafely:
             assert "/home/u" not in str(result)
 
     @pytest.mark.asyncio
+    async def test_a_host_that_will_not_idna_encode_is_reported_not_raised(
+        self, client
+    ):
+        """The host filter normalizes, and normalization refuses a host with an
+        empty or over-long label. Uncaught, that escaped the tool as a bare
+        exception -- isError with no structuredContent at all, on a call whose
+        outputSchema promises one."""
+        with _serving(client):
+            listed = await gemini_client_cert_list(host="\u00e4..com")
+
+        assert listed["kind"] == "error"
+        assert listed["error"]["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
     async def test_an_unreadable_store_is_reported_not_raised(self, client):
         with (
             _serving(client),

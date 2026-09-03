@@ -738,6 +738,37 @@ class TestGopherClientIntegration:
         assert result.error["code"] == "BLOCKED_BY_ROBOTS"
         await client.close()
 
+    async def test_disallow_message_does_not_tell_the_model_to_turn_robots_off(self):
+        """The tool result is read by the model, not the operator.
+
+        Its single actionable sentence used to be an unconditional "set
+        GOPHER_RESPECT_ROBOTS_TXT=false", which contradicts the shipped
+        AI-assistant guide ("do not suggest disabling robots checking unless the
+        user has said they operate the host"). The Gemini half of this pair is
+        pinned by tests/test_gemini_client.py; without this one the Gopher half
+        drifted back unnoticed.
+        """
+        client = GopherClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+        client._fetch_content = _fake_gopher_content()
+        with patch.object(
+            client, "_fetch_robots", return_value="User-agent: *\nDisallow: /\n"
+        ):
+            result = await client.fetch("gopher://example.com/0/page")
+
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "BLOCKED_BY_ROBOTS"
+        message = result.error["message"]
+        # The operator's decision and the correct next step come first...
+        assert "operator's decision" in message
+        assert "do not retry" in message
+        assert "Tell the user the resource is excluded" in message
+        # ...and the override is still named, but only under its condition.
+        assert "GOPHER_RESPECT_ROBOTS_TXT=false" in message
+        assert "a host the user has said they operate" in message
+        await client.close()
+
     async def test_allowed_path_still_fetches(self):
         client = GopherClient(
             cache_enabled=False, requests_per_minute=0, respect_robots_txt=True

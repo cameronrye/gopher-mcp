@@ -1646,6 +1646,39 @@ class TestGeminiRobotsGate:
         assert waits == []
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("respect_robots_txt", [True, False])
+    async def test_every_fetch_pays_exactly_one_rate_limit_token(
+        self, respect_robots_txt
+    ):
+        """One acquire per fetch, on both robots paths.
+
+        With robots checking on -- the default -- the probe's acquire in
+        ``_fetch_robots`` is the *only* throttle: ``_bounded_fetch`` sees the
+        probe's credit and returns before the base class's own acquire. Zero
+        awaits means per-host throttling is silently gone; two means the
+        double-charge the probe credit exists to prevent. The sibling assertion
+        for Gopher lives in tests/test_gopher_client.py.
+        """
+        client = self._client(respect_robots_txt=respect_robots_txt)
+        client._rate_limiter.acquire = AsyncMock()  # type: ignore[method-assign]
+
+        bodies = [b"20 text/plain\r\n", b"20 text/plain\r\nhello"]
+        if not respect_robots_txt:
+            bodies.pop(0)
+
+        async def fake_connect(*args, **kwargs):
+            return _reader_conn(bodies.pop(0)), {}
+
+        client.tls_client.connect = fake_connect  # type: ignore[method-assign]
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+
+        result = await client.fetch("gemini://example.org/page")
+
+        assert isinstance(result, GeminiSuccessResult)
+        client._rate_limiter.acquire.assert_awaited_once_with("example.org")
+
+    @pytest.mark.asyncio
     async def test_probe_and_fetch_resolve_the_host_once(self):
         """``ssrf.resolve_host`` caches nothing, so the probe's vetted addresses
         are handed to the fetch rather than looked up a second time."""
@@ -2119,12 +2152,114 @@ class TestGeminiOffsetContinuation:
 
         seen = first.raw_content
         offset = first.next_offset
-        while offset is not None:
+        # Bounded, not `while offset is not None`: a next_offset that stops
+        # advancing must fail this one test, not spin until the suite-wide
+        # timeout kills the process without a pytest summary.
+        for _ in range(20):
+            if offset is None:
+                break
             window = await client.fetch("gemini://example.org/", offset=offset)
             seen += window.raw_content
             offset = window.next_offset
+        else:
+            pytest.fail(f"windows never terminated: next_offset stuck at {offset}")
 
         assert seen == self.BODY
+
+    @pytest.mark.asyncio
+    async def test_a_line_longer_than_the_window_is_still_returned_whole(self):
+        """A line longer than the whole budget must not vanish.
+
+        There is no complete line to parse, so the document is empty -- but the
+        characters are real and ``next_offset`` advances past them, so if the
+        window also blanked ``raw_content`` no later offset could ever ask for
+        them again. A caller running the documented continuation loop would
+        assemble a fragment and have no signal it was not the whole page.
+        """
+        body = "# short\n" + "X" * 3000 + "\ntail line\n"
+        client = self._client(max_rendered_chars=1000)
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/gemini\r\n" + body.encode()
+        )
+
+        seen = ""
+        from_payload = ""
+        offset: int | None = 0
+        for _ in range(20):
+            if offset is None:
+                break
+            window = await client.fetch("gemini://example.org/", offset=offset)
+            assert window.total_chars == len(body)
+            # What the MODEL receives, not what the object holds: raw_content is
+            # exclude=True, so a window can look complete here and still deliver
+            # nothing over the wire. That is exactly how the first version of
+            # this fix passed its own test while changing nothing for a caller.
+            payload = window.model_dump()
+            in_payload = "".join(
+                line["content"] for line in payload["document"]["lines"]
+            )
+            if window.next_offset is not None:
+                assert in_payload != "", (
+                    f"window at offset {offset} delivered no content to the "
+                    f"caller but still advanced to {window.next_offset}"
+                )
+            seen += window.raw_content
+            from_payload += in_payload
+            offset = window.next_offset
+        else:
+            pytest.fail(f"windows never terminated: next_offset stuck at {offset}")
+
+        assert seen == body
+        # The payload view is the one that matters. A gemtext line does not
+        # carry its own terminator, so the comparison is against the body with
+        # newlines removed: what must not happen is a character going missing,
+        # and before this fix 3000 of them did.
+        assert from_payload.replace("\n", "") == body.replace("\n", ""), (
+            f"a caller following the documented loop reassembled "
+            f"{len(from_payload)} of {len(body.replace(chr(10), ''))} characters"
+        )
+        assert from_payload.count("X") == 3000
+
+    @pytest.mark.asyncio
+    async def test_half_an_over_long_link_line_is_never_parsed_as_a_link(self):
+        """Withholding the PARSE is the other half of the fix.
+
+        The span still has to reach the model -- ``next_offset`` advances past
+        it, so anything withheld is unreachable forever -- but a truncated
+        ``=> url text`` must never arrive as a COMPLETE link pointing at the
+        surviving prefix, which is a URL the server never sent.
+
+        So it comes back as a plain text line: the characters are all there and
+        nothing carries a target. Asserting an empty document here would pin the
+        first, wrong version of this fix, which returned the span only in
+        ``raw_content`` -- a field excluded from the payload, so the model
+        received nothing at all.
+        """
+        body = "=> gemini://example.org/" + "a" * 3000 + " real link\n"
+        client = self._client(max_rendered_chars=1000)
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/gemini\r\n" + body.encode()
+        )
+
+        result = await client.fetch("gemini://example.org/")
+
+        assert result.raw_content == body[:1000]
+        assert result.partial_line is True
+
+        # The characters reach the model, in the payload and not just alongside
+        # it: raw_content is exclude=True and never serialized.
+        payload = result.model_dump()
+        assert "raw_content" not in payload
+        assert [line["content"] for line in payload["document"]["lines"]] == [
+            body[:1000]
+        ]
+
+        # ... and not one of them is presented as a link.
+        from gopher_mcp.models import GemtextLineType
+
+        assert result.document.lines[0].type is GemtextLineType.TEXT
+        assert result.document.lines[0].link is None
+        assert result.document.links == []
 
     @pytest.mark.asyncio
     async def test_a_plain_text_body_windows_too(self):

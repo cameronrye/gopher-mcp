@@ -87,6 +87,10 @@ EXPECTED_KEYS: dict[str, set[str]] = {
         "lang",
         "size",
         "truncated",
+        # Gemtext-only: says this window is the middle of one over-long line, so
+        # a caller joins it to the next window's first line instead of reading
+        # the two as separate lines.
+        "partial_line",
         "request_info",
     }
     | CACHE_KEYS

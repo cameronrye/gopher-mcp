@@ -28,8 +28,8 @@ inspection is genuinely read-only and a client may run it freely, while dropping
 a certificate pin — or destroying a private key — is destructive and must be
 gated as such by the client.
 
-No tool raises. Every failure — invalid URL, client setup, network error,
-unwritable trust store — comes back as a structured
+No tool raises. Every failure that reaches the tool body — invalid URL, client
+setup, network error, unwritable trust store — comes back as a structured
 [`ErrorResult`](#error-response-structure). That is a payload contract, not a
 protocol one: the six single-result tools additionally set the MCP `isError`
 flag from the payload's own `kind`, so a host that reads the flag rather than
@@ -37,6 +37,12 @@ the body no longer mistakes a blocked, DNS-failed or rejected call for a
 success. The two batch tools deliberately do **not** set it — failure there is
 per item, and one flag cannot describe a list where three URLs succeeded and two
 did not.
+
+Arguments that violate the published *input* schema never reach the tool body at
+all, so they are the one failure with no `ErrorResult`: a negative `offset` or an
+`action` outside its enum is refused by the MCP layer as a tool error with
+`isError` set and `structuredContent` absent. Code that branches on
+`error["code"]` needs a fallback for that shape.
 
 `gopher_fetch` and `gemini_fetch` also publish a real `outputSchema`: a `oneOf`
 over their result models with `kind` as the discriminator (four members for
@@ -90,9 +96,9 @@ if result["kind"] == "text":
 
 ```python
 # Search using a Gopher search server (type 7). Pass the terms as `search`;
-# they are percent-encoded for you, so a `+`, `#` or accented character
-# reaches the server intact instead of being read as a literal plus or
-# truncated at a fragment.
+# they are percent-encoded for you, so a `#` or a literal `%xx` reaches the
+# server intact instead of truncating the terms at a fragment or being
+# decoded as the character it would escape.
 result = await gopher_fetch(
     "gopher://gopher.floodgap.com/7/v2/vs", search="search query"
 )
@@ -156,9 +162,9 @@ also carry the [continuation fields](#continuing-a-truncated-result).
 
 A menu item whose `next_url` is the empty string is display-only and must not be
 fetched. That is what an info (`i`) line is: servers park placeholder values
-(`error.host`, port `0`, `(NULL)`) in an info line's unused host and port
-fields, and a URL built from those never pointed anywhere, so no `next_url` is
-fabricated for one. An explicit hURL `URL:<target>` selector is still honoured,
+(`error.host:1`, `(NULL):0`) in an info line's unused host and port fields, and a
+URL built from those never pointed anywhere, so no `next_url` is fabricated for
+one. An explicit hURL `URL:<target>` selector is still honoured,
 because there the destination was stated rather than parked.
 
 ### `gemini_fetch`
@@ -861,6 +867,7 @@ begins, and both fetch tools take an `offset` to read it.
 | `next_offset` | `menu`, `text`, `success`, `gemtext` | Where the next window starts. Pass it back as `offset`. `null` when there is nothing more |
 | `total_items` | `menu` | How many items the directory holds — or `null`, see below |
 | `total_chars` | `text`, `success`, `gemtext` | Length of the whole body in characters |
+| `partial_line` | `gemtext` | `true` when the window is the middle of a single line longer than the render limit. Join its last line to the next window's first — see below |
 
 The unit matters: **an offset counts menu items for a menu and characters for a
 body. It is never a byte count.** `bytes` (Gopher) and `size` (Gemini) report
@@ -891,6 +898,13 @@ Three rules are worth knowing before you write that loop:
   surviving prefix — a URL the server never sent, indistinguishable from a real
   one — so the trailing partial line is dropped and the offset moves back to the
   line break. Consecutive windows therefore abut exactly.
+- **A single line longer than the whole render limit is the one exception**, and
+  it sets `partial_line: true`. There is no complete line to move back to, so
+  the window is the middle of one line: it arrives as a plain `text` line and
+  continues in the next window. Join this window's last line to the next
+  window's first rather than reading them as two lines. It is deliberately not
+  parsed, for the reason above — half of a `=> url text` line must never look
+  like a whole link. Nothing is skipped: every character is still delivered.
 - **Each window is a fresh request to the server**, and is cached under its own
   key. Continue because the answer needs what was cut, not by reflex, and say
   the view was partial rather than presenting the first window as the whole
@@ -1286,7 +1300,7 @@ two batch tools.
 | `NOT_FETCHABLE` | The item type is interactive (telnet, tn3270, CSO) and has no Gopher-fetchable body; connect with an appropriate client instead |
 | `BLOCKED` | The SSRF guard refused the target (loopback, private range, or a disallowed port) |
 | `DNS_ERROR` | The hostname could not be resolved. Nothing was refused — check the spelling, or the resolver |
-| `BLOCKED_BY_ROBOTS` | `GOPHER_RESPECT_ROBOTS_TXT` is on and the host disallows this selector. Gopher fails open, so an unretrievable policy allows the fetch rather than producing `ROBOTS_UNAVAILABLE` |
+| `BLOCKED_BY_ROBOTS` | `GOPHER_RESPECT_ROBOTS_TXT` is on and the host disallows this selector. This is a **stop**, not a misconfiguration: the operator decided it. Do not retry, do not try another spelling of the selector, and do not propose turning robots checking off — that switch is for a host the user has said they operate. Gopher fails open, so an unretrievable policy allows the fetch rather than producing `ROBOTS_UNAVAILABLE` |
 | `FETCH_ERROR` | Connection failure, timeout, oversize response, or an unexpected internal failure |
 
 #### Gemini error codes

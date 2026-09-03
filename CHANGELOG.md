@@ -41,6 +41,8 @@ migration notes below. See the
   as prompts rather than only as prose in the instructions.
 - The HTTP transports answer `GET /health`, and the container declares a
   `HEALTHCHECK` against it.
+- `partial_line` on a gemtext result, for the one case where a window cannot end
+  on a line boundary because a single line is longer than the render limit.
 - `gopher-mcp --version`, and help text that mentions Gemini and points at the
   environment variables everything else is configured through. The version was
   previously readable only by importing the package, which neither the
@@ -136,6 +138,14 @@ migration notes below. See the
 
 ### Fixed
 
+- A gemtext line longer than the render limit no longer costs its whole window.
+  There was no complete line to end the window on, so the window was returned
+  empty while `next_offset` advanced past it, which put those characters beyond
+  reach at every later offset: a caller following the documented continuation
+  loop assembled a fragment and was told nothing was wrong. On a real capsule
+  page at a 200-character limit, more than half the windows were affected. The
+  span now arrives as a plain `text` line with `partial_line: true`, so it is
+  never parsed as half a link and the characters still reach the caller.
 - **Breaking:** `--host` on the HTTP transports makes the server reachable
   under that host. The container binds `0.0.0.0` precisely to be reachable and
   answered `421 Misdirected Request` to every client that was not on localhost,

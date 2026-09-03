@@ -85,9 +85,13 @@ def test_py_typed_marker_ships_with_the_package():
     and treats the whole package as ``Any`` -- which is what the published 0.8.0
     wheel did while claiming otherwise.
 
-    Asserted through ``importlib.resources`` rather than by looking next to the
-    source tree, so it fails if the marker is ever excluded from the build
-    rather than merely deleted from the repo.
+    This is the cheap half of that guarantee: every install in this project is
+    editable, so ``files("gopher_mcp")`` resolves to ``src/gopher_mcp`` and this
+    asserts the marker is present next to the module it types. It does NOT
+    prove the marker survives the build -- excluding it from the wheel leaves
+    this green, and ``twine check`` passes on such a wheel too. Asserting the
+    built artifact needs a wheel-contents check in CI, where the published
+    artifact is actually produced.
     """
     from importlib.resources import files
 

@@ -1537,6 +1537,25 @@ class TestFetchToolDescriptions:
         assert "cross_host" in description
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["gopher_fetch", "gemini_fetch"])
+    async def test_the_kind_bullets_are_one_unbroken_markdown_list(self, name):
+        """A blank line between bullets ends the list.
+
+        The descriptions are Markdown to every client that renders them, and
+        gopher_fetch spliced its continuation paragraph between the second and
+        third bullet -- so a list the prose introduces as "one of four" arrived
+        as two lists of two. Prose about the list belongs after it.
+        """
+        tools = {t.name: t for t in await mcp.list_tools()}
+        lines = (tools[name].description or "").splitlines()
+        bullets = [i for i, line in enumerate(lines) if line.startswith("    - `")]
+        assert bullets, f"{name} lists no kinds"
+        run = lines[bullets[0] : bullets[-1] + 1]
+        assert all(line.strip() for line in run), (
+            f"{name}'s kind list is broken in two by a blank line:\n" + "\n".join(run)
+        )
+
+    @pytest.mark.asyncio
     async def test_no_description_restates_the_input_schema(self):
         """An `Args:` block is the schema again in weaker words, resent on
         every turn; the Field descriptions are the single source."""

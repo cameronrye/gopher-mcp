@@ -244,10 +244,17 @@ URL → Parse → Check Cache → Fetch (if needed) → Process → Cache → Re
 
 **Key Methods**:
 
-- `validate_certificate(host, cert)` - Validate against stored fingerprint
-- `store_certificate(host, cert)` - Store new certificate
-- `load_certificates()` - Load from storage
-- `save_certificates()` - Persist to storage
+- `validate_certificate(host, port, cert_fingerprint, cert_info=None)` -
+  Validate against the stored pin; returns `(ok, message)`
+- `update_certificate(host, port, cert_fingerprint, cert_info=None, force=False)` -
+  Store or replace a pin (drives `gemini_trust_update`)
+- `remove_certificate(host, port)` - Drop a pin (drives
+  `gemini_trust_update` with `action="remove"`)
+- `list_certificates()` - All stored entries (drives `gemini_trust_list`)
+- `_load_entries()` / `_save_entries()` - Read and persist `tofu.json`
+
+The `port` in those signatures is not decoration: a pin is keyed on `host:port`,
+so one capsule reached on two ports is two pins — see the storage format below.
 
 **Storage location**: `tofu.json` in gopher-mcp's own per-user data directory —
 `$XDG_DATA_HOME/gopher-mcp/` when that names an absolute path, otherwise
@@ -397,12 +404,25 @@ robots agent tokens, and the fail-open/fail-closed choice). Both halves were
 previously duplicated character-for-character, so every fix had to be applied
 twice.
 
-`client_base` also owns the one implementation of the per-fetch wire-time
-deadline — `_FetchBudget`, the `_FETCH_BUDGET` ContextVar, `_BudgetExhausted`
-(a `TimeoutError` subclass, parameterized so each client keeps its own
-error-mapping lineage) and the `_spend_budget` context manager — so a change to
-how wire time is charged cannot be made correctly in one client and missed in
-the other.
+The per-fetch wire-time deadline is deliberately **not** among them. Each client
+keeps its own `_FetchBudget` and `_FETCH_BUDGET` ContextVar, set once per
+`fetch()` and charged down as the exchange proceeds, but the two charge it
+differently. `gopher_client` wraps every phase that touches the network in its
+`_spend_budget` context manager — the robots probe's DNS lookup and read, then
+the guarded fetch's own two — and raises `_BudgetExhausted` (a
+`GopherProtocolError`, so `fetch` keeps mapping it to `FETCH_ERROR`) when
+nothing is left. `gemini_client` reads `budget.remaining` inline and hands it to
+one `asyncio.timeout` around the whole exchange, DNS through read.
+
+Both hold a call to a single deadline across every phase it touches, the robots
+probe included, which is the property that makes `*_TIMEOUT_SECONDS` mean the
+"overall deadline for one fetch" that [Configuration](configuration.md)
+promises. But a change to *how* wire time is charged has to be made twice, so
+check both clients. Unifying them rewires two timeout paths and is a
+behavioural change owed its own tests; until then, do not park a third copy in
+`client_base` for the clients to be moved onto later. One lived there unwired
+for a while, which is worse than two: it reads like the shared implementation,
+so a fix applied to it would change no behaviour at all.
 
 `FetchClientBase._response_size` is the protocol-agnostic accessor over the one
 field the two protocols name differently: a Gopher result reports content length
