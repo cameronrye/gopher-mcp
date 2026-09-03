@@ -9,13 +9,32 @@ import contextlib
 import json
 import os
 import tempfile
+import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 # Whitespace that carries meaning in a multi-line body and therefore survives
-# ``sanitize_display_text`` even though it is not "printable".
+# ``sanitize_display_text`` even though it is a control character.
 _MEANINGFUL_WHITESPACE = ("\n", "\t", "\r")
+
+# Unicode general categories dropped by ``sanitize_display_text``: C0/C1
+# controls (Cc -- NUL, DEL and every byte an ANSI CSI/OSC sequence is built
+# from), format characters (Cf), lone surrogates (Cs), private-use code points
+# (Co) and the line/paragraph separators a terminal acts on (Zl/Zp).
+#
+# The predicate used to be ``str.isprintable()``, which additionally reports
+# False for every space separator other than U+0020: NBSP, U+2009 and the CJK
+# ideographic space U+3000 were being deleted outright, fusing words and losing
+# the paragraph indent of a Japanese page. Zs is visible text, so it is kept.
+_DROPPED_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Co", "Zl", "Zp"})
+
+# The two Cf characters that are load-bearing rather than invisible padding:
+# U+200D joins a ZWJ emoji sequence into one glyph (dropping it turns a family
+# emoji into three separate people) and U+200C separates letters in Persian and
+# Indic scripts. Every other Cf -- U+200B and friends -- stays stripped, which
+# is the deliberate choice the zero-width test pins.
+_KEPT_FORMAT_CHARACTERS = ("\u200c", "\u200d")
 
 
 def atomic_write_json(file_path: str, data: Any) -> None:
@@ -98,13 +117,20 @@ def bracket_host(host: str) -> str:
 
 
 def sanitize_display_text(text: str, *, keep_whitespace: bool = True) -> str:
-    """Strip non-printable characters from server-supplied text bound for the LLM.
+    """Strip dangerous invisible characters from server-supplied display text.
 
     Every string a remote gopher/gemini server controls -- menu titles, decoded
     bodies, gemtext link labels, a Gemini ``<META>`` -- reaches the model (and
     often a terminal) verbatim. ANSI escapes (CSI/OSC), NUL and other C0/C1
     control characters in that text are a display-injection vector, so drop them
     everywhere rather than at individual call sites.
+
+    Removed: control characters (Cc), format characters (Cf), lone surrogates
+    (Cs), private-use code points (Co) and line/paragraph separators (Zl, Zp).
+    Kept: everything else, including every space separator (Zs -- NBSP, thin
+    space, the CJK ideographic space) and the two format characters a reader can
+    see the effect of, ZWJ (U+200D) and ZWNJ (U+200C). Sanitising must not
+    silently rewrite the text it is protecting.
 
     Args:
         text: Raw server-supplied text.
@@ -113,11 +139,17 @@ def sanitize_display_text(text: str, *, keep_whitespace: bool = True) -> str:
             single field (a menu title, a ``<META>``) where they are noise.
 
     Returns:
-        ``text`` with every non-printable character removed.
+        ``text`` with every dangerous invisible character removed.
 
     """
-    allowed = _MEANINGFUL_WHITESPACE if keep_whitespace else ()
-    return "".join(char for char in text if char.isprintable() or char in allowed)
+    allowed = _KEPT_FORMAT_CHARACTERS + (
+        _MEANINGFUL_WHITESPACE if keep_whitespace else ()
+    )
+    return "".join(
+        char
+        for char in text
+        if char in allowed or unicodedata.category(char) not in _DROPPED_CATEGORIES
+    )
 
 
 def resolve_gemini_reference(base_url: str, target: str) -> str:
@@ -203,3 +235,59 @@ def truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
     if max_chars and len(text) > max_chars:
         return text[:max_chars], True
     return text, False
+
+
+def describe_oserror(exc: OSError) -> str:
+    """Describe an ``OSError`` without echoing any address it carries.
+
+    ``exc.strerror`` looks like the safe choice but is not: asyncio raises every
+    deferred connect failure as ``OSError(err, f"Connect call failed {address}")``
+    (a single construction site in ``asyncio/selector_events.py``), so the
+    connect sockaddr -- for us, the SSRF-vetted *resolved IP* -- is embedded in
+    ``strerror`` itself. Echoing it back to the caller would turn a failed fetch
+    into an internal-reachability/DNS-resolution oracle. ``os.strerror(errno)``
+    is the platform's canonical text for the same failure and contains no
+    address, so it is what callers report.
+    """
+    if exc.errno is not None:
+        with contextlib.suppress(ValueError, OverflowError):
+            return os.strerror(exc.errno)
+    return "unable to connect"
+
+
+class TextWindow(NamedTuple):
+    """One render-limited slice of a longer body, and where the rest starts.
+
+    The render caps used to be one-way: a body was cut to ``max_chars`` and the
+    remainder was simply gone, so a model could see that something was missing
+    but had no call that would retrieve it. A window carries the two facts that
+    make a cut result continuable -- how long the whole body is, and the offset
+    the next slice begins at.
+    """
+
+    #: The characters in this window.
+    text: str
+    #: Character offset this window starts at (the caller's ``offset``, clamped).
+    start: int
+    #: Length of the whole body, in characters, before any cut.
+    total: int
+
+    @property
+    def next_offset(self) -> int | None:
+        """Offset of the first character after this window, or None at the end."""
+        end = self.start + len(self.text)
+        return end if end < self.total else None
+
+
+def window_text(text: str, offset: int, max_chars: int) -> TextWindow:
+    """Return the ``max_chars`` window of ``text`` starting at ``offset``.
+
+    Counted in characters, not bytes: the byte counts a result reports
+    (``bytes``/``size``) cannot be used as an offset without the risk of
+    splitting a UTF-8 sequence. ``max_chars`` of 0 means unlimited, matching
+    :func:`truncate_text`, and an ``offset`` past the end yields an empty window
+    rather than an error -- there is simply nothing left to show.
+    """
+    start = min(max(offset, 0), len(text))
+    window = text[start:] if not max_chars else text[start : start + max_chars]
+    return TextWindow(window, start, len(text))

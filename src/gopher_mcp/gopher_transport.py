@@ -18,6 +18,8 @@ import contextlib
 
 import structlog
 
+from .helpers import describe_oserror
+
 logger = structlog.get_logger(__name__)
 
 READ_CHUNK = 65536
@@ -27,10 +29,22 @@ READ_CHUNK = 65536
 # was thrown away as a generic timeout even though the whole body was already
 # buffered; only an EOF within this window proves the response is complete.
 PROBE_TIMEOUT_SECONDS = 1.0
+# What ``errors="replace"`` substitutes for a byte that is not valid UTF-8.
+_REPLACEMENT_CHAR = "\ufffd"
 
 
 class GopherProtocolError(Exception):
     """Raised when a Gopher request cannot be completed."""
+
+
+class GopherTimeoutError(GopherProtocolError):
+    """Raised when a request did not finish within the deadline it was given.
+
+    A distinct type, rather than a message the caller has to pattern-match, so
+    the client can restate the failure against the timeout the *operator*
+    configured: this transport is handed only whatever is left of that deadline
+    after earlier phases, so the number it can name is a remainder.
+    """
 
 
 def build_request(selector: str, search: str | None = None) -> bytes:
@@ -39,9 +53,15 @@ def build_request(selector: str, search: str | None = None) -> bytes:
     ``search`` is distinguished by ``is not None`` (not truthiness), so an
     explicit empty type-7 query still sends the ``<TAB>`` field -- an index
     server then sees an empty query rather than a bare selector.
+
+    Encoded with ``surrogateescape`` so a selector that ``parse_gopher_url``
+    recovered from a non-UTF-8 (latin-1) menu goes back on the wire as the exact
+    bytes the server published, rather than as a fresh UTF-8 encoding of the
+    characters those bytes happened to decode to. Only bytes >= 0x80 can arrive
+    as surrogates, so this cannot smuggle a CR/LF/TAB past the caller's checks.
     """
     line = f"{selector}\t{search}" if search is not None else selector
-    return line.encode("utf-8", errors="strict") + b"\r\n"
+    return line.encode("utf-8", errors="surrogateescape") + b"\r\n"
 
 
 async def fetch_gopher(
@@ -139,15 +159,18 @@ async def fetch_gopher(
     try:
         return await asyncio.wait_for(_io(), timeout=timeout)
     except TimeoutError as e:
-        raise GopherProtocolError(f"Request timed out after {timeout} seconds") from e
+        raise GopherTimeoutError(f"Request timed out after {timeout} seconds") from e
     except GopherProtocolError:
         raise
     except OSError as e:
-        # Use strerror only, so the resolved IP/address isn't echoed back to
-        # the caller (which would act as an internal-reachability oracle).
-        raise GopherProtocolError(
-            f"Connection failed: {e.strerror or 'unable to connect'}"
-        ) from e
+        # Report the errno's canonical text only, so the resolved IP/address
+        # isn't echoed back to the caller (which would act as an
+        # internal-reachability oracle). ``e.strerror`` is NOT safe for this:
+        # asyncio builds every deferred connect failure as
+        # ``OSError(err, f"Connect call failed {address}")``, so the sockaddr
+        # ends up *inside* strerror. ``os.strerror(errno)`` is the address-free
+        # description of the same failure.
+        raise GopherProtocolError(f"Connection failed: {describe_oserror(e)}") from e
 
 
 def decode_gopher_text(data: bytes) -> tuple[str, str]:
@@ -156,8 +179,26 @@ def decode_gopher_text(data: bytes) -> tuple[str, str]:
     Legacy Gopher servers commonly serve latin-1 (or other 8-bit) content;
     latin-1 maps every byte so it never raises. Returns ``(text, charset)``
     so callers can report the encoding actually used.
+
+    A body is only *called* latin-1 when it looks like one. Falling back on the
+    first bad byte meant a single damaged byte -- a stray 0xFF, or a multi-byte
+    character cut in half by the size cap -- re-read an otherwise valid UTF-8
+    page as latin-1, turning every accented character in it into mojibake that
+    was then cached for the whole TTL. So when the failures are sparse next to
+    the non-ASCII characters that *did* decode, the UTF-8 reading is kept and
+    only the bad bytes become U+FFFD; a genuinely 8-bit body, where essentially
+    every non-ASCII byte fails, still decodes as latin-1.
     """
     try:
         return data.decode("utf-8"), "utf-8"
     except UnicodeDecodeError:
-        return data.decode("latin-1"), "latin-1"
+        pass
+
+    repaired = data.decode("utf-8", errors="replace")
+    damaged = repaired.count(_REPLACEMENT_CHAR)
+    intact = sum(
+        1 for char in repaired if not char.isascii() and char != _REPLACEMENT_CHAR
+    )
+    if intact >= damaged:
+        return repaired, "utf-8"
+    return data.decode("latin-1"), "latin-1"

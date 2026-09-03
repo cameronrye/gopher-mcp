@@ -20,6 +20,7 @@ from gopher_mcp.models import (
     GemtextLineType,
     GemtextLink,
     TOFUEntry,
+    TOFUTrustEntry,
 )
 
 
@@ -271,21 +272,29 @@ class TestGemtextModels:
         assert line.model_dump() == {"type": "text", "content": "hello"}
 
     def test_gemtext_line_serialization_keeps_populated_fields(self):
-        """Populated structured fields still serialize."""
-        from gopher_mcp.models import GemtextHeading
-
+        """Populated fields still serialize, and nothing repeats `content`."""
         line = GemtextLine(
             type=GemtextLineType.HEADING_1,
             content="# Hi",
+            text="Hi",
             level=1,
-            heading=GemtextHeading(level=1, text="Hi", raw_content="# Hi"),
         )
         dumped = line.model_dump()
-        assert dumped["level"] == 1
-        assert dumped["heading"]["text"] == "Hi"
-        # ...but the unrelated null fields are gone.
-        for absent in ("link", "alt_text", "list_item", "quote", "preformat"):
-            assert absent not in dumped
+        assert dumped == {
+            "type": "heading1",
+            "content": "# Hi",
+            "text": "Hi",
+            "level": 1,
+        }
+
+    def test_gemtext_line_has_no_nested_copy_of_itself(self):
+        """The nested heading/list_item/quote/preformat objects are gone.
+
+        Each of them carried a `raw_content` (or `content`) repeating the line
+        verbatim, so a page serialized every line two or three times.
+        """
+        for gone in ("heading", "list_item", "quote", "preformat"):
+            assert gone not in GemtextLine.model_fields
 
     def test_gemtext_line_link(self):
         """Test link line."""
@@ -343,6 +352,22 @@ class TestGemtextModels:
         doc = GemtextDocument(lines=lines)
 
         assert doc.links == []
+
+    def test_gemtext_line_preformat_language(self):
+        """A preformat opening toggle names the block's language."""
+        line = GemtextLine(
+            type=GemtextLineType.PREFORMAT,
+            content="```python",
+            alt_text="python",
+            language="python",
+        )
+
+        assert line.model_dump() == {
+            "type": "preformat",
+            "content": "```python",
+            "alt_text": "python",
+            "language": "python",
+        }
 
     def test_gemini_gemtext_result(self):
         """Test GeminiGemtextResult model."""
@@ -422,3 +447,249 @@ class TestSecurityModels:
         assert entry.value == response
         assert not entry.is_expired(1640995300.0)  # Within TTL
         assert entry.is_expired(1640995600.0)  # After TTL
+
+
+class TestGemtextParsing:
+    """Parsing behaviour that the line model has to preserve.
+
+    These belong beside the other ``parse_gemtext`` regressions in
+    tests/test_gemini_utils.py; they are here because that file is not this
+    change's to edit.
+    """
+
+    def test_list_item_is_recognised_and_its_marker_stripped(self):
+        """The `* ` line type had no test at all, so nothing pinned it."""
+        from gopher_mcp.utils import parse_gemtext
+
+        line = parse_gemtext("* item one").lines[0]
+
+        assert line.type == GemtextLineType.LIST_ITEM
+        assert line.content == "* item one"
+        assert line.text == "item one"
+
+    def test_a_bare_asterisk_is_text_not_a_list_item(self):
+        """Gemtext requires the space: `*emphasis*` is prose, not a list."""
+        from gopher_mcp.utils import parse_gemtext
+
+        assert parse_gemtext("*not a list*").lines[0].type == GemtextLineType.TEXT
+
+    def test_list_item_carries_no_control_characters(self):
+        """The document is sanitized before it is split, so a list item cannot
+        smuggle an ANSI escape into a terminal or the model's context."""
+        from gopher_mcp.utils import parse_gemtext
+
+        line = parse_gemtext("* \x1b[31mitem").lines[0]
+
+        assert line.type == GemtextLineType.LIST_ITEM
+        assert "\x1b" not in line.content
+        assert line.text == "[31mitem"
+
+    def test_link_line_without_a_url_falls_back_to_text(self):
+        """A bare `=>` carries no target, so it must not become a link line
+        with an empty URL."""
+        from gopher_mcp.utils import parse_gemtext
+
+        line = parse_gemtext("=> ").lines[0]
+
+        assert line.type == GemtextLineType.TEXT
+        assert line.link is None
+        assert parse_gemtext("=> ").links == []
+
+    def test_a_link_url_never_carries_a_control_character(self):
+        """The whole document is sanitized before it is split, so an ANSI escape
+        in a link target is already gone by the time the URL is parsed -- it
+        does not survive into `link.url` or the document's link list."""
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext("=> \x1b[2J Clear your screen")
+
+        assert document.lines[0].type == GemtextLineType.LINK
+        assert document.lines[0].link.url == "[2J"
+        assert "\x1b" not in str(document.model_dump())
+
+    def test_serialized_lines_do_not_repeat_the_document(self):
+        """One copy of each line: `type` says what the marker was, `content`
+        carries the line, and only the resolved link, level, marker-stripped
+        text and preformat alt-text/language are added."""
+        from gopher_mcp.utils import parse_gemtext
+
+        document = parse_gemtext(
+            "# Title\n* item\n> quoted\n=> /a A link\n```python\ncode\n```",
+            "gemini://example.org/index.gmi",
+        )
+        dumped = document.model_dump()["lines"]
+
+        assert dumped[0] == {
+            "type": "heading1",
+            "content": "# Title",
+            "text": "Title",
+            "level": 1,
+        }
+        assert dumped[1] == {"type": "list", "content": "* item", "text": "item"}
+        assert dumped[2] == {"type": "quote", "content": "> quoted", "text": "quoted"}
+        assert dumped[3] == {
+            "type": "link",
+            "content": "=> /a A link",
+            "link": {"url": "gemini://example.org/a", "text": "A link"},
+        }
+        # Block metadata sits on the opening toggle; the lines inside carry only
+        # their verbatim content rather than repeating the alt text per line.
+        assert dumped[4] == {
+            "type": "preformat",
+            "content": "```python",
+            "alt_text": "python",
+            "language": "python",
+        }
+        assert dumped[5] == {"type": "preformat", "content": "code"}
+        assert dumped[6] == {"type": "preformat", "content": "```"}
+
+
+class TestBinaryMimeSniffing:
+    """Signatures whose branches no test reached.
+
+    Content sniffed here decides whether a body reaches the model at all, so
+    each branch needs a regression net; these belong in
+    tests/test_gemini_utils.py beside the other sniffer tests.
+    """
+
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (b"RIFF\x00\x00\x00\x00WEBPVP8 ", "image/webp"),
+            (b"OggS\x00\x02" + b"\x00" * 10, "audio/ogg"),
+            (b"\x1f\x8b\x08\x00" + b"\x00" * 12, "application/gzip"),
+            (b"7z\xbc\xaf\x27\x1c" + b"\x00" * 10, "application/x-7z-compressed"),
+            (b"\x7fELF\x02\x01\x01" + b"\x00" * 9, "application/x-executable"),
+        ],
+    )
+    def test_signature_is_detected(self, content, expected):
+        from gopher_mcp.utils import detect_binary_mime_type
+
+        assert detect_binary_mime_type(content) == expected
+
+    def test_short_text_starting_with_mz_is_not_an_executable(self):
+        """ "MZ" is two printable characters: prose beginning with them must not
+        be classified as a binary the model is then never shown."""
+        from gopher_mcp.utils import detect_binary_mime_type
+
+        assert detect_binary_mime_type(b"MZ hello world") == "application/octet-stream"
+
+
+class TestRedirectTargetDescription:
+    """A redirect is followed by the caller, so the payload has to describe it."""
+
+    def test_a_target_on_another_host_is_flagged(self):
+        result = GeminiRedirectResult(
+            newUrl="gemini://elsewhere.example/x",
+            permanent=True,
+            requestInfo={"url": "gemini://example.org/a"},
+        )
+
+        assert result.cross_host is True
+        assert result.scheme == "gemini"
+
+    def test_a_target_on_the_same_host_is_not(self):
+        result = GeminiRedirectResult(
+            newUrl="gemini://example.org/b",
+            requestInfo={"url": "gemini://example.org/a"},
+        )
+
+        assert result.cross_host is False
+
+    def test_a_relative_target_stays_in_the_requests_scheme(self):
+        result = GeminiRedirectResult(
+            newUrl="/elsewhere", requestInfo={"url": "gemini://example.org/a"}
+        )
+
+        assert result.cross_host is False
+        assert result.scheme == "gemini"
+
+    def test_another_scheme_is_reported(self):
+        """`newUrl` may leave Geminispace entirely; gemini_fetch cannot follow
+        it, so the caller has to be able to see that from the payload."""
+        result = GeminiRedirectResult(
+            newUrl="https://evil.example/",
+            requestInfo={"url": "gemini://example.org/a"},
+        )
+
+        assert result.scheme == "https"
+        assert result.cross_host is True
+
+    def test_nothing_is_claimed_when_the_request_url_is_unknown(self):
+        """A guess would be worse than silence: `cross_host: false` on a target
+        that is in fact another capsule is exactly the wrong signal."""
+        result = GeminiRedirectResult(newUrl="gemini://example.org/b")
+
+        assert result.cross_host is None
+
+    def test_an_unsplittable_target_is_not_an_error(self):
+        """The target is server-controlled, so a malformed one must not raise
+        out of a result the caller is being handed."""
+        result = GeminiRedirectResult(
+            newUrl="gemini://[oops/x", requestInfo={"url": "gemini://example.org/a"}
+        )
+
+        assert result.new_url == "gemini://[oops/x"
+        assert result.cross_host is None
+
+
+class TestTOFUTrustEntry:
+    """The projection gemini_trust_list reports, not the stored record."""
+
+    def test_timestamps_are_reported_as_iso_8601_utc(self):
+        """The client-certificate tools already report validity windows as ISO
+        strings; epoch floats here made one `expires` concept two formats."""
+        entry = TOFUEntry(
+            host="example.org",
+            fingerprint="sha256:abcdef1234567890",
+            first_seen=1640995200.0,
+            last_seen=1643673600.0,
+            expires=1672531200.0,
+        )
+
+        reported = TOFUTrustEntry.from_entry(entry, now=1650000000.0)
+
+        assert reported.first_seen == "2022-01-01T00:00:00+00:00"
+        assert reported.last_seen == "2022-02-01T00:00:00+00:00"
+        assert reported.expires == "2023-01-01T00:00:00+00:00"
+        assert reported.expired is False
+        assert reported.host == "example.org"
+        assert reported.fingerprint == "sha256:abcdef1234567890"
+
+    def test_expiry_is_precomputed(self):
+        entry = TOFUEntry(
+            host="example.org",
+            fingerprint="fp",
+            first_seen=1640995200.0,
+            last_seen=1643673600.0,
+            expires=1672531200.0,
+        )
+
+        assert TOFUTrustEntry.from_entry(entry, now=1700000000.0).expired is True
+
+    def test_a_pin_without_an_expiry_reports_none(self):
+        entry = TOFUEntry(
+            host="example.org", fingerprint="fp", first_seen=1.0, last_seen=2.0
+        )
+
+        reported = TOFUTrustEntry.from_entry(entry, now=1700000000.0)
+
+        assert reported.expires is None
+        assert reported.expired is False
+
+    def test_the_result_projects_stored_entries_itself(self):
+        """The store's epoch floats must not reach the wire just because a
+        caller passed the records it holds straight into the result."""
+        from gopher_mcp.models import TOFUTrustListResult
+
+        entry = TOFUEntry(
+            host="example.org",
+            fingerprint="fp",
+            first_seen=1640995200.0,
+            last_seen=1643673600.0,
+        )
+
+        dumped = TOFUTrustListResult(entries=[entry]).model_dump()
+
+        assert dumped["entries"][0]["first_seen"] == "2022-01-01T00:00:00+00:00"
+        assert dumped["entries"][0]["expires"] is None

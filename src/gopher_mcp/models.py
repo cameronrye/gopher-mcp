@@ -2,14 +2,18 @@
 
 import time
 from datetime import UTC, datetime
-from enum import Enum, IntEnum
+from enum import IntEnum, StrEnum
 from typing import Annotated, Any, Generic, Literal, TypeVar
+from urllib.parse import urlsplit
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     Field,
+    RootModel,
     field_validator,
     model_serializer,
+    model_validator,
 )
 
 # Cache provenance. Only the result kinds the clients actually cache carry these
@@ -30,10 +34,10 @@ _CachedFlag = Annotated[
     ),
 ]
 _CachedAt = Annotated[
-    float | None,
+    str | None,
     Field(
         description=(
-            "UNIX timestamp (seconds) at which the cached copy was actually "
+            "ISO-8601 UTC timestamp at which the cached copy was actually "
             "fetched from the server. Null when `cached` is false."
         )
     ),
@@ -50,7 +54,104 @@ _CacheAgeSeconds = Annotated[
     ),
 ]
 
+# Continuation contract for the render caps. `truncated` alone is a dead end:
+# it tells the model something is missing but not how much, and gives it nothing
+# to pass back to see the rest. These three say how big the whole resource is
+# and where the next window starts, in the same unit the caller counts in --
+# items for a menu, characters for a page body (`bytes`/`size` are byte counts,
+# which an offset cannot be expressed in without splitting a UTF-8 sequence).
+_TotalItems = Annotated[
+    int | None,
+    Field(
+        description=(
+            "How many items the menu holds in total, before the render limit "
+            "was applied. Null when the total was not counted."
+        )
+    ),
+]
+_TotalChars = Annotated[
+    int | None,
+    Field(
+        description=(
+            "How many characters the full body holds, before the render limit "
+            "was applied. Null when the total was not counted."
+        )
+    ),
+]
+_NextOffset = Annotated[
+    int | None,
+    Field(
+        description=(
+            "Where the part that was cut begins. Pass it back as `offset` to "
+            "fetch the next window of the same resource. Null when nothing was "
+            "cut and there is no more to fetch."
+        )
+    ),
+]
+
 _ResultT = TypeVar("_ResultT", bound=BaseModel)
+
+# Every result model carries a ``kind`` literal, so the fetch unions are tagged
+# unions: naming the discriminator turns validation into a single dict lookup
+# (instead of trying each member in turn) and makes the advertised JSON schema a
+# ``oneOf`` with a ``kind`` -> schema mapping, which is what tells a client -- and
+# the model -- that these are alternatives to branch on rather than an anything-goes
+# object.
+_KIND = Field(discriminator="kind")
+
+
+# Wire-name reconciliation for the camelCase aliases these models were written
+# with. A plain ``alias`` quietly made three different names for one field:
+#
+# * the payload said ``next_url`` -- ``model_dump()`` without ``by_alias`` emits
+#   *field* names, and that snake_case spelling is what every tool result has
+#   always carried and what docs/api-reference.md documents;
+# * anything dumping ``by_alias=True`` said ``nextUrl`` -- and the MCP SDK's
+#   ``convert_result`` does exactly that once a tool declares an output model,
+#   so annotating the fetch tools would have silently renamed half the payload;
+# * a plain ``alias`` is also the *validation* name, so a result could not be
+#   validated back from its own ``model_dump()`` ("nextUrl Field required"),
+#   which is precisely the round trip the SDK performs before returning
+#   structured content.
+#
+# So every such field now names ITSELF first in an ``AliasChoices`` and pins
+# ``serialization_alias`` to the same string: the snake_case name validates,
+# serializes and appears in the advertised JSON schema, while the camelCase
+# spelling stays accepted on input so stored JSON and any external caller
+# keep working. Nothing about the published payload changes. Written out at
+# each field rather than built by a helper -- mypy reads ``Field(...)`` as a
+# dataclass field specifier and cannot follow ``**kwargs`` into one.
+
+
+def iso_utc(timestamp: float | None) -> str | None:
+    """Render a UNIX timestamp the way tool results report instants.
+
+    Results speak ISO-8601 UTC (``2026-09-02T12:00:00+00:00``) rather than epoch
+    seconds: the client-certificate tools already report validity windows that
+    way, so an epoch float elsewhere made the identical `expires` concept arrive
+    in two incompatible formats, and left a model doing arithmetic to answer
+    "when was this pinned" or "has this expired". Sub-second precision is
+    dropped -- it is noise to every reader of a payload.
+
+    EVERY instant a result reports goes through here -- ``cached_at``, the trust
+    store's ``first_seen``/``last_seen``/``expires``, and the ``timestamp`` in
+    each result's ``request_info`` -- so one payload can never carry two
+    spellings of the same concept. Times that are *computed with* rather than
+    reported stay floats: cache entry timestamps and ``cache_age_seconds``, the
+    rate limiter and robots clocks, the deadline and budget arithmetic, and the
+    on-disk ``tofu.json`` epoch format (docs/architecture.md). Only the wire
+    changes.
+
+    Args:
+        timestamp: UNIX timestamp in seconds, or None.
+
+    Returns:
+        The ISO-8601 UTC rendering, or None when ``timestamp`` is None.
+
+    """
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, UTC).replace(microsecond=0).isoformat()
 
 
 def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
@@ -62,7 +163,8 @@ def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
 
     Args:
         response: The cached result to tag.
-        cached_at: When the cached copy was fetched from the server.
+        cached_at: When the cached copy was fetched from the server, as a UNIX
+            timestamp. Reported to the caller as an ISO-8601 UTC string.
 
     Returns:
         A copy of ``response`` carrying the cache-provenance fields.
@@ -71,10 +173,42 @@ def mark_from_cache(response: _ResultT, cached_at: float) -> _ResultT:
     return response.model_copy(
         update={
             "cached": True,
-            "cached_at": cached_at,
+            "cached_at": iso_utc(cached_at),
             "cache_age_seconds": round(time.time() - cached_at, 1),
         }
     )
+
+
+def _canonical_scheme(url: str, scheme: str) -> str:
+    """Check ``url``'s scheme case-insensitively and return it canonicalised.
+
+    RFC 3986 section 3.1 makes the scheme case-insensitive, and
+    :func:`~gopher_mcp.gemini_parse.parse_gemini_url` accepts ``GEMINI://``
+    accordingly. Matching the prefix literally here refused *at the MCP tool
+    boundary* what the parser behind it accepts, so a capitalised link this
+    server had itself just surfaced -- ``resolve_gemini_reference`` returns a
+    scheme-bearing target verbatim -- came back as ``INVALID_REQUEST`` with a
+    message claiming it was not a Gemini URL at all.
+
+    The lowercase spelling is returned rather than the caller's, so everything
+    downstream (the parsers, the cache key, the TOFU pin) sees the one
+    canonical form instead of one entry per spelling.
+
+    Args:
+        url: The URL as the caller wrote it.
+        scheme: The expected scheme, lowercase and without ``://``.
+
+    Returns:
+        ``url`` with its scheme lowercased.
+
+    Raises:
+        ValueError: If ``url`` does not carry ``scheme`` in any case.
+
+    """
+    prefix, separator, remainder = url.partition("://")
+    if separator != "://" or prefix.lower() != scheme:
+        raise ValueError(f"URL must start with '{scheme}://'")
+    return f"{scheme}://{remainder}"
 
 
 class GopherFetchRequest(BaseModel):
@@ -93,8 +227,7 @@ class GopherFetchRequest(BaseModel):
     @classmethod
     def validate_gopher_url(cls, v: str) -> str:
         """Validate that the URL is a proper Gopher URL."""
-        if not v.startswith("gopher://"):
-            raise ValueError("URL must start with 'gopher://'")
+        v = _canonical_scheme(v, "gopher")
         if len(v.encode("utf-8")) > 8192:
             raise ValueError("URL must not exceed 8192 bytes")
         return v
@@ -110,7 +243,10 @@ class GopherMenuItem(BaseModel):
     # Info ('i') lines conventionally carry port 0, so 0 is permitted here.
     port: int = Field(..., ge=0, le=65535, description="Port number (typically 70)")
     next_url: str = Field(
-        ..., alias="nextUrl", description="Fully formed gopher:// URL for this item"
+        ...,
+        validation_alias=AliasChoices("next_url", "nextUrl"),
+        serialization_alias="next_url",
+        description="Fully formed gopher:// URL for this item",
     )
 
 
@@ -121,15 +257,19 @@ class MenuResult(BaseModel):
     items: list[GopherMenuItem] = Field(..., description="List of menu items")
     truncated: bool = Field(
         default=False,
-        description="True if the menu had more items than the render limit and "
-        "`items` was truncated",
+        description="True if the directory holds more items after this window. "
+        "`next_offset` is where they start -- call again with `offset` set to "
+        "it rather than treating `items` as the whole directory.",
     )
+    total_items: _TotalItems = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -143,15 +283,19 @@ class TextResult(BaseModel):
     text: str = Field(..., description="Text content")
     truncated: bool = Field(
         default=False,
-        description="True if `text` was truncated to the render limit (`bytes` "
-        "still reports the full original size)",
+        description="True if the body continues after this window. "
+        "`next_offset` is where it continues; `bytes` still reports the full "
+        "original size (in bytes, which is not the unit an offset counts in).",
     )
+    total_chars: _TotalChars = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -162,7 +306,10 @@ class BinaryResult(BaseModel):
     kind: Literal["binary"] = "binary"
     bytes: int = Field(..., ge=0, description="Size of content in bytes")
     mime_type: str | None = Field(
-        None, alias="mimeType", description="Guessed MIME type"
+        None,
+        validation_alias=AliasChoices("mime_type", "mimeType"),
+        serialization_alias="mime_type",
+        description="Guessed MIME type",
     )
     note: str = Field(
         default="Binary content not returned to preserve context",
@@ -173,7 +320,8 @@ class BinaryResult(BaseModel):
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -193,13 +341,29 @@ class ErrorResult(BaseModel):
     error: dict[str, Any] = Field(..., description="Error information")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
 
 # Union type for all possible response types
 GopherFetchResponse = MenuResult | TextResult | BinaryResult | ErrorResult
+
+
+# A tool's ``outputSchema`` is built from its return annotation, and the wrappers
+# below are what let the fetch tools declare theirs. A bare union will not do:
+# the MCP SDK wraps any non-``BaseModel`` return in ``{"result": ...}``, which
+# would change the payload every client already reads. A ``RootModel`` IS a
+# ``BaseModel``, so it is used unwrapped -- the result keeps exactly the shape it
+# has always had, while the advertised schema becomes the real thing: a ``oneOf``
+# over the result kinds, discriminated by ``kind``, instead of the open
+# ``{"additionalProperties": true}`` object a ``-> dict[str, Any]`` annotation
+# produced. The docstrings are deliberately short: they are published to the
+# model as the schema's description.
+class GopherFetchOutput(RootModel[Annotated[GopherFetchResponse, _KIND]]):
+    """One Gopher fetch result: a menu, text, binary metadata, or an error."""
+
 
 _CacheValueT = TypeVar("_CacheValueT")
 
@@ -295,10 +459,15 @@ class GeminiFetchRequest(BaseModel):
 
     url: str = Field(
         ...,
-        description="Gemini URL to fetch (e.g., gemini://gemini.circumlunar.space/)",
+        # gemini.circumlunar.space is retired -- it now serves only a notice
+        # asking visitors to update their bookmarks -- and these strings are
+        # what the tool's inputSchema teaches every calling model to fetch, as
+        # well as what the published Data Models reference renders. Both
+        # replacements were checked as reachable.
+        description="Gemini URL to fetch (e.g., gemini://geminiprotocol.net/)",
         examples=[
-            "gemini://gemini.circumlunar.space/",
-            "gemini://gemini.circumlunar.space/docs/specification.gmi",
+            "gemini://geminiprotocol.net/",
+            "gemini://skyjake.fi/",
         ],
     )
 
@@ -306,8 +475,7 @@ class GeminiFetchRequest(BaseModel):
     @classmethod
     def validate_gemini_url(cls, v: str) -> str:
         """Validate that the URL is a proper Gemini URL."""
-        if not v.startswith("gemini://"):
-            raise ValueError("URL must start with 'gemini://'")
+        v = _canonical_scheme(v, "gemini")
         if len(v.encode("utf-8")) > 1024:
             raise ValueError("URL must not exceed 1024 bytes")
         return v
@@ -392,7 +560,14 @@ class GeminiResponse(BaseModel):
         return v
 
 
-# Response result models following Gopher patterns
+# Response result models following Gopher patterns.
+#
+# One deliberate exception to "following": the Gemini results name the content
+# length `size` where the Gopher results name the same fact `bytes`. It is one
+# concept under two wire names, and it is kept only because renaming either
+# would break every consumer of the tool output that already reads it. Anything
+# protocol-agnostic (the clients' log lines, docs) must therefore handle both
+# spellings; converge on one name only in a release that is already breaking.
 class GeminiSuccessResult(BaseModel):
     """Result model for a successful Gemini response carrying TEXT content.
 
@@ -402,22 +577,29 @@ class GeminiSuccessResult(BaseModel):
 
     kind: Literal["success"] = "success"
     mime_type: GeminiMimeType = Field(
-        ..., alias="mimeType", description="Content MIME type"
+        ...,
+        validation_alias=AliasChoices("mime_type", "mimeType"),
+        serialization_alias="mime_type",
+        description="Content MIME type",
     )
     content: str = Field(..., description="Decoded text response content")
     size: int = Field(..., ge=0, description="Content size in bytes")
     truncated: bool = Field(
         default=False,
-        description="True if `content` was truncated to the render limit "
-        "(`size` still reports the full original size).",
+        description="True if the body continues after this window. "
+        "`next_offset` is where it continues; `size` still reports the full "
+        "original size (in bytes, which is not the unit an offset counts in).",
     )
+    total_chars: _TotalChars = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
 
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -434,7 +616,10 @@ class GeminiBinaryResult(BaseModel):
 
     kind: Literal["binary"] = "binary"
     mime_type: GeminiMimeType = Field(
-        ..., alias="mimeType", description="Detected content MIME type"
+        ...,
+        validation_alias=AliasChoices("mime_type", "mimeType"),
+        serialization_alias="mime_type",
+        description="Detected content MIME type",
     )
     size: int = Field(..., ge=0, description="Content size in bytes")
     note: str = Field(
@@ -446,7 +631,8 @@ class GeminiBinaryResult(BaseModel):
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -459,22 +645,77 @@ class GeminiInputResult(BaseModel):
     sensitive: bool = Field(default=False, description="Whether input is sensitive")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
 
 class GeminiRedirectResult(BaseModel):
-    """Result model for redirect responses (status 30/31)."""
+    """Result model for redirect responses (status 30/31).
+
+    This server does not follow redirects: the caller does, by fetching
+    ``new_url``. So the payload has to carry what a caller needs to decide
+    whether following is safe -- the Gemini spec's five-hop limit is only
+    enforceable by whoever is counting the hops, and a target on another host
+    or in another scheme is the one worth stopping on.
+    """
 
     kind: Literal["redirect"] = "redirect"
-    new_url: str = Field(..., alias="newUrl", description="Redirect target URL")
+    new_url: str = Field(
+        ...,
+        validation_alias=AliasChoices("new_url", "newUrl"),
+        serialization_alias="new_url",
+        description="Redirect target URL. Follow at most five in a row, and "
+        "stop if a URL you have already visited comes back: a capsule can "
+        "otherwise spin a client through an unbounded chain of fetches",
+    )
     permanent: bool = Field(default=False, description="Whether redirect is permanent")
+    cross_host: bool | None = Field(
+        default=None,
+        description="True when `new_url` names a host other than the one that "
+        "was requested, so the content it serves is a different party's. Null "
+        "when the target could not be compared with the request",
+    )
+    scheme: str | None = Field(
+        default=None,
+        description="Scheme of `new_url`. Anything other than `gemini` leaves "
+        "Geminispace and cannot be fetched with this tool. Null when the "
+        "target names no scheme and the request's is unknown",
+    )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
+
+    @model_validator(mode="after")
+    def describe_target(self) -> "GeminiRedirectResult":
+        """Fill ``scheme`` and ``cross_host`` from the target and the request.
+
+        Derived here rather than at the call site so every redirect result
+        carries them, whichever code path built it.
+        """
+        try:
+            target = urlsplit(self.new_url)
+            requested = self.request_info.get("url")
+            source = urlsplit(requested) if isinstance(requested, str) else None
+        except ValueError:  # a target too malformed to split tells us nothing
+            return self
+
+        if self.scheme is None:
+            # A relative target ("/elsewhere") stays in the request's scheme.
+            inherited = source.scheme if source is not None else ""
+            self.scheme = (target.scheme or inherited).lower() or None
+
+        if self.cross_host is None:
+            if not target.netloc:
+                self.cross_host = False
+            elif source is not None and source.hostname:
+                self.cross_host = target.hostname != source.hostname
+
+        return self
 
 
 # The Gemini error result IS :class:`ErrorResult`; the alias keeps the
@@ -511,13 +752,14 @@ class GeminiCertificateResult(BaseModel):
     )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
 
 # Gemtext content models
-class GemtextLineType(str, Enum):
+class GemtextLineType(StrEnum):
     """Types of lines in gemtext format."""
 
     TEXT = "text"
@@ -551,84 +793,60 @@ class GemtextLink(BaseModel):
         return v.strip()
 
 
-class GemtextHeading(BaseModel):
-    """Model for gemtext heading lines."""
-
-    level: int = Field(..., description="Heading level (1-3)", ge=1, le=3)
-    text: str = Field(..., description="Heading text content")
-    raw_content: str = Field(..., description="Raw line content including # markers")
-
-
-class GemtextList(BaseModel):
-    """Model for gemtext list items."""
-
-    text: str = Field(..., description="List item text content")
-    raw_content: str = Field(..., description="Raw line content including * marker")
-
-
-class GemtextQuote(BaseModel):
-    """Model for gemtext quote lines."""
-
-    text: str = Field(..., description="Quote text content")
-    raw_content: str = Field(..., description="Raw line content including > marker")
-
-
-class GemtextPreformat(BaseModel):
-    """Model for gemtext preformat content."""
-
-    content: str = Field(..., description="Preformat content")
-    alt_text: str | None = Field(None, description="Alt text for accessibility")
-    is_toggle: bool = Field(
-        default=False, description="Whether this is a toggle line (```)"
-    )
-    language: str | None = Field(None, description="Detected programming language")
-    metadata: dict[str, Any] = Field(
-        default_factory=dict, description="Additional metadata"
-    )
-
-    @model_serializer(mode="wrap")
-    def _serialize(self, handler: Any) -> dict[str, Any]:
-        """Drop null/empty fields on serialization.
-
-        Block-level metadata (alt_text/language/metadata) is populated only on
-        the opening toggle line; a content line then serializes to just its
-        ``content`` and ``is_toggle`` instead of repeating empty alt_text,
-        language and an empty metadata dict on every line. Attribute access is
-        unaffected; only the serialized dict is trimmed.
-        """
-        data: dict[str, Any] = handler(self)
-        return {k: v for k, v in data.items() if v is not None and v != {}}
-
-
 class GemtextLine(BaseModel):
-    """Model for a single line in gemtext format."""
+    """Model for a single line in gemtext format.
+
+    One fact, one field, all of them on the line itself. Each line type used to
+    nest a second object as well (``heading``/``list_item``/``quote``/
+    ``preformat``), and every one of those carried a ``raw_content`` (or
+    ``content``) that repeated this line's ``content`` verbatim -- so a parsed
+    page serialized each of its lines two or three times, and the whole body
+    once more in ``GeminiGemtextResult.raw_content``. Context is the scarce
+    resource for a model reading a capsule, so only what ``type`` and
+    ``content`` cannot already say is kept: the resolved link target, the
+    heading level, the marker-stripped ``text``, and a preformatted block's
+    alt-text and detected language.
+    """
 
     type: GemtextLineType = Field(..., description="Type of gemtext line")
-    content: str = Field(..., description="Line content")
-    link: GemtextLink | None = Field(None, description="Link data (for link lines)")
+    content: str = Field(
+        ..., description="The line as the server sent it, leading marker included"
+    )
+    text: str | None = Field(
+        None,
+        description=(
+            "The line's text with its leading marker removed, for heading, "
+            "list-item and quote lines. Absent where `content` is already the "
+            "text"
+        ),
+    )
+    link: GemtextLink | None = Field(
+        None, description="Link target and text (for link lines)"
+    )
     level: int | None = Field(None, description="Heading level (1-3, for headings)")
-    alt_text: str | None = Field(None, description="Alt text (for preformat blocks)")
-
-    # Structured content for specific line types
-    heading: GemtextHeading | None = Field(
-        None, description="Heading data (for heading lines)"
+    alt_text: str | None = Field(
+        None,
+        description=(
+            "Alt text of a preformatted block, carried on the opening ``` "
+            "toggle that declares it rather than repeated on every line inside"
+        ),
     )
-    list_item: GemtextList | None = Field(
-        None, description="List data (for list lines)"
-    )
-    quote: GemtextQuote | None = Field(None, description="Quote data (for quote lines)")
-    preformat: GemtextPreformat | None = Field(
-        None, description="Preformat data (for preformat lines)"
+    language: str | None = Field(
+        None,
+        description=(
+            "Programming language recognised from `alt_text`, on the opening "
+            "toggle of a preformatted block"
+        ),
     )
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler: Any) -> dict[str, Any]:
         """Drop the always-null per-line fields on serialization.
 
-        Every line only populates the one structured field matching its type, so
-        the other six (link/level/alt_text/heading/list_item/quote/preformat)
-        were emitted as ``null`` on every line -- pure token bloat for the LLM.
-        Attribute access is unaffected; only the serialized dict is trimmed.
+        A line populates only the fields its type uses, so the rest were
+        emitted as ``null`` on every line -- pure token bloat for the LLM. A
+        plain text line serializes to just ``type`` and ``content``. Attribute
+        access is unaffected; only the serialized dict is trimmed.
         """
         data: dict[str, Any] = handler(self)
         return {k: v for k, v in data.items() if v is not None}
@@ -648,21 +866,55 @@ class GeminiGemtextResult(BaseModel):
 
     kind: Literal["gemtext"] = "gemtext"
     document: GemtextDocument = Field(..., description="Parsed gemtext document")
-    raw_content: str = Field(..., alias="rawContent", description="Raw gemtext content")
+    # Held for callers that need the body as one string -- the robots.txt reader
+    # in gemini_client.py parses it -- but deliberately NOT serialized: every
+    # line of it is already in `document.lines[*].content`, and shipping the
+    # whole page a second time was a third of the payload the model paid for.
+    # Defaulted, not required, and the default is load-bearing: `exclude=True`
+    # keeps this out of `model_dump()`, and the SDK validates a tool's payload
+    # back through the advertised output schema. A required-but-excluded field
+    # cannot survive that round trip, so requiring it here made every gemtext
+    # response fail output validation with "raw_content Field required".
+    raw_content: str = Field(
+        default="",
+        validation_alias=AliasChoices("raw_content", "rawContent"),
+        serialization_alias="raw_content",
+        exclude=True,
+        description="Raw gemtext content (server-side only; see `document`)",
+    )
     charset: str = Field(default="utf-8", description="Character encoding")
     lang: str | None = Field(None, description="Language tag")
     size: int = Field(..., description="Content size in bytes")
     truncated: bool = Field(
         default=False,
-        description="True if the gemtext was truncated to the render limit "
-        "(`size` still reports the full original byte size)",
+        description="True if the page continues after this window. "
+        "`next_offset` is where it continues -- at the last complete line, so "
+        "windows abut exactly; `size` still reports the full original byte "
+        "size (bytes are not the unit an offset counts in).",
     )
+    partial_line: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("partial_line", "partialLine"),
+        serialization_alias="partial_line",
+        description=(
+            "True when this window both begins and ends inside a single line "
+            "that is longer than the render limit. That line is delivered as a "
+            "plain `text` line here and continues in the next window, so join "
+            "it to the next window's first line rather than reading the two as "
+            "separate lines. It is deliberately not parsed: half of a "
+            "`=> url text` line would otherwise look like a complete link to a "
+            "target the server never sent"
+        ),
+    )
+    total_chars: _TotalChars = None
+    next_offset: _NextOffset = None
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -677,6 +929,11 @@ GeminiFetchResponse = (
     | GeminiErrorResult
     | GeminiCertificateResult
 )
+
+
+class GeminiFetchOutput(RootModel[Annotated[GeminiFetchResponse, _KIND]]):
+    """One Gemini fetch result: gemtext, success, binary metadata, input,
+    redirect, certificate, or an error."""
 
 
 # Certificate and security models
@@ -770,7 +1027,11 @@ class GeminiClientCertificateEntry(BaseModel):
 
 
 class TOFUEntry(BaseModel):
-    """Model for Trust-on-First-Use certificate storage."""
+    """Model for Trust-on-First-Use certificate storage.
+
+    The on-disk record, kept in epoch seconds because that is what ``tofu.json``
+    holds. What ``gemini_trust_list`` reports is :class:`TOFUTrustEntry`.
+    """
 
     host: str = Field(..., description="Hostname")
     port: int = Field(default=1965, description="Port number")
@@ -784,6 +1045,72 @@ class TOFUEntry(BaseModel):
         return self.expires is not None and current_time > self.expires
 
 
+class TOFUTrustEntry(BaseModel):
+    """A pinned certificate as reported by ``gemini_trust_list``.
+
+    A result-side projection of :class:`TOFUEntry`, following the
+    :class:`GeminiClientCertificateEntry` precedent: the store keeps epoch
+    seconds, but the tool that explains a CERTIFICATE_CHANGED failure has to be
+    read by a model, and epoch floats made it answer "was this reissue routine?"
+    by arithmetic -- while the client-certificate tools reported the very same
+    `expires` concept as an ISO-8601 string, so the two disagreed about what a
+    timestamp looks like. ``expired`` is precomputed for the same reason.
+    """
+
+    host: str = Field(..., description="Host this certificate is pinned for")
+    port: int = Field(default=1965, description="Port this certificate is pinned for")
+    fingerprint: str = Field(
+        ...,
+        description="SHA-256 fingerprint of the pinned certificate. This is the "
+        "value gemini_trust_update requires before it will drop the pin",
+    )
+    first_seen: str = Field(
+        ...,
+        description="ISO-8601 UTC time this certificate was first seen, i.e. "
+        "when the pin was established",
+    )
+    last_seen: str = Field(
+        ...,
+        description="ISO-8601 UTC time this certificate was last presented",
+    )
+    expires: str | None = Field(
+        None,
+        description="ISO-8601 UTC end of the certificate's validity window. "
+        "Null when the certificate carries no expiry",
+    )
+    expired: bool = Field(
+        default=False,
+        description="True if the validity window has ended, which makes a "
+        "reissue -- and so a changed fingerprint -- the likely explanation",
+    )
+
+    @classmethod
+    def from_entry(cls, entry: TOFUEntry, now: float | None = None) -> "TOFUTrustEntry":
+        """Project a stored :class:`TOFUEntry` onto the reported shape.
+
+        Args:
+            entry: The stored trust-store record.
+            now: UNIX timestamp to judge expiry against (default: now).
+
+        Returns:
+            The entry as ``gemini_trust_list`` reports it.
+
+        """
+        current_time = time.time() if now is None else now
+        first_seen = iso_utc(entry.first_seen)
+        last_seen = iso_utc(entry.last_seen)
+        return cls(
+            host=entry.host,
+            port=entry.port,
+            fingerprint=entry.fingerprint,
+            # iso_utc only returns None for a None input, and both are floats.
+            first_seen=first_seen or "",
+            last_seen=last_seen or "",
+            expires=iso_utc(entry.expires),
+            expired=entry.is_expired(current_time),
+        )
+
+
 class TOFUTrustListResult(BaseModel):
     """Result model for a read-only inspection of the TOFU trust store.
 
@@ -793,13 +1120,31 @@ class TOFUTrustListResult(BaseModel):
     """
 
     kind: Literal["trust_list"] = "trust_list"
-    entries: list[TOFUEntry] = Field(
+    entries: list[TOFUTrustEntry] = Field(
         ...,
         description="Pinned certificates matching the request, ordered by host",
     )
+
+    @field_validator("entries", mode="before")
+    @classmethod
+    def project_stored_entries(cls, v: Any) -> Any:
+        """Accept stored :class:`TOFUEntry` records and project them.
+
+        The projection happens here rather than at the call site so the store's
+        epoch timestamps cannot reach the wire by anyone assembling this result
+        from what the trust manager hands back.
+        """
+        if isinstance(v, list):
+            return [
+                TOFUTrustEntry.from_entry(item) if isinstance(item, TOFUEntry) else item
+                for item in v
+            ]
+        return v
+
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -825,7 +1170,8 @@ class TOFUTrustUpdateResult(BaseModel):
     message: str = Field(..., description="Human-readable summary of the outcome")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -846,7 +1192,8 @@ class GeminiClientCertListResult(BaseModel):
     )
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 
@@ -888,7 +1235,8 @@ class GeminiClientCertUpdateResult(BaseModel):
     message: str = Field(..., description="Human-readable summary of the outcome")
     request_info: dict[str, Any] = Field(
         default_factory=dict,
-        alias="requestInfo",
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
         description="Information about the original request",
     )
 

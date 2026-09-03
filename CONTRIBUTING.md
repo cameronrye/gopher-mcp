@@ -1,6 +1,6 @@
-# Contributing to Gopher MCP Server
+# Contributing to the Gopher & Gemini MCP Server
 
-Thank you for your interest in contributing to the Gopher MCP Server! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to the Gopher & Gemini MCP Server! This document provides guidelines and information for contributors.
 
 ## Quick Start for Contributors
 
@@ -34,7 +34,7 @@ Thank you for your interest in contributing to the Gopher MCP Server! This docum
 
 ### Setup
 
-The project uses `uv` for dependency management and includes cross-platform task runners:
+The project uses `uv` for dependency management and a cross-platform task runner:
 
 ```bash
 # Set up development environment (installs dependencies and pre-commit hooks)
@@ -44,28 +44,80 @@ uv run task dev-setup
 uv run task quality
 ```
 
-### Available Development Commands
+### The task runner
 
-**Recommended (Unified Python Task Runner):**
+Project tasks — linting, tests, docs, the local CI pipeline — run through
+[taskipy](https://github.com/taskipy/taskipy), whose task table lives in
+`pyproject.toml` under `[tool.taskipy.tasks]`. That table is the single
+definition of every task; there is nothing to keep in sync with it.
 
-| Command                     | Description                    |
-| --------------------------- | ------------------------------ |
-| `python task.py dev-setup`  | Set up development environment |
-| `python task.py quality`    | Run all quality checks         |
-| `python task.py test`       | Run all tests                  |
-| `python task.py test-cov`   | Run tests with coverage        |
-| `python task.py lint`       | Run ruff linting               |
-| `python task.py format`     | Format code with ruff          |
-| `python task.py typecheck`  | Run mypy type checking         |
-| `python task.py serve`      | Run MCP server locally         |
-| `python task.py docs-serve` | Serve documentation locally    |
+```bash
+uv run task <command>
+```
 
-**Alternative Commands:**
+This works identically on Windows, macOS and Linux, and needs nothing installed
+beyond `uv` and the project's dependency groups (`uv sync --all-groups`, which
+`scripts/dev-setup.sh` / `scripts\dev-setup.bat` runs for you).
 
-| Command                 | Description                       |
-| ----------------------- | --------------------------------- |
-| `make <command>`        | Unix/macOS (delegates to task.py) |
-| `uv run task <command>` | Direct taskipy usage (fallback)   |
+On Unix-like systems `make <command>` is a convenience wrapper: the `Makefile`
+is a catch-all target that forwards straight to `uv run task <command>`, so the
+two are interchangeable. `make` with no target runs the `help` task.
+
+```bash
+make test          # identical to: uv run task test
+make               # identical to: uv run task help
+```
+
+To see the tasks that actually exist, ask the runner rather than this page:
+
+```bash
+uv run task help   # an alias for `task --list`
+```
+
+The tasks, grouped:
+
+| Group         | Tasks                                                            |
+| ------------- | ---------------------------------------------------------------- |
+| Setup         | `dev-setup`, `dev-setup-win`, `install-hooks`                    |
+| Code quality  | `lint`, `format`, `typecheck`, `check`, `quality`                |
+| Testing       | `test`, `test-cov`, `test-unit`, `test-integration`, `test-slow` |
+| Server        | `serve`, `serve-http`, `serve-sse`                               |
+| Documentation | `docs-serve`, `docs-build`                                       |
+| Maintenance   | `clean`, `clean-win`, `ci`, `help`                               |
+
+A few of them are worth explaining:
+
+- `lint` and `format` deliberately cover the whole repository rather than just
+  `src/` and `tests/`, because CI runs `ruff check .`; scoping them down would
+  hide violations in `scripts/` and other top-level Python that CI still fails
+  on.
+- `typecheck` matches CI's `mypy src` exactly, without a blanket
+  `--ignore-missing-imports` that would let a new untyped import pass locally
+  and fail in CI.
+- `check` is `lint` then `typecheck`; `quality` is `lint`, `typecheck`, `test`;
+  `ci` is `check` then `test-cov` — the local mirror of the CI pipeline.
+- `dev-setup-win` and `clean-win` exist because Windows has no `bash` and
+  taskipy cannot branch on the platform at runtime, so the platform is in the
+  task name.
+
+**Adding a task.** Add one entry under `[tool.taskipy.tasks]` and run it:
+
+```toml
+[tool.taskipy.tasks]
+my-task = "echo 'Hello World'"
+```
+
+```bash
+uv run task my-task
+make my-task        # picked up automatically; the Makefile has no task list
+```
+
+Nothing else needs updating. There is no second copy of the task table: the
+project used to ship a `task.py` holding a hand-maintained duplicate that
+nothing compared against, and it had already drifted from `pyproject.toml` by
+the time it was removed. If you are following an older document that says to run
+`python task.py <command>`, the file no longer exists — use
+`uv run task <command>`.
 
 ## Code Standards
 
@@ -74,7 +126,7 @@ uv run task quality
 We maintain high code quality standards:
 
 - **Type hints** for all functions and methods
-- **Comprehensive tests** (CI enforces a minimum of 85% coverage)
+- **Comprehensive tests** (CI enforces a minimum of 95% coverage)
 - **Documentation** for all public APIs
 - **Security** considerations for all network operations
 - **Cross-platform** compatibility (Windows, macOS, Linux)
@@ -111,6 +163,7 @@ tests/
 ├── test_client_certs.py      # Client certificate tests
 ├── test_config.py            # Configuration tests
 ├── test_security.py          # Security / SSRF tests
+├── test_mcp_protocol.py      # The MCP wire envelope, over an in-memory session
 ├── test_integration.py       # Integration tests
 ├── conftest.py               # Pytest fixtures and configuration
 └── ...                       # Additional protocol, model, and util tests
@@ -127,9 +180,6 @@ uv run task test-cov
 
 # Run specific test file
 uv run pytest tests/test_server.py
-
-# Run tests in watch mode during development
-uv run pytest --watch
 ```
 
 ### Writing Tests
@@ -146,11 +196,13 @@ Example test structure:
 import pytest
 from gopher_mcp.config import GopherConfig
 
+
 def test_default_configuration():
     """The Gopher config exposes the documented defaults."""
     config = GopherConfig()
     assert config.max_response_size == 1048576
     assert config.timeout_seconds == 30.0
+
 
 @pytest.mark.asyncio
 async def test_gopher_fetch_returns_structured_result():
@@ -197,12 +249,37 @@ def fetch_gopher_resource(url: str, timeout: int = 30) -> GopherResult:
 ### Building Documentation
 
 ```bash
-# Serve documentation locally
+# Serve documentation locally, with live reload
 uv run task docs-serve
 
 # Build documentation
 uv run task docs-build
 ```
+
+CI builds the site with `mkdocs build --clean --strict`, so a broken relative
+link, a missing anchor or an unresolved mkdocstrings reference fails the build
+rather than shipping. Reproduce it before pushing:
+
+```bash
+uv run mkdocs build --clean --strict
+./scripts/check-docs-render.sh site
+```
+
+`--strict` only proves that nothing _warned_, not that anything rendered:
+`check-docs-render.sh` asserts the landing page's mermaid diagram came out as a
+diagram, which is the regression that shipped as literal `graph TB` text for a
+year while every strict build passed.
+
+Two pages are one-line `--8<--` includes rather than second copies:
+`docs/contributing.md` includes this file, and `docs/changelog.md` includes
+`CHANGELOG.md`. Edit the root file; the page follows. Any further include of a
+file outside `docs/` also belongs in the `paths:` filter of
+`.github/workflows/docs.yml`, or an edit to it will not redeploy the site.
+
+Three retired pages — `advanced-features.md`, `gemini-configuration.md` and
+`task-runner.md` — keep answering through `mkdocs-redirects`, configured under
+`plugins.redirects.redirect_maps` in `mkdocs.yml`. Removing or renaming a page
+whose URL has been published means adding an entry there in the same change.
 
 ## Security Considerations
 
@@ -217,44 +294,35 @@ uv run task docs-build
 ### Security Testing
 
 - Include security-focused tests
-- Use `bandit` for security linting (runs automatically)
-- Use `pip-audit` for dependency vulnerability checking
+- Use `bandit` for security linting (runs automatically, and fails CI)
+- Use `pip-audit` for dependency vulnerability checking. It runs on every PR but
+  is **advisory only** — an advisory published against a pinned dependency is
+  not a defect in your PR, so it annotates the run instead of failing it. A
+  nightly audit workflow files them under the `security-audit` label instead.
 
 ## Bug Reports
+
+Open one with the
+[Bug Report template](https://github.com/cameronrye/gopher-mcp/issues/new?template=bug_report.yml),
+which collects this information as a form. Blank issues are turned off, so the
+[new-issue page](https://github.com/cameronrye/gopher-mcp/issues/new/choose)
+always starts from a template.
 
 ### Before Submitting a Bug Report
 
 1. **Search existing issues** to avoid duplicates
 2. **Test with the latest version** from the main branch
-3. **Gather relevant information** (OS, Python version, error messages)
-
-### Bug Report Template
-
-```markdown
-**Describe the bug**
-A clear description of what the bug is.
-
-**To Reproduce**
-Steps to reproduce the behavior:
-
-1. Configure server with '...'
-2. Send request to '...'
-3. See error
-
-**Expected behavior**
-What you expected to happen.
-
-**Environment:**
-
-- OS: [e.g., Windows 11, macOS 14, Ubuntu 22.04]
-- Python version: [e.g., 3.11.5]
-- Package version: [e.g., 0.4.0]
-
-**Additional context**
-Any other context about the problem.
-```
+3. **Gather relevant information**: your OS, your Python version, the exact
+   error `code` and message from the tool result, and the package version —
+   `gopher-mcp --version` reports it, and works for the `uvx` and Docker
+   installs where importing the package is not an option
 
 ## Feature Requests
+
+Open one with the
+[Feature Request template](https://github.com/cameronrye/gopher-mcp/issues/new?template=feature_request.yml).
+Questions that are not requests belong on the
+[Question template](https://github.com/cameronrye/gopher-mcp/issues/new?template=question.yml).
 
 ### Feature Request Guidelines
 
@@ -319,7 +387,9 @@ We follow [Semantic Versioning](https://semver.org/):
 
 ### Release Checklist
 
-1. Update version in `pyproject.toml` (and run `uv lock`)
+1. Update version in `pyproject.toml` and `server.json` (which carries it
+   twice), then run `uv lock`. `scripts/prepare-release.py` does all of this,
+   and the release workflow fails the tag if the three disagree
 2. Update `CHANGELOG.md`
 3. Create release PR
 4. Tag release after merge
@@ -339,15 +409,15 @@ for the full process, trusted-publishing setup, and the complete pre-release che
 
 ### Communication
 
-- **GitHub Issues** - Bug reports and feature requests
-- **GitHub Discussions** - General questions and ideas
+- **GitHub Issues** - Bug reports, feature requests and questions, each with
+  its own template on the [new-issue page](https://github.com/cameronrye/gopher-mcp/issues/new/choose)
 - **Pull Requests** - Code contributions and reviews
 
 ## Getting Help
 
 - **Documentation**: [Project Docs](https://cameronrye.github.io/gopher-mcp/)
 - **Issues**: [GitHub Issues](https://github.com/cameronrye/gopher-mcp/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/cameronrye/gopher-mcp/discussions)
+- **Questions**: [Open a question issue](https://github.com/cameronrye/gopher-mcp/issues/new?template=question.yml)
 
 ---
 

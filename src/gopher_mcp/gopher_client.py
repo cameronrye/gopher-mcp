@@ -11,8 +11,19 @@ from dataclasses import dataclass
 import structlog
 
 from .client_base import FetchClientBase
-from .gopher_transport import GopherProtocolError, decode_gopher_text, fetch_gopher
-from .helpers import sanitize_display_text
+from .gopher_parse import (
+    gopher_type_category,
+    parse_gopher_menu,
+    parse_gopher_url,
+)
+from .gopher_transport import (
+    GopherProtocolError,
+    GopherTimeoutError,
+    decode_gopher_text,
+    fetch_gopher,
+)
+from .helpers import normalize_cache_key, sanitize_display_text, window_text
+from .mime import detect_binary_mime_type
 from .models import (
     BinaryResult,
     CacheEntry,
@@ -21,6 +32,7 @@ from .models import (
     GopherURL,
     MenuResult,
     TextResult,
+    iso_utc,
     mark_from_cache,
 )
 from .robots import (
@@ -30,14 +42,6 @@ from .robots import (
     gopher_candidate_paths,
 )
 from .ssrf import HostResolutionError, SSRFError, validate_target
-from .utils import (
-    detect_binary_mime_type,
-    gopher_type_category,
-    normalize_cache_key,
-    parse_gopher_menu,
-    parse_gopher_url,
-    truncate_text,
-)
 
 logger = structlog.get_logger(__name__)
 
@@ -85,6 +89,41 @@ _FETCH_BUDGET: ContextVar[_FetchBudget | None] = ContextVar(
 )
 
 
+@dataclass
+class _ProbeCredit:
+    """What the robots probe already paid for, on behalf of the fetch it guards.
+
+    The probe and the fetch it precedes are one user-visible request to one
+    host, but each used to take its own rate-limit token and run its own DNS
+    lookup -- so with the shipped defaults (60 rpm, robots on) every first fetch
+    to a host slept a full second before anything could be sent, and resolved
+    the same name twice. Both halves are handed straight to the fetch that
+    follows, which is the only thing that ever runs after a probe.
+    """
+
+    host: str
+    port: int
+    addresses: list[str]
+    rate_slot: bool
+
+
+# Set by the robots probe, consumed by the fetch it guards. A ContextVar for the
+# same reason as the budget above: the probe is invoked through RobotsGate, which
+# owns its fetcher signature, and awaits it inside the calling task.
+_PROBE_CREDIT: ContextVar[_ProbeCredit | None] = ContextVar(
+    "gopher_probe_credit", default=None
+)
+
+
+# Where the render window starts for the fetch running in this task: menu item
+# index / character position, 0 for the beginning. A ContextVar for the same
+# reason as the budget above -- it has to reach the render step across
+# ``_bounded_fetch``/``_fetch_content``, the seam subclasses and test doubles
+# implement, and each task's own copy keeps concurrent fetches from reading each
+# other's window (a value parked on the shared client instance would not).
+_RENDER_OFFSET: ContextVar[int] = ContextVar("gopher_render_offset", default=0)
+
+
 class _BudgetExhausted(GopherProtocolError):
     """The fetch deadline ran out before this phase could start.
 
@@ -115,6 +154,25 @@ async def _spend_budget(default_timeout: float) -> AsyncIterator[float]:
         yield budget.remaining
     finally:
         budget.remaining -= loop.time() - started
+
+
+def _display_selector(selector: str) -> str:
+    """Render a selector for the JSON echoed back to the caller.
+
+    ``parse_gopher_url`` carries a selector byte that is not valid UTF-8 as a
+    surrogate escape so the transport can put the original byte back on the
+    wire. A lone surrogate cannot be encoded into JSON at all, so serializing
+    the response would fail outright -- the echo (and the debug log) therefore
+    shows the lossy U+FFFD form while the wire still gets the exact bytes.
+
+    Args:
+        selector: Selector as parsed from the URL.
+
+    Returns:
+        The same selector with unencodable bytes shown as U+FFFD.
+
+    """
+    return selector.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
 
 
 def _strip_gopher_text_terminator(text: str) -> str:
@@ -155,6 +213,8 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
 
     _log_label = "Gopher"
     _cache_entry_cls = CacheEntry
+    # Gopher results spell the content length ``bytes`` (Gemini says ``size``).
+    _response_size_field = "bytes"
     _robots_tokens = GOPHER_TOKENS
     # Gopher fails *open*: the protocol has no status codes, so a missing
     # selector, an error document and an empty file are indistinguishable on the
@@ -270,7 +330,9 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         if not 1 <= parsed_url.port <= 65535:
             raise ValueError(f"Invalid port number: {parsed_url.port}")
 
-    async def fetch(self, url: str, *, refresh: bool = False) -> GopherFetchResponse:
+    async def fetch(
+        self, url: str, *, refresh: bool = False, offset: int = 0
+    ) -> GopherFetchResponse:
         """Fetch content from a Gopher URL.
 
         Args:
@@ -278,6 +340,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             refresh: Skip the cache lookup and go to the server. The fresh
                 response still replaces the cached one, so this bypasses the
                 cache for this read rather than disabling it.
+            offset: Where the render window starts -- the item index for a menu,
+                the character position for a text body. Pass back the
+                ``next_offset`` of a truncated result to read the part that was
+                cut; 0 is the beginning. Offsets past the end return an empty
+                window, not an error.
 
         Returns:
             Structured response based on content type
@@ -288,7 +355,27 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # fetch it guards and would otherwise be granted a full deadline of its
         # own. Reset in the matching ``finally`` below.
         budget_token = _FETCH_BUDGET.set(_FetchBudget(self.timeout_seconds))
+        # Cleared for the same reason the budget is: a ContextVar set inside one
+        # fetch outlives it in the caller's context, so a second fetch on the
+        # same task would otherwise inherit the first one's rate-limit slot and
+        # its already-resolved addresses.
+        credit_token = _PROBE_CREDIT.set(None)
+        # Set here rather than passed down through ``_bounded_fetch``: that
+        # method and ``_fetch_content`` are the seam a subclass (and the robots
+        # gate's own fetcher) implement, and widening it for a value only the
+        # two render paths read would push the parameter through code that has
+        # no use for it. Same lifecycle as the budget above -- a ContextVar set
+        # inside one fetch outlives it in the caller's context, so it is reset
+        # in the ``finally``, and each task's copy keeps concurrent fetches
+        # from reading each other's window.
+        offset_token = _RENDER_OFFSET.set(offset)
         try:
+            # Rejected rather than clamped: a negative offset is a caller
+            # mistake, and silently reading from 0 would answer a question that
+            # was not asked.
+            if offset < 0:
+                raise ValueError("offset must not be negative")
+
             # Parse the URL
             parsed_url = parse_gopher_url(url)
 
@@ -301,6 +388,10 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # resource that is never fetched over Gopher at all.
             interactive = self._interactive_result(parsed_url)
             if interactive is not None:
+                # _interactive_result has no URL string of its own, so the echo
+                # every other error carries is completed here rather than left
+                # as the empty dict this one code used to return.
+                interactive.request_info["url"] = url
                 return interactive
 
             # Robot exclusion, before the cache lookup below: a Disallow must
@@ -319,6 +410,17 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # Canonical cache key (case-insensitive host) so requests differing
             # only in host case share one entry instead of duplicating.
             cache_key = normalize_cache_key(url)
+            if offset:
+                # What the cache stores is the RENDERED WINDOW, not the body, so
+                # two windows of one resource are two entries -- serving window
+                # 0 to a request for window 200 would silently answer the wrong
+                # question. The alternative (cache the whole body and window on
+                # the way out) would put full-size bodies in a cache whose
+                # entry cap exists to bound its memory, so the offset goes in
+                # the key instead and a continuation pays for its own fetch.
+                # NUL cannot appear in a URL, so this can never collide with a
+                # key some other URL normalizes to.
+                cache_key = f"{cache_key}\x00offset={offset}"
 
             # Check cache first, unless the caller asked for the current state.
             if self.cache_enabled and not refresh:
@@ -333,32 +435,41 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                         "Cache hit",
                         url=url,
                         cached=True,
-                        response_type=getattr(cached_response, "kind", "unknown"),
-                        response_size=getattr(cached_response, "bytes", 0),
+                        # Direct attribute access, not getattr with a default:
+                        # every member of the response union declares ``kind``,
+                        # so a rename or a typo must fail mypy rather than
+                        # silently logging "unknown" forever.
+                        response_type=cached_response.kind,
+                        response_size=self._response_size(cached_response),
                     )
                     return cached_response
 
             # Create request info for provenance
-            request_info = {
+            request_info: dict[str, object] = {
                 "url": url,
                 "host": parsed_url.host,
                 "port": parsed_url.port,
                 "type": parsed_url.gopher_type,
-                "selector": parsed_url.selector,
-                "timestamp": time.time(),
+                "selector": _display_selector(parsed_url.selector),
+                "timestamp": iso_utc(time.time()),
             }
+            # RFC 1436 gives only type-7 (Index-Search) servers a query field, so
+            # _fetch_content drops a ?query on anything else. Say so: a menu (or
+            # the model) that mislabels a search item as type 0/1 otherwise gets
+            # an unrelated page back with nothing to reveal the terms vanished.
+            if parsed_url.search is not None and parsed_url.gopher_type != "7":
+                request_info["search_ignored"] = True
 
             # Fetch the content (optionally bounded by the concurrency cap)
             response = await self._bounded_fetch(parsed_url)
             # Merge (not clobber) so any fields a processor attached survive --
             # matches the Gemini client and avoids a latent maintenance trap.
-            if hasattr(response, "request_info"):
-                response.request_info.update(request_info)
+            response.request_info.update(request_info)
 
             # Cache the response, but skip errors: a transient failure would
             # otherwise be served stale for the whole TTL. Mirrors the Gemini
             # client, which excludes error/redirect/input/certificate results.
-            if self.cache_enabled and getattr(response, "kind", None) != "error":
+            if self.cache_enabled and response.kind != "error":
                 self._cache_response(cache_key, response)
 
             # Full URL/selector/search are request metadata; keep them at DEBUG
@@ -369,10 +480,10 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 host=parsed_url.host,
                 port=parsed_url.port,
                 gopher_type=parsed_url.gopher_type,
-                selector=parsed_url.selector,
+                selector=_display_selector(parsed_url.selector),
                 search=parsed_url.search,
-                response_type=getattr(response, "kind", "unknown"),
-                response_size=getattr(response, "bytes", 0),
+                response_type=response.kind,
+                response_size=self._response_size(response),
                 cached=False,
             )
 
@@ -398,6 +509,27 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             )
         finally:
             _FETCH_BUDGET.reset(budget_token)
+            _PROBE_CREDIT.reset(credit_token)
+            _RENDER_OFFSET.reset(offset_token)
+
+    async def _bounded_fetch(self, parsed_url: GopherURL) -> GopherFetchResponse:
+        """Run the guarded fetch, spending what the robots probe already paid.
+
+        Overrides the base only to skip a *second* per-host rate-limit token:
+        the probe and the fetch it guards are one user request to one host, and
+        charging both made every first fetch to a host sleep a full interval --
+        a second, with the shipped defaults -- before anything could be sent.
+        The probe's reservation still spaces the *next* request, and the
+        concurrency cap is applied here exactly as the base applies it.
+        """
+        credit = _PROBE_CREDIT.get()
+        if credit is None or not credit.rate_slot or credit.host != parsed_url.host:
+            return await super()._bounded_fetch(parsed_url)
+        credit.rate_slot = False
+        if self._fetch_semaphore is None:
+            return await self._fetch_content(parsed_url)
+        async with self._fetch_semaphore:
+            return await self._fetch_content(parsed_url)
 
     def _robots_denied_result(
         self, url: str, host: str, reason: str, detail: str | None = None
@@ -429,15 +561,27 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 f"resource -- its policy could not be read. Retry shortly."
             )
         else:
+            # The single actionable sentence used to be an unconditional "set
+            # GOPHER_RESPECT_ROBOTS_TXT=false", which is read by the model, not
+            # the operator -- so the natural next step became telling the user to
+            # switch off a politeness control the server explicitly opted into.
+            # docs/ai-assistant-guide.md says the opposite ("do not suggest
+            # disabling robots checking unless the user has said they operate the
+            # host"). State the decision and the correct next step first; keep
+            # the env-var pointer, under its condition. Kept word-for-word in
+            # step with the Gemini wording, which was fixed first.
             message = (
                 f"{host} disallows this resource in its robots.txt. "
-                f"Set GOPHER_RESPECT_ROBOTS_TXT=false to disable robots "
-                f"checking."
+                f"This is the server operator's decision and will not change on "
+                f"a retry: do not retry, and do not try a different spelling of "
+                f"the selector. Tell the user the resource is excluded and stop. "
+                f"GOPHER_RESPECT_ROBOTS_TXT=false overrides the check, but only "
+                f"for a host the user has said they operate."
             )
         code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return ErrorResult(
             error={"code": code, "message": message},
-            requestInfo={"url": url, "timestamp": time.time()},
+            request_info={"url": url, "timestamp": iso_utc(time.time())},
         )
 
     async def _fetch_robots(self, host: str, port: int) -> str | None:
@@ -477,6 +621,18 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # Outside the budget: waiting for a rate-limit slot is not wire time
             # and must not eat the deadline configured for the exchange itself.
             await self._rate_limiter.acquire(host)
+            # The fetch this probe guards is the same user request to the same
+            # host, so it inherits this slot and these vetted addresses instead
+            # of paying for a second of each. Recorded before the probe's own
+            # read: even a probe that then fails has already spent them.
+            _PROBE_CREDIT.set(
+                _ProbeCredit(
+                    host=host,
+                    port=port,
+                    addresses=connect_addresses,
+                    rate_slot=True,
+                )
+            )
             async with _spend_budget(self.timeout_seconds) as timeout:
                 raw = await fetch_gopher(
                     host,
@@ -488,10 +644,10 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                     connect_addresses=connect_addresses,
                     truncate_at_max=True,
                 )
-        except (TimeoutError, _BudgetExhausted) as e:
-            # _BudgetExhausted must precede the GopherProtocolError arm below
-            # (it is a subclass): a deadline that ran out is a timeout, not a
-            # malformed reply.
+        except (TimeoutError, _BudgetExhausted, GopherTimeoutError) as e:
+            # _BudgetExhausted and GopherTimeoutError must precede the
+            # GopherProtocolError arm below (both are subclasses): a deadline
+            # that ran out is a timeout, not a malformed reply.
             raise RobotsUnavailable("the connection timed out") from e
         except HostResolutionError as e:
             raise RobotsUnavailable("the host could not be resolved") from e
@@ -531,7 +687,19 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                     f"connect to {parsed_url.host}:{parsed_url.port} with an "
                     f"appropriate client."
                 ),
-            }
+            },
+            # Echo the request like every other Gopher error does. Returning an
+            # empty dict here left exactly one error code uncorrelatable with the
+            # request that produced it -- most visibly for one entry of a
+            # gopher_batch_fetch list. The ``url`` is filled in by ``fetch``,
+            # which is the only caller that has the original string.
+            request_info={
+                "host": parsed_url.host,
+                "port": parsed_url.port,
+                "type": parsed_url.gopher_type,
+                "selector": _display_selector(parsed_url.selector),
+                "timestamp": iso_utc(time.time()),
+            },
         )
 
     async def _fetch_content(self, parsed_url: GopherURL) -> GopherFetchResponse:
@@ -566,48 +734,77 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # too. The wait_for only abandons the lookup -- the worker itself is
         # confined to ssrf.py's own bounded DNS pool, so a stalled resolver can
         # never occupy the event loop's default executor.
-        try:
-            async with _spend_budget(self.timeout_seconds) as timeout:
-                connect_addresses = await asyncio.wait_for(
-                    validate_target(
-                        parsed_url.host,
-                        parsed_url.port,
-                        allow_local=self.allow_local_hosts,
-                        allowed_ports=self.allowed_ports,
-                    ),
-                    timeout=timeout,
-                )
-        except TimeoutError as e:
-            raise GopherProtocolError(
-                f"Timed out resolving host '{parsed_url.host}'"
-            ) from e
+        #
+        # The robots probe that just ran resolved and vetted this very
+        # host:port, so reuse its answer rather than paying for a second
+        # getaddrinfo on the same name microseconds later.
+        credit = _PROBE_CREDIT.get()
+        if (
+            credit is not None
+            and credit.host == parsed_url.host
+            and credit.port == parsed_url.port
+        ):
+            connect_addresses = credit.addresses
+        else:
+            try:
+                async with _spend_budget(self.timeout_seconds) as timeout:
+                    connect_addresses = await asyncio.wait_for(
+                        validate_target(
+                            parsed_url.host,
+                            parsed_url.port,
+                            allow_local=self.allow_local_hosts,
+                            allowed_ports=self.allowed_ports,
+                        ),
+                        timeout=timeout,
+                    )
+            except TimeoutError as e:
+                raise GopherProtocolError(
+                    f"Timed out resolving host '{parsed_url.host}'"
+                ) from e
 
         # RFC 1436 only defines the <TAB>query field for type-7 (Index-Search)
         # servers; never forward a stray search to a plain selector.
         search = parsed_url.search if gopher_type == "7" else None
 
-        async with _spend_budget(self.timeout_seconds) as transport_timeout:
-            raw = await fetch_gopher(
-                parsed_url.host,
-                parsed_url.port,
-                parsed_url.selector,
-                search,
-                max_bytes=self.max_response_size,
-                timeout=transport_timeout,
-                connect_addresses=connect_addresses,
-            )
+        try:
+            async with _spend_budget(self.timeout_seconds) as transport_timeout:
+                raw = await fetch_gopher(
+                    parsed_url.host,
+                    parsed_url.port,
+                    parsed_url.selector,
+                    search,
+                    max_bytes=self.max_response_size,
+                    timeout=transport_timeout,
+                    connect_addresses=connect_addresses,
+                )
+        except GopherTimeoutError as e:
+            # The transport is handed whatever is LEFT of the deadline, so it
+            # named that remainder as "the timeout" -- an 18-digit fraction that
+            # matches nothing the operator configured and, after a slow robots
+            # probe, can read as absurdly small ("why is my timeout 0.08
+            # seconds?"). Re-phrase against the configured deadline, which is
+            # the one that was actually reached; _BudgetExhausted already words
+            # it this way.
+            raise GopherProtocolError(
+                f"The request timed out after {self.timeout_seconds} seconds"
+            ) from e
+
+        # Where the caller asked the render window to start. The whole response
+        # is still read from the server -- Gopher has no range request -- so
+        # this windows what is handed to the model, not what is transferred.
+        offset = _RENDER_OFFSET.get()
 
         if category == "menu":
             # Menu/directory or search results (which are menus)
-            return self._process_menu_response(raw)
+            return self._process_menu_response(raw, offset)
         elif category == "binary":
-            # Binary content - return metadata only
+            # Binary content - return metadata only (no body to window).
             return self._process_binary_response(raw)
         else:
             # Text (type 0, h/HTML, i/info) and unknown types - try as text
-            return self._process_text_response(raw)
+            return self._process_text_response(raw, offset)
 
-    def _process_menu_response(self, raw: bytes) -> MenuResult:
+    def _process_menu_response(self, raw: bytes, offset: int = 0) -> MenuResult:
         """Parse a Gopher menu (RFC 1436) into a structured result.
 
         Uses the project's own ``parse_gopher_menu``, which honours the
@@ -617,31 +814,53 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
 
         Args:
             raw: Raw response bytes from the server
+            offset: Index of the first item to return, so a directory bigger
+                than the render cap can be read a window at a time.
 
         Returns:
             Parsed menu result
         """
-        content, _ = decode_gopher_text(raw)
+        # The charset goes with the content: each item's nextUrl percent-encodes
+        # the selector back into its ON-WIRE bytes, so a latin-1 menu's links
+        # stay fetchable from the server that published them.
+        content, charset = decode_gopher_text(raw)
         # Cap the number of items handed to the LLM (distinct from the network
         # byte cap): a 1 MB directory can expand to tens of thousands of items,
         # each serialized to JSON, flooding the model context. 0 = unlimited.
         # Parse at most one past the cap so we never materialise the whole
         # directory yet can still tell whether it was truncated.
         if self.max_menu_items:
-            items = parse_gopher_menu(content, max_items=self.max_menu_items + 1)
-            truncated = len(items) > self.max_menu_items
-            if truncated:
-                items = items[: self.max_menu_items]
+            parsed = parse_gopher_menu(
+                content, max_items=offset + self.max_menu_items + 1, charset=charset
+            )
+            items = parsed[offset : offset + self.max_menu_items]
+            truncated = len(parsed) > offset + self.max_menu_items
+            # An exact count only when the parse ended on its own: hitting the
+            # cap proves there are more items but not how many, and inventing a
+            # number would be worse than admitting none. Counting the rest would
+            # mean materialising the whole directory, which is precisely what
+            # the cap above exists to avoid -- `next_offset` is what makes the
+            # remainder reachable regardless.
+            total_items = None if truncated else len(parsed)
         else:
-            items = parse_gopher_menu(content)
+            parsed = parse_gopher_menu(content, charset=charset)
+            items = parsed[offset:]
             truncated = False
-        return MenuResult(items=items, truncated=truncated)
+            total_items = len(parsed)
+        return MenuResult(
+            items=items,
+            truncated=truncated,
+            total_items=total_items,
+            next_offset=offset + len(items) if truncated else None,
+        )
 
-    def _process_text_response(self, raw: bytes) -> TextResult:
+    def _process_text_response(self, raw: bytes, offset: int = 0) -> TextResult:
         """Process a Gopher text response.
 
         Args:
             raw: Raw response bytes from the server
+            offset: Character position the returned window starts at, so a body
+                longer than the render cap can be read a window at a time.
 
         Returns:
             Text result
@@ -656,15 +875,26 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # whitespace that carries a multi-line body's structure.
         sanitized_text = sanitize_display_text(text_content)
 
+        # Normalise line endings to LF. RFC 1436 frames lines with CRLF, but the
+        # CR carries no information -- and the gemtext parser already strips it
+        # -- so every line of every CRLF-served page was spending an escaped
+        # "\r" in the JSON handed to the model. Bare CR (legacy Mac) is folded
+        # too, so a CR-only document is not one unreadable line.
+        sanitized_text = sanitized_text.replace("\r\n", "\n").replace("\r", "\n")
+
         # Cap the text handed to the LLM (distinct from the network byte cap);
-        # `bytes` still reports the full original size.
-        rendered, truncated = truncate_text(sanitized_text, self.max_rendered_chars)
+        # `bytes` still reports the full original size. The window is measured
+        # in characters, which is what `next_offset` speaks -- `bytes` cannot be
+        # used as an offset without risking a split UTF-8 sequence.
+        window = window_text(sanitized_text, offset, self.max_rendered_chars)
 
         return TextResult(
-            text=rendered,
+            text=window.text,
             bytes=len(raw),
             charset=charset,
-            truncated=truncated,
+            truncated=window.next_offset is not None,
+            total_chars=window.total,
+            next_offset=window.next_offset,
         )
 
     # Note: Search is handled by _process_menu_response since search results are menus
@@ -680,7 +910,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         """
         return BinaryResult(
             bytes=len(raw),
-            mimeType=detect_binary_mime_type(raw),
+            mime_type=detect_binary_mime_type(raw),
         )
 
     # The cache accessors, _bounded_fetch, _error_result and close() are

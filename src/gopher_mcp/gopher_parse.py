@@ -1,7 +1,7 @@
 """Gopher URL and menu parsing, selector sanitizing, and item-type categories."""
 
 import re
-from urllib.parse import quote, unquote, urlparse
+from urllib.parse import quote, unquote_to_bytes, urlparse
 
 from .helpers import bracket_host, sanitize_display_text
 from .models import GopherMenuItem, GopherURL
@@ -40,6 +40,48 @@ def _encode_item_type(item_type: str) -> str:
     return item_type
 
 
+def _percent_decode(value: str) -> str:
+    """Percent-decode a URL component without destroying non-UTF-8 bytes.
+
+    ``unquote`` decodes with ``errors="replace"``, so a selector byte that is
+    not valid UTF-8 -- every non-ASCII selector on a latin-1 server -- became
+    U+FFFD here and was then re-encoded as three UTF-8 bytes on the wire, a
+    request no such server can answer. Decoding with ``surrogateescape`` keeps
+    the original byte recoverable so ``gopher_transport.build_request`` can put
+    it back on the wire unchanged. Bytes below 0x80 still decode literally, so
+    the control-character rejection below is unaffected.
+
+    Args:
+        value: Percent-encoded URL component.
+
+    Returns:
+        The decoded component; bytes that are not valid UTF-8 are carried as
+        surrogate escapes (U+DC80-U+DCFF).
+
+    """
+    return unquote_to_bytes(value).decode("utf-8", errors="surrogateescape")
+
+
+def _wire_charset(charset: str) -> str:
+    """Map a reported charset onto the codec used to rebuild selector bytes.
+
+    ``decode_gopher_text`` reports only ``utf-8`` or ``latin-1``; anything else
+    a caller passes is treated as UTF-8 rather than handed to ``str.encode``,
+    where an unknown codec name would raise ``LookupError`` and take the whole
+    menu down.
+
+    Args:
+        charset: Charset the menu body was decoded with.
+
+    Returns:
+        ``"latin-1"`` or ``"utf-8"``.
+
+    """
+    return (
+        "latin-1" if charset.lower() in {"latin-1", "latin1", "iso-8859-1"} else "utf-8"
+    )
+
+
 def parse_gopher_url(url: str) -> GopherURL:
     """Parse a Gopher URL into its components.
 
@@ -53,8 +95,16 @@ def parse_gopher_url(url: str) -> GopherURL:
         ValueError: If URL is invalid
 
     """
-    if not url.startswith("gopher://"):
+    # RFC 3986 section 3.1 makes the scheme case-insensitive, so ``GOPHER://``
+    # names the same protocol as ``gopher://``; ``parse_gemini_url`` already
+    # compares its own scheme that way. Refusing a capitalised one told the
+    # caller its URL was not a Gopher URL at all. Compare case-insensitively and
+    # continue with the canonical lowercase spelling, which is what the cache
+    # key and the request built from it are keyed on.
+    scheme, separator, remainder = url.partition("://")
+    if separator != "://" or scheme.lower() != "gopher":
         raise ValueError("URL must start with 'gopher://'")
+    url = "gopher://" + remainder
 
     # ``urlparse`` is lazy: an out-of-range port only raises when ``.port`` is
     # accessed, so the access must live inside the try block.
@@ -101,14 +151,14 @@ def parse_gopher_url(url: str) -> GopherURL:
     # with the field separator.
     search = None
     if parsed.query:
-        search = unquote(parsed.query)
-        selector = unquote(raw_selector)
+        search = _percent_decode(parsed.query)
+        selector = _percent_decode(raw_selector)
     elif "%09" in raw_selector:
         sel_part, _, search_part = raw_selector.partition("%09")
-        selector = unquote(sel_part)
-        search = unquote(search_part)
+        selector = _percent_decode(sel_part)
+        search = _percent_decode(search_part)
     else:
-        selector = unquote(raw_selector)
+        selector = _percent_decode(raw_selector)
 
     # Fail closed on raw control bytes that percent-decoding can introduce. A
     # C0/DEL byte (CR/LF/TAB/NUL/ESC/...) in the selector or search would inject
@@ -130,11 +180,15 @@ def parse_gopher_url(url: str) -> GopherURL:
     )
 
 
-def parse_menu_line(line: str) -> GopherMenuItem | None:
+def parse_menu_line(line: str, *, charset: str = "utf-8") -> GopherMenuItem | None:
     """Parse a single Gopher menu line.
 
     Args:
         line: Raw menu line from Gopher server
+        charset: Encoding the menu body was decoded with. The selector is
+            percent-encoded back into ``nextUrl`` using it, so a latin-1
+            server's selector bytes survive the round trip instead of being
+            re-encoded as UTF-8 (which that server cannot resolve).
 
     Returns:
         Parsed menu item or None if invalid
@@ -167,11 +221,16 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
             selector="",
             host="",
             port=0,
-            nextUrl="",
+            next_url="",
         )
 
     try:
-        item_type = parts[0][0] if parts[0] else "i"  # Default to info line
+        # Default to info line. The type is the one server-controlled field that
+        # never passed through sanitize_display_text, so a hostile menu could
+        # park an ESC or NUL there and have it reach the model (and any client
+        # that renders the field) immediately before the printable title. A
+        # non-printable type is not a type at all, so degrade it to info.
+        item_type = parts[0][0] if parts[0] and parts[0][0].isprintable() else "i"
         # Every field below is server-controlled and reaches the model verbatim,
         # so strip ANSI escapes and other control characters before use --
         # including from the selector, which the outbound path would reject
@@ -201,7 +260,20 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
         # prefix so an ordinary selector that merely starts with "url" is left
         # alone.
         if selector.startswith("URL:") and len(selector) > 4:
+            # Checked before the info-line rule below: this target is stated
+            # outright by the server, not derived from the placeholder host and
+            # port that make an info line's URL fictional.
             next_url = selector[4:]
+        elif item_type == "i":
+            # An info line is banner text, not a link. Servers fill its unused
+            # host/port fields with placeholders -- "error.host"/1, "(NULL)"/0 --
+            # so a URL built from them is unfollowable by construction ("(NULL)"
+            # does not resolve, port 0 is not even a legal URL port), and info
+            # lines are the majority of a typical menu. Since the tool tells the
+            # model to navigate by nextUrl, that is dozens of guaranteed-dead
+            # links per menu; empty means "display only", exactly as the
+            # short-line branch above already reports it.
+            next_url = ""
         else:
             # Construct the next URL. Percent-encode the item type and the
             # selector (keeping '/') so a server-chosen '?', '#' or '%' in either
@@ -209,9 +281,15 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
             # into a bogus query, fragment or search. Bracket an IPv6 literal
             # host so its colons don't collide with the port separator and break
             # the re-parse.
+            #
+            # Encode the selector with the charset the MENU was decoded with, not
+            # UTF-8: on a latin-1 server "/café.txt" is the four bytes ``caf\xe9``
+            # and percent-encoding it as UTF-8 produced a selector the server has
+            # never heard of. parse_gopher_url decodes it back to the same bytes.
             next_url = (
                 f"gopher://{bracket_host(host)}:{port}/"
-                f"{_encode_item_type(item_type)}{quote(selector, safe='/')}"
+                f"{_encode_item_type(item_type)}"
+                f"{quote(selector.encode(_wire_charset(charset), errors='replace'), safe='/')}"
             )
 
         return GopherMenuItem(
@@ -220,19 +298,22 @@ def parse_menu_line(line: str) -> GopherMenuItem | None:
             selector=selector,
             host=host,
             port=port,
-            nextUrl=next_url,
+            next_url=next_url,
         )
     except (ValueError, IndexError):
         return None
 
 
 def parse_gopher_menu(
-    content: str, max_items: int | None = None
+    content: str, max_items: int | None = None, *, charset: str = "utf-8"
 ) -> list[GopherMenuItem]:
     """Parse a complete Gopher menu response.
 
     Args:
         content: Raw menu content from Gopher server
+        charset: Encoding ``content`` was decoded with; threaded through to
+            :func:`parse_menu_line` so a latin-1 server's selector bytes are
+            preserved in each item's ``nextUrl``.
         max_items: Stop after constructing this many items (None = unlimited).
             A 1 MB directory can hold tens of thousands of lines; without a cap
             every one becomes a model object even though the caller only keeps a
@@ -257,7 +338,7 @@ def parse_gopher_menu(
         # reads as the terminator instead of leaking later items to the model.
         if line.strip() == ".":
             break
-        item = parse_menu_line(line)
+        item = parse_menu_line(line, charset=charset)
         if item:
             items.append(item)
             if max_items is not None and len(items) >= max_items:
@@ -287,6 +368,8 @@ _GOPHER_TYPE_CATEGORY: dict[str, str] = {
     "s": "binary",  # sound
     ";": "binary",  # video
     "p": "binary",  # PNG (common extension)
+    "P": "binary",  # PDF (common extension)
+    ":": "binary",  # bitmap image (Gopher+)
     "M": "binary",  # MIME multipart message
     "<": "binary",  # sound (legacy)
     "2": "interactive",  # CSO name/phone-book server

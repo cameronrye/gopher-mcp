@@ -24,11 +24,21 @@ jobs:
   test:
     name: Test Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Six hours is GitHub's default; the whole workflow finishes in 2-3
+    # minutes, and these tests drive real sockets and TLS handshakes. A cap
+    # this loose can only fire on a genuine hang, and turns one into a fast
+    # red run instead of a runner parked for the rest of the afternoon.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ["3.11", "3.12", "3.13"]
+        # 3.14 is here because the Docker base image and the trove classifiers
+        # are gated on it: dependabot.yml holds python:3.x-slim to "an
+        # interpreter the CI matrix covers", and the 3.14 image was rolled back
+        # once (CHANGELOG "outside the tested matrix") for exactly that reason.
+        # Dropping a version from this list re-freezes those.
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
 
     steps:
       - name: Checkout code
@@ -46,74 +56,26 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --locked --all-extras
+        run: uv sync --locked --all-groups
 
       - name: Run tests
         run: uv run pytest
 
-  gemini-tests:
-    name: Gemini Protocol Tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.11"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
-        with:
-          enable-cache: true
-          cache-dependency-glob: "uv.lock"
-
-      - name: Install dependencies
-        run: uv sync --locked --all-extras
-
-      - name: Run Gemini-specific tests
-        # --no-cov: this runs only the Gemini subset, so it cannot meet the
-        # project-wide --cov-fail-under gate in addopts. The full matrix job
-        # enforces coverage; here we only care that the subset passes.
-        run: |
-          uv run pytest tests/test_gemini_client.py tests/test_gemini_models.py tests/test_gemini_status.py tests/test_gemini_tls.py tests/test_gemini_utils.py tests/test_security.py tests/test_performance.py -v --tb=short -m "not slow" --no-cov
-
-      - name: Test Gemini client functionality
-        run: |
-          uv run python -c "
-          import asyncio
-          from src.gopher_mcp.server import get_client_manager
-
-          async def test_gemini():
-              manager = await get_client_manager()
-              client = await manager.get_gemini_client()
-              print('Gemini client created successfully')
-              await client.close()
-
-          asyncio.run(test_gemini())
-          "
-
-      - name: Validate Gemini configuration
-        run: |
-          export GEMINI_TOFU_ENABLED=true
-          export GEMINI_CLIENT_CERTS_ENABLED=true
-          uv run python -c "
-          import asyncio
-          from src.gopher_mcp.server import get_client_manager
-
-          async def test_config():
-              manager = await get_client_manager()
-              client = await manager.get_gemini_client()
-              print('Gemini configuration validated')
-              await client.close()
-
-          asyncio.run(test_config())
-          "
-
   lint:
-    name: Lint and type check
+    # This job also builds the distribution and runs `twine check`, which used
+    # to live in a separate Packaging workflow. Folding them in here costs
+    # nothing -- `--all-groups` already installs twine, and the two commands
+    # take seconds -- where the separate workflow spent a whole extra runner on
+    # its own checkout, Python, uv and full `uv sync` to run them. The trigger
+    # matters more than the file: both `push` and `pull_request` reach this
+    # workflow, so packaging is checked on direct pushes to main too, which is
+    # how most of this repo's commits actually land (main is unprotected). A
+    # packaging break used to first surface mid-publish in release.yml; the
+    # repo has been bitten by exactly that (see the hatchling pin comment in
+    # pyproject.toml and 3ace3de "fix(deps): unbreak twine check").
+    name: Lint, type check and package
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -130,7 +92,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --locked --all-extras
+        run: uv sync --locked --all-groups
 
       - name: Run ruff linting
         run: uv run ruff check .
@@ -141,9 +103,20 @@ jobs:
       - name: Run mypy type checking
         run: uv run mypy src
 
+      # Runs after the linters so a `dist/` tree never exists while ruff and
+      # mypy walk the repo.
+      - name: Build distribution
+        run: uv build
+
+      # The check that catches broken sdist/wheel metadata and a README
+      # long_description PyPI would refuse to render.
+      - name: Check distribution metadata
+        run: uv run python -m twine check dist/*
+
   security:
     name: Security checks
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -160,7 +133,7 @@ jobs:
           cache-dependency-glob: "uv.lock"
 
       - name: Install dependencies
-        run: uv sync --locked --all-extras
+        run: uv sync --locked --all-groups
 
       - name: Run bandit security linting
         run: uv run bandit -r src/ -f json -o bandit-report.json
@@ -196,6 +169,7 @@ jobs:
   minimum-versions:
     name: Declared minimum dependencies
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -218,8 +192,15 @@ jobs:
       # into admitting versions that crash at import while `pip check` stayed
       # happy. --resolution lowest-direct pins the declared dependencies to
       # their floors and leaves transitives alone.
+      #
+      # --no-default-groups is load-bearing, not tidiness: a bare
+      # `--group test` ALSO installs the default `dev` group, and `dev` pulls
+      # in `test` plus ruff/mypy/bandit/twine -- so the floors job would
+      # additionally resolve every linter to its oldest permitted release and
+      # fail on tooling that has nothing to do with the declared runtime
+      # floors. This installs exactly the `test` group and the runtime deps.
       - name: Resolve the declared floors
-        run: uv sync --resolution lowest-direct --extra test
+        run: uv sync --resolution lowest-direct --no-default-groups --group test
 
       # The sync alone proves nothing: a bogus floor still resolves fine. Only
       # importing and running the code catches it, so this job must execute
@@ -235,6 +216,7 @@ jobs:
   docker:
     name: Build Docker image
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -254,6 +236,7 @@ jobs:
   docs:
     name: Build documentation
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -269,13 +252,21 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
 
+      # --no-default-groups keeps this to mkdocs and the runtime deps; a bare
+      # `--group docs` would drag in the whole `dev` group as well.
       - name: Install dependencies
-        run: uv sync --locked --extra docs
+        run: uv sync --locked --no-default-groups --group docs
 
       # --strict matches docs.yml and release.yml: without it a mkdocstrings
       # warning only surfaces at deploy time, after the merge.
       - name: Build documentation
         run: uv run mkdocs build --clean --strict
+
+      # --strict only proves nothing warned, not that anything rendered. The
+      # landing page's mermaid diagram shipped as literal `graph TB` text for a
+      # year while every strict build passed, so assert the rendered HTML.
+      - name: Check documentation rendered
+        run: ./scripts/check-docs-render.sh site
 
       - name: Upload docs artifact
         uses: actions/upload-artifact@v7

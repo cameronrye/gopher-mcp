@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Annotated, Any, Self
 
 import structlog
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 # List fields are annotated ``NoDecode`` so pydantic-settings hands the raw
@@ -54,7 +54,22 @@ def _split_list_value(value: str) -> list[str]:
     return [entry.strip() for entry in stripped.split(",") if entry.strip()]
 
 
-def _parse_host_allowlist(v: None | str | list[str], env_var: str) -> list[str] | None:
+def env_var_for(model: type[BaseSettings], field_name: str) -> str:
+    """Name the environment variable a settings field is read from.
+
+    Args:
+        model: The settings class the field is declared on.
+        field_name: The field's Python name.
+
+    Returns:
+        The environment variable an operator would set, e.g.
+        ``GOPHER_TIMEOUT_SECONDS``.
+    """
+    prefix: str = model.model_config.get("env_prefix", "")
+    return f"{prefix}{field_name}".upper()
+
+
+def _parse_host_allowlist(v: str | list[str] | None, env_var: str) -> list[str] | None:
     """Parse a host allowlist from an environment variable.
 
     Args:
@@ -83,7 +98,7 @@ def _parse_host_allowlist(v: None | str | list[str], env_var: str) -> list[str] 
     return hosts
 
 
-def _parse_port_allowlist(v: None | str | list[int], env_var: str) -> list[int] | None:
+def _parse_port_allowlist(v: str | list[int] | None, env_var: str) -> list[int] | None:
     """Parse a port allowlist from an environment variable.
 
     Args:
@@ -226,11 +241,11 @@ class _ProtocolConfig(BaseSettings):
     @classmethod
     def _env_var(cls, field_name: str) -> str:
         """Name the environment variable a field is read from, for messages."""
-        return f"{cls.model_config.get('env_prefix', '')}{field_name}".upper()
+        return env_var_for(cls, field_name)
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod
-    def parse_allowed_hosts(cls, v: None | str | list[str]) -> list[str] | None:
+    def parse_allowed_hosts(cls, v: str | list[str] | None) -> list[str] | None:
         """Parse comma-separated allowed hosts from environment variable."""
         return _parse_host_allowlist(v, cls._env_var("allowed_hosts"))
 
@@ -238,7 +253,7 @@ class _ProtocolConfig(BaseSettings):
     # port differs), so the field is absent from this class at decoration time.
     @field_validator("allowed_ports", mode="before", check_fields=False)
     @classmethod
-    def parse_allowed_ports(cls, v: None | str | list[int]) -> list[int] | None:
+    def parse_allowed_ports(cls, v: str | list[int] | None) -> list[int] | None:
         """Parse a comma-separated port allowlist from an environment variable."""
         return _parse_port_allowlist(v, cls._env_var("allowed_ports"))
 
@@ -381,7 +396,7 @@ class GeminiConfig(_ProtocolConfig):
 
     @field_validator("denied_mime_types", mode="before")
     @classmethod
-    def parse_denied_mime_types(cls, v: None | str | list[str]) -> list[str]:
+    def parse_denied_mime_types(cls, v: str | list[str] | None) -> list[str]:
         """Parse a comma-separated MIME deny list from an environment variable."""
         if v is None or v == "":
             return []
@@ -403,7 +418,9 @@ class ServerConfig(BaseSettings):
     )
     log_file_path: Path | None = Field(
         default=None,
-        description="Log file path (optional, logs to stdout if not set)",
+        description="Optional file to mirror logs to; logs always go to stderr "
+        "(never stdout, which carries the MCP protocol stream), and the file "
+        "receives a copy of the same records rather than a redirect.",
     )
 
     @field_validator("log_file_path", mode="before")
@@ -473,12 +490,53 @@ def reset_config() -> None:
     _config = None
 
 
+def describe_config_error(exc: ValidationError) -> list[str]:
+    """Render a settings ValidationError as operator-facing lines.
+
+    Pydantic reports the *field* and the *model class* that rejected a value
+    (``timeout_seconds`` on ``GopherConfig``), but the only thing the operator
+    ever touched is an environment variable, so resolve the pair back to the
+    name they can actually edit. The raw traceback is 26 lines of pydantic
+    internals for what is almost always a typo in ``.env``.
+
+    Args:
+        exc: The error raised while constructing a settings object.
+
+    Returns:
+        One line per validation error, each naming the environment variable,
+        what was wrong (pydantic's message carries the accepted range) and the
+        value that was rejected.
+    """
+    model = _CONFIG_MODELS.get(exc.title)
+    lines: list[str] = []
+    for error in exc.errors():
+        field = str(error["loc"][0]) if error["loc"] else ""
+        name = env_var_for(model, field) if model is not None and field else exc.title
+        # Validators raise ValueError; pydantic prefixes the message with a
+        # label that means nothing to an operator reading a startup failure.
+        message = error["msg"].removeprefix("Value error, ")
+        value = error.get("input")
+        # The hand-written validator messages already quote the value (and the
+        # variable name); don't say it twice.
+        if repr(value) not in message:
+            message = f"{message} (got {value!r})"
+        lines.append(message if message.startswith(name) else f"{name}: {message}")
+    return lines
+
+
+# Resolves the model name pydantic puts in a ValidationError back to the class,
+# and so to its env_prefix.
+_CONFIG_MODELS: dict[str, type[BaseSettings]] = {
+    cls.__name__: cls for cls in (GopherConfig, GeminiConfig, ServerConfig, AppConfig)
+}
+
+
 class _TeeStream:
     """Write-only text stream that fans each write out to several streams.
 
-    structlog's PrintLogger writes every rendered line to a single file
-    object; teeing stderr and a log file lets the configured file receive the
-    same records without a second open handle or a stdlib logging bridge.
+    A StreamHandler writes every rendered line to a single file object; teeing
+    stderr and a log file lets the configured file receive the same records
+    without a second handler to keep in step.
     """
 
     def __init__(self, *streams: Any) -> None:
@@ -516,10 +574,9 @@ def configure_logging(config: ServerConfig | None = None) -> None:
             _log_file_handle.close()
         _log_file_handle = None
 
-    # Every module logs through structlog, whose PrintLogger writes to one
-    # stream. A stdlib FileHandler would therefore never see those records, so
-    # mirror to the file by teeing stderr + the file and pointing both stdlib
-    # logging and structlog at that single stream.
+    # One handler writes every record, so the file is mirrored by teeing stderr
+    # and the file into that single stream rather than by adding a second
+    # handler that would have to be kept in step with the first.
     log_stream: Any = sys.stderr
     if config.log_file_path:
         # Long-lived handle: logging writes through it for the process lifetime,
@@ -529,26 +586,58 @@ def configure_logging(config: ServerConfig | None = None) -> None:
         _log_file_handle = log_file
         log_stream = _TeeStream(sys.stderr, log_file)
 
-    logging.basicConfig(
-        level=level,
-        handlers=[logging.StreamHandler(log_stream)],
-        format="%(message)s",
-        force=True,
-    )
-
+    # Shared by both halves of the pipeline below, so a record's shape does not
+    # depend on which library emitted it.
     processors: list[Any] = [
         structlog.contextvars.merge_contextvars,
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
     ]
-    if config.structured_logging:
-        processors.append(structlog.processors.JSONRenderer())
-    else:
-        processors.append(structlog.dev.ConsoleRenderer(colors=False))
+    renderer: Any = (
+        structlog.processors.JSONRenderer()
+        if config.structured_logging
+        else structlog.dev.ConsoleRenderer(colors=False)
+    )
+
+    # Everything reaches the same handler, structlog and stdlib alike. Our own
+    # modules are not the only things that log: the MCP SDK and uvicorn use
+    # stdlib logging, and while structlog rendered through its own PrintLogger
+    # those records went out raw -- so a stream promised to be line-delimited
+    # JSON carried "Processing request of type ListToolsRequest" in the middle
+    # of it, and the log file mirrored none of them.
+    handler = logging.StreamHandler(log_stream)
+    handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            # A stdlib record arrives with none of the keys the chain above adds
+            # for our own events, so give foreign records the same treatment
+            # (plus the logger name, which is how an operator tells "uvicorn"
+            # from "gopher_mcp.server").
+            foreign_pre_chain=[
+                structlog.stdlib.add_log_level,
+                structlog.stdlib.add_logger_name,
+                structlog.processors.TimeStamper(fmt="iso"),
+            ],
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                # Without this a caught exception is reported as the bare token
+                # ``"exc_info": true`` (ours) or a list of three reprs
+                # (uvicorn's) -- the traceback, the only part worth logging,
+                # was dropped on the floor either way.
+                structlog.processors.format_exc_info,
+                renderer,
+            ],
+        )
+    )
+    logging.basicConfig(level=level, handlers=[handler], force=True)
 
     structlog.configure(
-        processors=processors,
+        processors=[
+            *processors,
+            # Hand the event dict to the formatter above instead of rendering it
+            # here; the renderer now runs in exactly one place.
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+        ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
-        logger_factory=structlog.PrintLoggerFactory(file=log_stream),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )

@@ -8,6 +8,15 @@ twice. This base class holds the one implementation, parameterised by the few
 things that genuinely differ (agent tokens, the robots fail-open/closed choice,
 the parsed-URL type); each client supplies only ``_fetch_content`` and
 ``_fetch_robots``.
+
+The per-fetch wire-time budget is deliberately NOT one of those things. Each
+client still owns its own (``gopher_client``'s ``_spend_budget``, and
+``gemini_client``'s inline arithmetic), because unifying them rewires both
+timeout paths and deserves its own change and tests. A third copy did live here
+for a while, unused by anything -- which is worse than two, since it reads like
+the shared implementation and a fix applied to it would change no behaviour at
+all. Move the clients onto a copy here, or leave the copy out; do not park one
+here unwired.
 """
 
 import asyncio
@@ -18,7 +27,7 @@ from typing import ClassVar, Generic, Protocol, TypeVar
 import structlog
 
 from .cache import TTLCacheMixin
-from .models import ErrorResult
+from .models import ErrorResult, iso_utc
 from .ratelimit import RateLimiter
 from .robots import AI_AGENT_TOKENS, RobotsGate
 from .ssrf import normalize_host
@@ -51,6 +60,17 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
     _robots_tokens: ClassVar[tuple[str, ...]]
     #: What the robots gate does when a policy cannot be retrieved.
     _robots_fail_closed: ClassVar[bool]
+    #: Field on this protocol's results that carries the content length.
+    #:
+    #: One concept, two wire names: Gopher results call it ``bytes``
+    #: (``TextResult``/``BinaryResult``) and Gemini results call it ``size``
+    #: (``GeminiSuccessResult``/``GeminiBinaryResult``/``GeminiGemtextResult``).
+    #: The names are part of the published tool output that
+    #: ``docs/api-reference.md`` documents, so they are NOT unified on the wire
+    #: -- renaming either would break every consumer. This indirection keeps the
+    #: divergence in one place instead of making every protocol-agnostic caller
+    #: know which protocol says which.
+    _response_size_field: ClassVar[str]
 
     def __init__(
         self,
@@ -138,9 +158,17 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
         self.respect_robots_txt = respect_robots_txt
         self._robots_gate = (
             RobotsGate(
-                # Resolved at call time rather than bound here, so the
-                # gate follows the method (and stays patchable in tests).
-                fetcher=lambda host, port: self._fetch_robots(host, port),
+                # Resolved at call time rather than bound here, so the gate
+                # follows the method. `fetcher=self._fetch_robots` would
+                # capture the bound method now, and every test that swaps the
+                # fetcher after construction -- `patch.object(client,
+                # "_fetch_robots")` in test_robots.py and test_cache_freshness,
+                # `patch.object(GopherClient, "_fetch_robots", ...)` in
+                # test_integration.py and test_mcp_protocol.py -- would go on
+                # hitting the network through the stale reference.
+                fetcher=lambda host, port: self._fetch_robots(  # noqa: PLW0108
+                    host, port
+                ),
                 tokens=self._robots_tokens,
                 extra_tokens=(AI_AGENT_TOKENS if robots_honor_ai_tokens else ()),
                 ttl_seconds=robots_cache_ttl_seconds,
@@ -150,6 +178,16 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
             if respect_robots_txt
             else None
         )
+
+    def _response_size(self, response: ResponseT) -> int:
+        """Return ``response``'s content length, whatever this protocol calls it.
+
+        Defaults to 0 for the members of the response union that carry no body
+        at all (menus, errors, redirects, input prompts), which is what the log
+        lines want: "no bytes of content", not "unknown".
+        """
+        size = getattr(response, self._response_size_field, 0)
+        return size if isinstance(size, int) else 0
 
     def _host_is_allowed(self, host: str) -> bool:
         """Return whether ``host`` passes the configured allowlist.
@@ -177,7 +215,7 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
         )
         return ErrorResult(
             error={"code": code, "message": message},
-            requestInfo={"url": safe_url, "timestamp": time.time()},
+            request_info={"url": safe_url, "timestamp": iso_utc(time.time())},
         )
 
     async def _bounded_fetch(self, parsed_url: UrlT) -> ResponseT:

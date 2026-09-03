@@ -7,7 +7,9 @@ tests pin both halves of the fix -- the provenance a cached result carries, and
 the `refresh` argument that skips the cache for one read.
 """
 
+import re
 import time
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,6 +24,22 @@ from gopher_mcp.models import (
     mark_from_cache,
 )
 from gopher_mcp.server import gemini_fetch, gopher_fetch, mcp
+
+# Every instant a result reports looks like this and nothing else.
+_ISO_UTC = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00")
+
+
+def _reported_instant(reported: object) -> datetime:
+    """Read a reported instant back, insisting on the one wire format.
+
+    Results report instants as ISO-8601 UTC strings rather than epoch floats,
+    so the assertions below compare instants. Parsing here (instead of calling
+    the production `iso_utc`) keeps the expected value derived from the cache
+    entry itself rather than from the code under test.
+    """
+    assert isinstance(reported, str), f"expected an ISO-8601 string, got {reported!r}"
+    assert _ISO_UTC.fullmatch(reported), f"{reported!r} is not ISO-8601 UTC"
+    return datetime.fromisoformat(reported)
 
 
 def _gemini_result(content: str = "hello") -> GeminiSuccessResult:
@@ -75,13 +93,20 @@ class TestCachedResponsesAreMarkedCached:
         with patch.object(client, "_fetch_content") as mock_fetch:
             mock_fetch.return_value = TextResult(text="fresh", bytes=5)
             first = await client.fetch(url)
+            # Backdate the stored entry rather than sleeping, so "when this
+            # copy was fetched" and "now" are two minutes apart. The reported
+            # instant has one-second resolution: without the gap, a result that
+            # wrongly stamped the replay's own clock would read the same.
+            client._cache[url].timestamp = time.time() - 120
             second = await client.fetch(url)
 
         assert mock_fetch.call_count == 1
         assert second.cached is True
         # The timestamp is when the copy was actually fetched, which is the
-        # provenance already recorded on the entry -- not "now".
-        assert second.cached_at == client._cache[url].timestamp
+        # provenance already recorded on the entry -- not "now". Reported to
+        # whole seconds, so the entry's own instant is truncated to match.
+        entry_at = datetime.fromtimestamp(client._cache[url].timestamp, UTC)
+        assert _reported_instant(second.cached_at) == entry_at.replace(microsecond=0)
         assert second.cache_age_seconds is not None
         assert second.cache_age_seconds >= 0
         # The fresh response must not be retroactively marked by the replay.
@@ -99,11 +124,17 @@ class TestCachedResponsesAreMarkedCached:
         with patch.object(client, "_fetch_content") as mock_fetch:
             mock_fetch.return_value = _gemini_result()
             first = await client.fetch(url)
+            # Backdate the stored entry rather than sleeping, so "when this
+            # copy was fetched" and "now" are two minutes apart. The reported
+            # instant has one-second resolution: without the gap, a result that
+            # wrongly stamped the replay's own clock would read the same.
+            client._cache[url].timestamp = time.time() - 120
             second = await client.fetch(url)
 
         assert mock_fetch.call_count == 1
         assert second.cached is True
-        assert second.cached_at == client._cache[url].timestamp
+        entry_at = datetime.fromtimestamp(client._cache[url].timestamp, UTC)
+        assert _reported_instant(second.cached_at) == entry_at.replace(microsecond=0)
         assert first.cached is False
 
     @pytest.mark.asyncio
@@ -139,13 +170,80 @@ class TestCachedResponsesAreMarkedCached:
         assert stored.cached_at is None
 
     def test_mark_from_cache_returns_a_copy(self):
+        """The caller still passes a UNIX timestamp in; the copy reports it as
+        an ISO-8601 UTC string, which is what the model reads."""
         response = MenuResult(items=[])
         marked = mark_from_cache(response, cached_at=1000.0)
 
         assert marked is not response
         assert marked.cached is True
-        assert marked.cached_at == 1000.0
+        assert marked.cached_at == "1970-01-01T00:16:40+00:00"
         assert response.cached is False
+
+
+class TestReportedInstantsShareOneFormat:
+    """One payload must never spell the same concept two ways.
+
+    `cached_at` and `request_info["timestamp"]` both name an instant, and a
+    replayed result carries both at once. Reporting one as an ISO-8601 string
+    while the other stayed an epoch float left a model doing arithmetic on one
+    and string handling on the other, and invited it to read either as the
+    other -- the same clash that made `expires` two formats across the two
+    certificate tools. These assert on `model_dump()`, because the format only
+    matters where the model actually reads it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_replayed_gopher_payload_reports_both_the_same_way(self):
+        client = GopherClient(respect_robots_txt=False)
+        url = "gopher://example.com/0/a.txt"
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = TextResult(text="fresh", bytes=5)
+            await client.fetch(url)
+            replayed = await client.fetch(url)
+
+        payload = replayed.model_dump()
+        cached_at = _reported_instant(payload["cached_at"])
+        requested_at = _reported_instant(payload["request_info"]["timestamp"])
+        # Both name the same fetch -- the request that populated the entry --
+        # so agreeing on format is not enough: they have to agree on the
+        # instant too, or one of them is reporting the replay instead.
+        assert abs((cached_at - requested_at).total_seconds()) <= 2
+
+    @pytest.mark.asyncio
+    async def test_a_replayed_gemini_payload_reports_both_the_same_way(self):
+        client = GeminiClient(
+            tofu_enabled=False,
+            client_certs_enabled=False,
+            respect_robots_txt=False,
+        )
+        url = "gemini://example.org/"
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = _gemini_result()
+            await client.fetch(url)
+            replayed = await client.fetch(url)
+
+        payload = replayed.model_dump()
+        cached_at = _reported_instant(payload["cached_at"])
+        requested_at = _reported_instant(payload["request_info"]["timestamp"])
+        assert abs((cached_at - requested_at).total_seconds()) <= 2
+
+    def test_a_fresh_error_reports_its_instant_the_same_way(self):
+        """Errors carry no cache provenance, so `request_info` is the only
+        instant they report -- and it is the same spelling. This one is built
+        by the shared error path every protocol funnels its failures through."""
+        client = GopherClient(respect_robots_txt=False)
+
+        result = client._error_result(
+            "gopher://example.com/0/a.txt",
+            "TIMEOUT",
+            "The server did not answer in time.",
+            TimeoutError("slow"),
+        )
+
+        _reported_instant(result.model_dump()["request_info"]["timestamp"])
 
 
 class TestRefreshBypassesTheCache:
@@ -153,13 +251,21 @@ class TestRefreshBypassesTheCache:
 
     @pytest.mark.asyncio
     async def test_gopher_refresh_refetches_and_repopulates(self):
-        client = GopherClient(respect_robots_txt=False)
+        # Three reads of one URL. Robots is off, so there is no probe whose
+        # rate-limit slot the fetch could inherit and each read would wait a
+        # full politeness interval; this test is about the cache, not spacing.
+        client = GopherClient(respect_robots_txt=False, requests_per_minute=0)
         url = "gopher://example.com/0/a.txt"
 
         with patch.object(client, "_fetch_content") as mock_fetch:
             mock_fetch.return_value = TextResult(text="fresh", bytes=5)
             await client.fetch(url)
             refreshed = await client.fetch(url, refresh=True)
+            # Backdate the stored entry rather than sleeping, so "when this
+            # copy was fetched" and "now" are two minutes apart. The reported
+            # instant has one-second resolution: without the gap, a result that
+            # wrongly stamped the replay's own clock would read the same.
+            client._cache[url].timestamp = time.time() - 120
             replayed = await client.fetch(url)
 
         # The bypassing fetch really went to the server ...
@@ -167,14 +273,18 @@ class TestRefreshBypassesTheCache:
         assert refreshed.cached is False
         # ... and its response is what later reads are served from.
         assert replayed.cached is True
-        assert replayed.cached_at == client._cache[url].timestamp
+        entry_at = datetime.fromtimestamp(client._cache[url].timestamp, UTC)
+        assert _reported_instant(replayed.cached_at) == entry_at.replace(microsecond=0)
 
     @pytest.mark.asyncio
     async def test_gemini_refresh_refetches_and_repopulates(self):
+        # See the Gopher twin above: three reads of one URL, and spacing them is
+        # not what is under test.
         client = GeminiClient(
             tofu_enabled=False,
             client_certs_enabled=False,
             respect_robots_txt=False,
+            requests_per_minute=0,
         )
         url = "gemini://example.org/"
 

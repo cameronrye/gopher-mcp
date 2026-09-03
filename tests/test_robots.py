@@ -27,6 +27,7 @@ from gopher_mcp.robots import (
     RobotsGate,
     RobotsUnavailable,
     _matches,
+    expand_path_candidates,
     gopher_candidate_paths,
     parse_robots,
 )
@@ -288,6 +289,36 @@ class TestRobotsUnavailableBackoff:
         assert (await gate.allows("dead.example", 70, ["/y"])).allowed is True
         assert (await gate.allows("dead.example", 70, ["/z"])).allowed is True
         assert len(calls) == 1, "an unreachable host was re-probed within the backoff"
+
+    async def test_queued_waiters_do_not_each_reprobe_a_dead_host(self):
+        """The re-check inside the per-host lock consulted only the cache, so a
+        failure the waiter ahead had just recorded was invisible and every
+        queued coroutine probed again in turn: a 5-URL batch to an unreachable
+        host paid five connect timeouts, serially, inside the very lock that
+        exists to make it one request."""
+        calls = []
+
+        async def fetcher(host, port):
+            calls.append((host, port))
+            # Yield so the other four are queued on the lock, not merely
+            # sequenced behind a synchronous raise.
+            await asyncio.sleep(0)
+            raise RobotsUnavailable("connect timeout")
+
+        gate = RobotsGate(
+            fetcher=fetcher,
+            tokens=("*",),
+            ttl_seconds=86400,
+            fail_closed=True,
+        )
+        decisions = await asyncio.gather(
+            *[gate.allows("dead.example", 1965, [f"/p{i}"]) for i in range(5)]
+        )
+
+        assert len(calls) == 1, "each waiter re-probed the dead host in turn"
+        # Fail-closed, and every one of them can still say what went wrong.
+        assert [d.allowed for d in decisions] == [False] * 5
+        assert {d.detail for d in decisions} == {"connect timeout"}
 
     async def test_failure_is_retried_after_the_backoff(self):
         calls = []
@@ -705,6 +736,37 @@ class TestGopherClientIntegration:
             result = await client.fetch("gopher://example.com/0/page")
         assert isinstance(result, ErrorResult)
         assert result.error["code"] == "BLOCKED_BY_ROBOTS"
+        await client.close()
+
+    async def test_disallow_message_does_not_tell_the_model_to_turn_robots_off(self):
+        """The tool result is read by the model, not the operator.
+
+        Its single actionable sentence used to be an unconditional "set
+        GOPHER_RESPECT_ROBOTS_TXT=false", which contradicts the shipped
+        AI-assistant guide ("do not suggest disabling robots checking unless the
+        user has said they operate the host"). The Gemini half of this pair is
+        pinned by tests/test_gemini_client.py; without this one the Gopher half
+        drifted back unnoticed.
+        """
+        client = GopherClient(
+            cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
+        )
+        client._fetch_content = _fake_gopher_content()
+        with patch.object(
+            client, "_fetch_robots", return_value="User-agent: *\nDisallow: /\n"
+        ):
+            result = await client.fetch("gopher://example.com/0/page")
+
+        assert isinstance(result, ErrorResult)
+        assert result.error["code"] == "BLOCKED_BY_ROBOTS"
+        message = result.error["message"]
+        # The operator's decision and the correct next step come first...
+        assert "operator's decision" in message
+        assert "do not retry" in message
+        assert "Tell the user the resource is excluded" in message
+        # ...and the override is still named, but only under its condition.
+        assert "GOPHER_RESPECT_ROBOTS_TXT=false" in message
+        assert "a host the user has said they operate" in message
         await client.close()
 
     async def test_allowed_path_still_fetches(self):
@@ -1195,6 +1257,46 @@ class TestReviewRegressions:
         policy = parse_robots("User-agent: *\nDisallow: /%7Eprivate/\n")
         assert policy.is_allowed(["/~private/x"], ("*",)) is False
 
+    def test_dot_segments_cannot_bypass_a_directory_rule(self):
+        """``normpath`` drops the trailing slash, and the resulting "/private"
+        then fails the "/private/" prefix test -- so restoring the slash is the
+        whole reason the dotted spelling is caught. Without it the request below
+        is allowed."""
+        assert expand_path_candidates(["/x/../private/"]) == [
+            "/x/../private/",
+            "/private/",
+        ]
+        policy = parse_robots("User-agent: *\nDisallow: /private/\n")
+        assert policy.is_allowed(["/x/../private/"], ("*",)) is False
+
+    def test_empty_user_agent_value_names_nobody(self):
+        """A bare "User-agent:" identifies no agent, so it must not open a group
+        under the empty string (which no token could ever match) nor hand its
+        rules to the record that follows."""
+        policy = parse_robots(
+            "User-agent:\nDisallow: /nope\n\nUser-agent: *\nDisallow: /private/\n"
+        )
+        assert policy.groups == {"*": ["/private/"]}
+        assert policy.is_allowed(["/nope"], ("*",)) is True
+        assert policy.is_allowed(["/private/x"], ("*",)) is False
+
+    async def test_idn_host_spellings_share_one_policy(self):
+        """The gate keys on the same normalizer as the SSRF and TOFU layers, so
+        the Unicode and punycode spellings of one capsule get one probe and one
+        policy -- not a second, unchecked bucket at the same server."""
+        calls = []
+
+        async def fetcher(host, port):
+            calls.append(host)
+            return "User-agent: *\nDisallow: /\n"
+
+        gate = RobotsGate(
+            fetcher=fetcher, tokens=("*",), ttl_seconds=60, fail_closed=False
+        )
+        assert (await gate.allows("exämple.org", 1965, ["/x"])).allowed is False
+        assert (await gate.allows("xn--exmple-cua.org", 1965, ["/x"])).allowed is False
+        assert len(calls) == 1
+
     def test_trailing_dot_host_shares_one_policy(self):
         """A FQDN trailing dot must not create a second, unchecked bucket."""
 
@@ -1397,13 +1499,24 @@ class TestReviewRegressions:
 
     async def test_a_slow_down_does_not_also_arm_the_generic_backoff(self):
         """Being rate limited already costs a rate-limiter penalty; adding the
-        robots backoff on top refuses requests the capsule would have served."""
+        robots backoff on top refuses requests the capsule would have served.
+
+        The period is read from ``error["meta"]`` -- the capsule's own text.
+        ``error["message"]`` carries this server's prose, as it does in a real
+        result, so a reader that went back to it would find no number and fall
+        through to the 60-second default instead of the 5 seconds named here.
+        """
         client = GeminiClient(
             cache_enabled=False, requests_per_minute=0, respect_robots_txt=True
         )
         client._fetch_content = _fake_gemini_content(
             robots=GeminiErrorResult(
-                error={"code": "TEMPORARY_ERROR", "message": "5", "status": 44}
+                error={
+                    "code": "TEMPORARY_ERROR",
+                    "message": "The capsule answered status 44 (SLOW DOWN).",
+                    "meta": "5",
+                    "status": 44,
+                }
             )
         )
         await client.fetch("gemini://example.com/page")
@@ -1431,7 +1544,12 @@ class TestReviewRegressions:
         )
         client._fetch_content = _fake_gemini_content(
             robots=GeminiErrorResult(
-                error={"code": "TEMPORARY_ERROR", "message": "inf", "status": 44}
+                error={
+                    "code": "TEMPORARY_ERROR",
+                    "message": "The capsule answered status 44 (SLOW DOWN).",
+                    "meta": "inf",
+                    "status": 44,
+                }
             )
         )
         await client.fetch("gemini://example.com/page")
@@ -1641,7 +1759,12 @@ class TestReviewRegressions:
             )
             client._fetch_content = _fake_gemini_content(
                 robots=GeminiErrorResult(
-                    error={"code": "TEMPORARY_ERROR", "message": meta, "status": 44}
+                    error={
+                        "code": "TEMPORARY_ERROR",
+                        "message": "The capsule answered status 44 (SLOW DOWN).",
+                        "meta": meta,
+                        "status": 44,
+                    }
                 )
             )
             await client.fetch("gemini://example.com/page")

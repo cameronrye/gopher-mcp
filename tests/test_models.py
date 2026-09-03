@@ -12,6 +12,7 @@ from gopher_mcp.models import (
     GopherURL,
     MenuResult,
     TextResult,
+    mark_from_cache,
 )
 
 
@@ -35,6 +36,38 @@ class TestGopherFetchRequest:
         url = "gopher://gopher.floodgap.com:70/1/world"
         request = GopherFetchRequest(url=url)
         assert request.url == url
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "GOPHER://example.com/1/",
+            "Gopher://example.com/1/",
+            "gOpHeR://example.com/1/",
+        ],
+    )
+    def test_the_scheme_is_matched_case_insensitively(self, url):
+        """RFC 3986 s3.1 makes the scheme case-insensitive, and the parsers
+        accept a capitalised one. Matching it literally *here* -- at the MCP
+        tool boundary, which the caller hits first -- rejected as
+        INVALID_REQUEST a URL the parser behind it would have accepted."""
+        request = GopherFetchRequest(url=url)
+
+        # Canonicalised, so nothing downstream sees one entry per spelling.
+        assert request.url == "gopher://example.com/1/"
+
+    def test_a_case_insensitive_match_does_not_admit_another_scheme(self):
+        """Only the case is forgiven; the scheme itself is still checked."""
+        with pytest.raises(ValidationError) as exc_info:
+            GopherFetchRequest(url="GEMINI://example.com/")
+
+        assert "URL must start with 'gopher://'" in str(exc_info.value)
+
+    def test_a_bare_host_is_still_rejected(self):
+        """``partition`` finds no separator, so the message is unchanged."""
+        with pytest.raises(ValidationError) as exc_info:
+            GopherFetchRequest(url="gopher.floodgap.com")
+
+        assert "URL must start with 'gopher://'" in str(exc_info.value)
 
 
 class TestGopherMenuItem:
@@ -285,3 +318,58 @@ class TestCacheEntry:
 
         # Expired
         assert entry.is_expired(1400.0)  # 400 seconds later
+
+
+class TestCacheProvenance:
+    """What a replayed result says about when it was fetched."""
+
+    def test_cached_at_is_reported_as_an_iso_8601_utc_string(self):
+        """An epoch float made the model do arithmetic to answer "how old is
+        this?", and clashed with the ISO timestamps the certificate tools
+        report. The caller still passes a UNIX timestamp in."""
+        marked = mark_from_cache(TextResult(text="hi", bytes=2), cached_at=1640995200.0)
+
+        assert marked.cached is True
+        assert marked.cached_at == "2022-01-01T00:00:00+00:00"
+        assert marked.model_dump()["cached_at"] == "2022-01-01T00:00:00+00:00"
+
+    def test_marking_does_not_touch_the_stored_response(self):
+        """The cache hands back the instance it holds, so tagging must copy."""
+        stored = TextResult(text="hi", bytes=2)
+
+        mark_from_cache(stored, cached_at=1640995200.0)
+
+        assert stored.cached is False
+        assert stored.cached_at is None
+
+
+class TestContinuationContract:
+    """A truncated result has to say how much is missing and where to resume."""
+
+    def test_a_menu_carries_an_item_count_and_an_offset(self):
+        result = MenuResult(items=[], truncated=True, total_items=120, next_offset=50)
+
+        dumped = result.model_dump()
+        assert dumped["total_items"] == 120
+        assert dumped["next_offset"] == 50
+
+    def test_a_text_body_counts_characters_not_bytes(self):
+        """An offset into a body is a character position: a byte offset cannot
+        be handed back without the risk of splitting a UTF-8 sequence."""
+        result = TextResult(
+            text="Hello, 世界",
+            bytes=13,
+            truncated=True,
+            total_chars=4096,
+            next_offset=9,
+        )
+
+        assert result.total_chars == 4096
+        assert result.next_offset == 9
+
+    def test_an_untruncated_result_claims_nothing(self):
+        """Nothing populates these yet, and a wrong number is worse than none."""
+        result = MenuResult(items=[])
+
+        assert result.total_items is None
+        assert result.next_offset is None

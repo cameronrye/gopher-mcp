@@ -11,6 +11,7 @@ longer degrade unrelated requests.
 
 import asyncio
 import contextlib
+import hashlib
 import socket
 import ssl
 import time
@@ -18,6 +19,9 @@ from dataclasses import dataclass
 from typing import Any
 
 import structlog
+from cryptography import x509
+
+from .helpers import describe_oserror
 
 logger = structlog.get_logger(__name__)
 
@@ -123,6 +127,13 @@ class GeminiTLSClient:
 
     def _create_ssl_context(self) -> ssl.SSLContext:
         """Create SSL context with secure defaults.
+
+        A client certificate loaded here is presented during the handshake, and
+        the handshake runs under ``CERT_NONE`` -- peer authentication in Gemini
+        is the TOFU pin, which ``GeminiClient._fetch_content`` can only check
+        once the connection is up. So the identity reaches the peer before it is
+        known to be the pinned one; see that method's docstring for what an
+        on-path attacker learns, and why the extra round trip is not paid.
 
         Returns:
             Configured SSL context
@@ -254,7 +265,13 @@ class GeminiTLSClient:
             # The one genuinely TLS-level failure in this set.
             raise TLSConnectionError(f"TLS handshake failed: {e}", e) from e
         except OSError as e:
-            raise GeminiConnectionError(f"Connection failed: {e}", e) from e
+            # Not ``{e}``: asyncio embeds the connect sockaddr (the resolved
+            # IP we vetted for SSRF) inside the OSError's strerror, so
+            # interpolating the exception echoes it back to the caller. See
+            # ``describe_oserror``.
+            raise GeminiConnectionError(
+                f"Connection failed: {describe_oserror(e)}", e
+            ) from e
 
         ssl_object = writer.get_extra_info("ssl_object")
         connection_info = self._get_connection_info(
@@ -307,8 +324,6 @@ class GeminiTLSClient:
 
             # Add certificate fingerprint if available
             if peer_cert:
-                import hashlib
-
                 fingerprint = hashlib.sha256(peer_cert).hexdigest()
                 info["cert_fingerprint"] = f"sha256:{fingerprint}"
 
@@ -328,8 +343,6 @@ class GeminiTLSClient:
         if not peer_cert_der:
             return {}
         try:
-            from cryptography import x509
-
             cert = x509.load_der_x509_certificate(peer_cert_der)
             return {
                 "subject": cert.subject.rfc4514_string(),

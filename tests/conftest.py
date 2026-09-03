@@ -1,9 +1,24 @@
 """Pytest configuration and shared fixtures for gopher-mcp tests."""
 
+import pathlib
 from pathlib import Path
-from unittest.mock import AsyncMock, Mock
 
 import pytest
+
+
+def redirect_state_environment(monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Point every environment input of the state-directory resolver at ``home``.
+
+    Separate from the fixture so ``tests/test_home_isolation.py`` can re-apply
+    it over a deliberately hostile environment and prove the coverage is
+    complete -- a check that would otherwise silently pass on any machine (CI
+    included) that happens to leave these variables unset.
+    """
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.setenv("XDG_DATA_HOME", str(home / ".local" / "share"))
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -17,14 +32,38 @@ def isolated_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     directory* -- creating ``~/.gemini/certs`` and ``~/.gemini/tofu.json``.
 
     ``Path.home()`` honours ``$HOME`` on POSIX and ``$USERPROFILE`` on Windows,
-    so monkeypatching both is the cleanest mechanism the code already supports;
-    it needs no knowledge of every ``get_home_directory`` import site. Returned
-    so tests that assert on the isolated location can request it by name.
+    so the two env vars are set first: that is the mechanism the code already
+    supports, and it needs no knowledge of every ``get_home_directory`` import
+    site.
+
+    The env vars alone are NOT enough, which is why ``Path.home`` itself is
+    replaced as well. A test wrapping its body in
+    ``patch.dict(os.environ, {}, clear=True)`` -- there are several -- drops
+    ``HOME`` along with everything else, and on POSIX ``Path.home()`` then falls
+    back to the *password database*, so it quietly returns the developer's real
+    home and the suite writes into a real ``~/.gemini``. That has happened
+    before (commit 8b857b6) and it fails silently: only Windows, which has no
+    such fallback, errors outright. Do not drop the ``setattr`` -- see
+    ``tests/test_home_isolation.py``, which pins this.
+
+    Redirecting home is likewise not isolation on its own, because
+    ``default_state_directory()`` consults the *environment* before it ever asks
+    for a home: ``XDG_DATA_HOME`` first on every platform, then
+    ``LOCALAPPDATA``/``APPDATA`` on Windows. On a machine that sets
+    ``XDG_DATA_HOME`` -- ordinary on Linux, and invisible on CI, which does not
+    -- every default client in the suite would share one real store and mint
+    trust pins and client-certificate private keys into the developer's data
+    directory. ``XDG_DATA_HOME`` is pointed *under* ``home`` rather than deleted
+    so the branch production actually takes on Linux stays exercised; the few
+    tests that assert the unset behaviour ``delenv`` it themselves.
+
+    Returned so tests that assert on the isolated location can request it by
+    name.
     """
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+    redirect_state_environment(monkeypatch, home)
+    monkeypatch.setattr(pathlib.Path, "home", classmethod(lambda cls: home))
     return home
 
 
@@ -67,170 +106,6 @@ def _reset_client_manager_singleton():
     ClientManager._instance = None
     yield
     ClientManager._instance = None
-
-
-@pytest.fixture
-def mock_gopher_server() -> Mock:
-    """Mock Gopher server for testing."""
-    server = Mock()
-    server.host = "gopher.example.com"
-    server.port = 70
-    return server
-
-
-@pytest.fixture
-async def mock_gopher_client() -> AsyncMock:
-    """Mock Gopher client for testing."""
-    client = AsyncMock()
-
-    # Mock menu response
-    client.fetch_menu.return_value = [
-        {
-            "type": "0",
-            "title": "Test Document",
-            "selector": "/test.txt",
-            "host": "gopher.example.com",
-            "port": 70,
-        },
-        {
-            "type": "1",
-            "title": "Test Directory",
-            "selector": "/testdir/",
-            "host": "gopher.example.com",
-            "port": 70,
-        },
-    ]
-
-    # Mock text response
-    client.fetch_text.return_value = "This is test content from a Gopher server."
-
-    # Mock binary response
-    client.fetch_binary.return_value = b"Binary content"
-
-    return client
-
-
-@pytest.fixture
-def sample_gopher_menu_response() -> str:
-    """Sample Gopher menu response for testing."""
-    return (
-        "0About Gopher\tabout\tgopher.example.com\t70\r\n"
-        "1Documents\tdocs/\tgopher.example.com\t70\r\n"
-        "7Search\tsearch\tsearch.example.com\t70\r\n"
-        ".\r\n"
-    )
-
-
-@pytest.fixture
-def sample_gopher_text_response() -> str:
-    """Sample Gopher text response for testing."""
-    return (
-        "Welcome to the Gopher protocol!\r\n"
-        "\r\n"
-        "This is a simple text document served via Gopher.\r\n"
-        ".\r\n"
-    )
-
-
-@pytest.fixture
-def sample_gopher_search_response() -> str:
-    """Sample Gopher search response for testing."""
-    return (
-        "0Python Tutorial\ttutorials/python.txt\tdocs.example.com\t70\r\n"
-        "0Python Reference\tref/python.txt\tdocs.example.com\t70\r\n"
-        ".\r\n"
-    )
-
-
-@pytest.fixture
-def mock_mcp_server() -> AsyncMock:
-    """Mock MCP server for testing."""
-    server = AsyncMock()
-    server.list_tools.return_value = [
-        {
-            "name": "gopher.fetch",
-            "description": "Fetch Gopher menus or text by URL.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["url"],
-                "properties": {"url": {"type": "string", "format": "uri"}},
-            },
-        }
-    ]
-    return server
-
-
-@pytest.fixture
-def sample_gopher_urls() -> dict[str, str]:
-    """Sample Gopher URLs for testing."""
-    return {
-        "menu": "gopher://gopher.example.com/1/",
-        "text": "gopher://gopher.example.com/0/about.txt",
-        "search": "gopher://search.example.com/7/search",
-        "binary": "gopher://gopher.example.com/9/file.bin",
-        "with_port": "gopher://gopher.example.com:7070/1/",
-        "with_search": "gopher://search.example.com/7/search%09python",
-    }
-
-
-@pytest.fixture
-def expected_menu_result() -> dict:
-    """Expected menu result structure for testing."""
-    return {
-        "kind": "menu",
-        "items": [
-            {
-                "type": "0",
-                "title": "About Gopher",
-                "selector": "about",
-                "host": "gopher.example.com",
-                "port": 70,
-                "nextUrl": "gopher://gopher.example.com:70/0about",
-            },
-            {
-                "type": "1",
-                "title": "Documents",
-                "selector": "docs/",
-                "host": "gopher.example.com",
-                "port": 70,
-                "nextUrl": "gopher://gopher.example.com:70/1docs/",
-            },
-            {
-                "type": "7",
-                "title": "Search",
-                "selector": "search",
-                "host": "search.example.com",
-                "port": 70,
-                "nextUrl": "gopher://search.example.com:70/7search",
-            },
-        ],
-    }
-
-
-@pytest.fixture
-def expected_text_result() -> dict:
-    """Expected text result structure for testing."""
-    return {
-        "kind": "text",
-        "charset": "utf-8",
-        "bytes": 85,
-        "text": (
-            "Welcome to the Gopher protocol!\n"
-            "\n"
-            "This is a simple text document served via Gopher."
-        ),
-    }
-
-
-@pytest.fixture
-def expected_error_result() -> dict:
-    """Expected error result structure for testing."""
-    return {
-        "error": {
-            "code": "ECONN",
-            "message": "dial tcp 203.0.113.1:70: i/o timeout",
-        }
-    }
 
 
 # Pytest configuration

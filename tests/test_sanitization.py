@@ -44,8 +44,50 @@ class TestSanitizeDisplayText:
         assert sanitize_display_text(once) == once
 
     def test_zero_width_format_characters_stripped(self):
-        # U+200B is category Cf: invisible, and not printable.
+        # U+200B is category Cf with no visible effect: a way to smuggle
+        # invisible text past a reader, so it stays stripped.
         assert sanitize_display_text("a\u200bb") == "ab"
+
+    @pytest.mark.parametrize(
+        "space",
+        [
+            "\u00a0",  # NBSP -- French typography, "10 km"
+            "\u2009",  # thin space
+            "\u3000",  # ideographic space, the CJK paragraph indent
+        ],
+    )
+    def test_unicode_spaces_survive(self, space):
+        """``str.isprintable()`` is False for every Zs but U+0020, so these were
+        being deleted outright -- fusing the words either side and losing a
+        Japanese page's indentation."""
+        assert sanitize_display_text(f"a{space}b") == f"a{space}b"
+
+    def test_zwj_emoji_sequence_is_not_split(self):
+        """U+200D is Cf, but dropping it turns one family glyph into three
+        separate people -- content mutation, not sanitisation."""
+        family = "\U0001f468\u200d\U0001f469\u200d\U0001f467"
+        assert sanitize_display_text(family) == family
+
+    def test_zwnj_survives(self):
+        # U+200C separates letters in Persian and Indic scripts.
+        assert sanitize_display_text("a\u200cb") == "a\u200cb"
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("a\u2028b", "ab"),  # Zl, line separator
+            ("a\u2029b", "ab"),  # Zp, paragraph separator
+            ("a\ue000b", "ab"),  # Co, private use
+        ],
+    )
+    def test_separators_and_private_use_stripped(self, raw, expected):
+        assert sanitize_display_text(raw) == expected
+
+    def test_unicode_spaces_survive_in_single_fields_too(self):
+        """``keep_whitespace=False`` drops line structure, not visible spaces."""
+        assert (
+            sanitize_display_text("a\u00a0b\nc", keep_whitespace=False) == "a\u00a0bc"
+        )
 
 
 class TestResolveGeminiReference:

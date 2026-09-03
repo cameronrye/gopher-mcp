@@ -4,6 +4,7 @@ import contextlib
 import hmac
 import json
 import os
+import sys
 import threading
 import time
 from collections.abc import Iterator
@@ -14,9 +15,9 @@ from typing import Any
 
 import structlog
 
+from .helpers import atomic_write_json, get_home_directory
 from .models import TOFUEntry
 from .ssrf import normalize_host
-from .utils import atomic_write_json, get_home_directory
 
 # fcntl is POSIX-only. The explicit ``ModuleType | None`` annotation keeps the
 # ``is None`` guard reachable under mypy's warn_unreachable (the import always
@@ -35,11 +36,89 @@ logger = structlog.get_logger(__name__)
 SAVE_THROTTLE_SECONDS = 60.0
 
 # Bounded wait for the cross-process store lock. ``flock(LOCK_EX)`` has no
-# timeout, so a second instance that wedged while holding ~/.gemini/tofu.json.lock
-# would block this one forever with no error at all; poll with LOCK_NB instead
-# and fail loudly once the budget is spent.
+# timeout, so a second instance that wedged while holding the store's ``.lock``
+# file would block this one forever with no error at all; poll with LOCK_NB
+# instead and fail loudly once the budget is spent.
 LOCK_TIMEOUT_SECONDS = 5.0
 LOCK_POLL_INTERVAL_SECONDS = 0.05
+
+# How far a certificate's notBefore may sit in the future before first contact
+# is refused. Gemini capsules routinely mint a self-signed certificate at
+# startup with notBefore = now, so a server clock a few seconds ahead of ours
+# would otherwise hard-fail the very first connection -- and keep failing until
+# wall time caught up, since nothing gets pinned. Small enough that a
+# genuinely premature certificate (the MITM signal this check exists for) is
+# still refused.
+NOT_BEFORE_SKEW_SECONDS = 300.0
+
+# The directory gopher-mcp keeps its own state in, under whichever per-user
+# data location the platform uses.
+STATE_DIR_NAME = "gopher-mcp"
+
+# Where the trust store and client identities lived before gopher-mcp had a
+# directory of its own. ``~/.gemini`` belongs to Google's Gemini CLI -- it holds
+# the ``settings.json`` a user edits to register this very server -- so
+# creating it, tightening its mode and dropping generically named state into it
+# reached into another product's configuration directory. New installs no
+# longer touch it, but a store already there keeps being read and written in
+# place, permanently and with no deprecation window: relocating a trust store
+# behind the user's back would either lose every pin or make a pinned host look
+# unpinned, which is precisely the blind trust-on-first-use the store exists to
+# prevent.
+LEGACY_STATE_DIR_NAME = ".gemini"
+
+
+def default_state_directory() -> Path | None:
+    """Resolve the per-user data directory gopher-mcp stores state in.
+
+    ``XDG_DATA_HOME`` wins wherever it names an absolute path -- Linux
+    packagers, and anyone who has deliberately moved their data directory,
+    expect it honoured rather than second-guessed. Otherwise the platform
+    convention applies.
+
+    Returns:
+        The directory, which is NOT created here, or None when neither an
+        absolute ``XDG_DATA_HOME`` nor a home directory could be determined.
+    """
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home and Path(xdg_data_home).is_absolute():
+        return Path(xdg_data_home) / STATE_DIR_NAME
+
+    # Read through a variable: mypy folds a direct ``sys.platform ==`` test to
+    # the platform it is running on, which under warn_unreachable would make
+    # every branch but the host's dead code and leave it unchecked.
+    platform_name: str = sys.platform
+
+    if platform_name.startswith("win"):  # pragma: no cover - POSIX-only CI
+        app_data = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
+        if app_data:
+            return Path(app_data) / STATE_DIR_NAME
+
+    home_dir = get_home_directory()
+    if home_dir is None:
+        return None
+    if platform_name.startswith("win"):  # pragma: no cover - POSIX-only CI
+        return home_dir / "AppData" / "Local" / STATE_DIR_NAME
+    if platform_name == "darwin":
+        return home_dir / "Library" / "Application Support" / STATE_DIR_NAME
+    return home_dir / ".local" / "share" / STATE_DIR_NAME
+
+
+def legacy_state_path(name: str) -> Path | None:
+    """Return ``~/.gemini/<name>`` when it is already on disk, else None.
+
+    Only ever reports state that exists: this is the upgrade path for installs
+    that pinned certificates or minted client identities before gopher-mcp had
+    a directory of its own, never a place to create something new.
+    """
+    home_dir = get_home_directory()
+    if home_dir is None:
+        return None
+    legacy = home_dir / LEGACY_STATE_DIR_NAME / name
+    try:
+        return legacy if legacy.exists() else None
+    except OSError:  # pragma: no cover - unreadable home; treat as absent
+        return None
 
 
 def canonicalize_fingerprint(fingerprint: str) -> str:
@@ -118,12 +197,19 @@ def _parse_not_before(cert_info: dict[str, Any] | None) -> float | None:
 
 
 class TOFUStorageError(Exception):
-    """The trust store could not be locked for writing.
+    """The trust store could not be locked or written.
 
     Deliberately NOT a :class:`TOFUValidationError`: the certificate itself was
     never in question, we simply could not record or refresh the pin. Raised
     rather than swallowed so a wedged lock holder is visible instead of silently
     turning persistence off (which would re-arm blind trust-on-first-use).
+
+    Deliberately NOT an ``OSError`` either, even though a failed write is where
+    most of these come from. An OSError escaping the trust store is caught by
+    the robots probe's blanket transport handler upstream, which reports a
+    read-only disk or a misdirected GEMINI_TOFU_STORAGE_PATH as an unreachable
+    capsule and tells the caller to retry shortly -- retry-forever advice for a
+    permanent local fault.
     """
 
 
@@ -146,6 +232,17 @@ class TOFUExpiredError(TOFUValidationError):
     """
 
 
+class TOFUNotYetValidError(TOFUExpiredError):
+    """A certificate was presented before its notBefore, beyond clock skew.
+
+    A subclass of :class:`TOFUExpiredError` so a caller that only knows about
+    the expiry case keeps behaving as it did, but distinct so one that cares can
+    say what actually happened: reporting "not yet valid" as an expiry inverts
+    the diagnosis, and an operator told the certificate expired will go looking
+    for a renewal that is not the problem.
+    """
+
+
 class TOFUUnavailableError(TOFUValidationError):
     """No usable certificate was available to apply the TOFU pin.
 
@@ -165,7 +262,9 @@ class TOFUManager:
         """Initialize TOFU manager.
 
         Args:
-            storage_path: Path to TOFU storage file (default: ~/.gemini/tofu.json)
+            storage_path: Path to TOFU storage file. Defaults to
+                ``tofu.json`` under :func:`default_state_directory`, or to an
+                existing legacy ``~/.gemini/tofu.json`` when one is present.
             reject_expired: When True, a certificate outside its validity window
                 (already expired, or not yet valid on first use) fails CLOSED
                 instead of being accepted with a warning. Defaults to False to
@@ -174,16 +273,7 @@ class TOFUManager:
                 authenticator.
         """
         if storage_path is None:
-            home_dir = get_home_directory()
-            if home_dir is None:
-                raise ValueError("Could not determine home directory")
-            gemini_dir = home_dir / ".gemini"
-            gemini_dir.mkdir(exist_ok=True)
-            # The trust store lives here; keep it owner-only (mkdir mode is
-            # subject to umask).
-            with contextlib.suppress(OSError):  # non-POSIX or restricted FS
-                gemini_dir.chmod(0o700)
-            storage_path = str(gemini_dir / "tofu.json")
+            storage_path = str(self._default_storage_path())
 
         self.storage_path = storage_path
         self.reject_expired = reject_expired
@@ -195,6 +285,37 @@ class TOFUManager:
         # this manager at once. Reentrant because the mutators call _save_entries.
         self._lock = threading.RLock()
         self._load_entries()
+
+    @staticmethod
+    def _default_storage_path() -> Path:
+        """Pick the trust store location for an install that named none.
+
+        An existing ``~/.gemini/tofu.json`` keeps being used exactly where it
+        is -- silently moving pins would lose them or, worse, make a pinned
+        host look unpinned. Anything else lands in gopher-mcp's own data
+        directory, which is created owner-only here (mkdir's mode is subject to
+        umask, and the file records who we trust).
+
+        Raises:
+            ValueError: If no storage location can be determined.
+            TOFUStorageError: If the state directory cannot be created.
+        """
+        legacy = legacy_state_path("tofu.json")
+        if legacy is not None:
+            return legacy
+
+        state_dir = default_state_directory()
+        if state_dir is None:
+            raise ValueError("Could not determine home directory")
+        try:
+            state_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            raise TOFUStorageError(
+                f"Could not create the TOFU trust store directory at {state_dir}: {e}"
+            ) from e
+        with contextlib.suppress(OSError):  # non-POSIX or restricted FS
+            state_dir.chmod(0o700)
+        return state_dir / "tofu.json"
 
     def _get_key(self, host: str, port: int) -> str:
         """Get storage key for host:port combination.
@@ -315,6 +436,9 @@ class TOFUManager:
         keeps a second instance from silently clobbering a pin we just wrote
         (and vice versa). ``removed_keys`` must be passed for deletions so the
         merge doesn't resurrect them from disk.
+
+        Raises:
+            TOFUStorageError: If the store could not be locked or written.
         """
         try:
             with self._lock, self._store_lock():
@@ -328,6 +452,21 @@ class TOFUManager:
                 atomic_write_json(self.storage_path, data)
 
             logger.debug("TOFU entries saved", count=len(self._entries))
+        except TOFUStorageError:
+            raise
+        except OSError as e:
+            # A read-only store, a full disk or a GEMINI_TOFU_STORAGE_PATH
+            # pointing somewhere unwritable is a storage failure, not a
+            # transport one -- see TOFUStorageError on why letting the raw
+            # OSError out reported it to the caller as an unreachable capsule.
+            logger.error(
+                "Failed to save TOFU entries",
+                error=str(e),
+                storage_path=self.storage_path,
+            )
+            raise TOFUStorageError(
+                f"Could not write the TOFU trust store at {self.storage_path}: {e}"
+            ) from e
         except Exception as e:
             logger.error("Failed to save TOFU entries", error=str(e))
             raise
@@ -390,17 +529,24 @@ class TOFUManager:
             #
             # A NOT-YET-VALID cert is refused unconditionally: a server has no
             # legitimate reason to present a cert before its notBefore, so this
-            # is a strong active-MITM signal (clock skew aside). An ALREADY-
+            # is a strong active-MITM signal. The clock skew set aside there is
+            # NOT rhetorical -- capsules mint their certificate at startup with
+            # notBefore = now, so the comparison allows NOT_BEFORE_SKEW_SECONDS
+            # of disagreement between the two clocks before failing. An ALREADY-
             # EXPIRED cert is only refused when reject_expired is set, since
             # briefly-lapsed certs are a known part of the Gemini ecosystem;
             # otherwise it is pinned with a warning.
-            if not_before is not None and not_before > current_time:
+            if (
+                not_before is not None
+                and not_before > current_time + NOT_BEFORE_SKEW_SECONDS
+            ):
                 logger.warning(
                     "Refusing to pin a not-yet-valid certificate",
                     host=host,
                     port=port,
+                    not_before=not_before,
                 )
-                raise TOFUExpiredError(
+                raise TOFUNotYetValidError(
                     f"Certificate for {host}:{port} is not yet valid (notBefore "
                     "is in the future); refusing to trust on first use"
                 )
@@ -429,8 +575,20 @@ class TOFUManager:
                 expires=expires,
             )
 
+            # Leave nothing behind if the pin cannot be recorded. The caller is
+            # told the store is unavailable and fails closed -- but an entry
+            # that survived only in memory would serve the very next retry as
+            # "already trusted" on a pin written nowhere, and after a restart
+            # the host is trusted on first use all over again. That is exactly
+            # the window the fail-closed error exists to deny. Dropping it
+            # instead sends the next request back through this branch, which
+            # re-attempts the write.
             self._entries[key] = new_entry
-            self._save_entries()
+            try:
+                self._save_entries()
+            except Exception:
+                self._entries.pop(key, None)
+                raise
             self._last_save_time = current_time
 
             logger.info(
@@ -493,8 +651,14 @@ class TOFUManager:
             existing_entry.last_seen = current_time
             if current_time - self._last_save_time >= SAVE_THROTTLE_SECONDS:
                 # Best effort: last_seen is bookkeeping, not trust state, so a
-                # store we cannot lock right now must not fail an otherwise
-                # valid request. A new pin (above) still fails closed.
+                # store we cannot write right now must not fail an otherwise
+                # valid request. This cannot mask an unrecorded pin: a new pin
+                # (above) fails closed AND is dropped from memory, so it never
+                # reaches this branch to be swallowed -- it re-enters the
+                # first-use path and retries the write on the next request.
+                # ``_last_save_time`` advances either way on purpose, so an
+                # unwritable store costs one bounded lock wait per throttle
+                # interval rather than one per request.
                 try:
                     self._save_entries()
                 except TOFUStorageError as e:
@@ -562,7 +726,11 @@ class TOFUManager:
             # Parse expiry if available
             expires = _parse_expiry(cert_info)
 
-            # Create or update entry
+            # Create or update entry. A copy of what was there is kept so a
+            # failed persist can be undone: the caller is told the pin was not
+            # changed, and an in-memory pin that contradicts that would decide
+            # every request until the process restarts.
+            previous = existing_entry.model_copy() if existing_entry else None
             if existing_entry:
                 existing_entry.fingerprint = cert_fingerprint
                 existing_entry.last_seen = current_time
@@ -577,7 +745,14 @@ class TOFUManager:
                     expires=expires,
                 )
 
-            self._save_entries()
+            try:
+                self._save_entries()
+            except Exception:
+                if previous is None:
+                    self._entries.pop(key, None)
+                else:
+                    self._entries[key] = previous
+                raise
 
         logger.info(
             "Certificate updated",
@@ -603,10 +778,17 @@ class TOFUManager:
             if key not in self._entries:
                 return False
 
-            del self._entries[key]
+            removed = self._entries.pop(key)
             # Pass the removed key so the merge-with-disk step doesn't resurrect
-            # it from a stale on-disk copy.
-            self._save_entries(removed_keys={key})
+            # it from a stale on-disk copy. Put it back if the write fails: the
+            # caller is told the pin still stands, and dropping it from memory
+            # anyway would let the next fetch trust-on-first-use whatever that
+            # host now presents.
+            try:
+                self._save_entries(removed_keys={key})
+            except Exception:
+                self._entries[key] = removed
+                raise
 
         logger.info("Certificate removed", host=host, port=port)
         return True

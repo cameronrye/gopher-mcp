@@ -1,5 +1,7 @@
 # Gopher & Gemini MCP Server
 
+<!-- mcp-name: io.github.cameronrye/gopher-mcp -->
+
 [![CI](https://github.com/cameronrye/gopher-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/cameronrye/gopher-mcp/actions/workflows/ci.yml)
 [![Documentation](https://github.com/cameronrye/gopher-mcp/actions/workflows/docs.yml/badge.svg)](https://github.com/cameronrye/gopher-mcp/actions/workflows/docs.yml)
 [![PyPI version](https://badge.fury.io/py/gopher-mcp.svg)](https://badge.fury.io/py/gopher-mcp)
@@ -30,7 +32,13 @@ modern Python practices, it provides secure, efficient gateways to these distinc
 ## Features
 
 - **Dual Protocol Support**: `gopher_fetch` and `gemini_fetch` tools for comprehensive protocol coverage
-- **Comprehensive Gopher Support**: Handles menus (type 1), text files (type 0), search servers (type 7), and binary files
+- **Comprehensive Gopher Support**: Every standard RFC 1436 item type — menus
+  (`1`) and Index-Search servers (`7`) as structured menus, text (`0`), HTML
+  (`h`), info (`i`) and error (`3`) lines as text, the fourteen binary types as
+  metadata only, and the three interactive ones (`2`, `8`, `T`) refused without
+  opening a connection. An unknown type is read as text, best-effort, and an
+  hURL `URL:<target>` selector is followed to the destination the server
+  actually stated
 - **Full Gemini Implementation**: Native gemtext parsing, TLS security, and status code handling
 - **Advanced Security**: TOFU certificate validation with dedicated inspection and recovery tools, scoped client certificates, and secure TLS connections
 - **Safety First**: Built-in timeouts, size limits, input sanitization, SSRF protection, per-host rate limiting, and host allowlists
@@ -38,15 +46,19 @@ modern Python practices, it provides secure, efficient gateways to these distinc
 - **Cross-Platform**: Works seamlessly on Windows, macOS, and Linux
 - **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
 - **High Performance**: Async/await patterns with intelligent caching — and cached results say so, with a per-request `refresh` bypass
+- **Continuable Reads**: A menu or page cut at the render limit reports where it stops, so `offset` reads the rest instead of leaving a partial view
 
 ## Documentation
 
 Complete documentation is available at **[cameronrye.github.io/gopher-mcp](https://cameronrye.github.io/gopher-mcp)**
 
 - [Installation Guide](https://cameronrye.github.io/gopher-mcp/installation/)
+- [Configuration Guide](https://cameronrye.github.io/gopher-mcp/configuration/)
 - [API Reference](https://cameronrye.github.io/gopher-mcp/api-reference/)
-- [Advanced Features](https://cameronrye.github.io/gopher-mcp/advanced-features/)
 - [AI Assistant Guide](https://cameronrye.github.io/gopher-mcp/ai-assistant-guide/)
+- [Migration Guide](https://cameronrye.github.io/gopher-mcp/migration-guide/) and
+  [Changelog](https://cameronrye.github.io/gopher-mcp/changelog/) — what changed,
+  and what an upgrade asks of you
 
 ## Quick Start
 
@@ -94,43 +106,99 @@ uv run task serve
 
 #### Option 4: Docker
 
-The repository ships a `Dockerfile` that builds a wheel and installs it into a
-slim, non-root image. There is no published image — build it yourself:
+Tagged releases publish a slim, non-root image to
+`ghcr.io/cameronrye/gopher-mcp`, tagged with the release version plus `:latest`
+for stable (non-pre-release) tags:
 
 ```bash
-docker build -t gopher-mcp .
-
 # The default CMD serves streamable-http on 0.0.0.0:8000
-docker run --rm -p 8000:8000 gopher-mcp
+docker run --rm -p 8000:8000 \
+  -v gopher-mcp-state:/home/app/.local/share/gopher-mcp \
+  ghcr.io/cameronrye/gopher-mcp:latest
 
 # Or run over stdio, e.g. for an MCP client
-docker run --rm -i gopher-mcp --transport stdio
+docker run --rm -i --no-healthcheck \
+  -v gopher-mcp-state:/home/app/.local/share/gopher-mcp \
+  ghcr.io/cameronrye/gopher-mcp:latest --transport stdio
 ```
 
+Registry publishing is new, so the first image lands with the next tagged
+release. Until then — or to run a modified tree — the repository ships the
+`Dockerfile` it is built from: `docker build -t gopher-mcp .`
+
+**Mount a volume, or Gemini trust is meaningless.** Without one, the TOFU pins
+and the client certificates' private keys die with the container, so every start
+re-arms blind trust-on-first-use — the pin is the only thing that authenticates
+a Gemini capsule — and destroys any identity you minted, whose private key
+cannot be recovered.
+
+**Mount it at that exact path.** `/home/app/.local/share/gopher-mcp` is where
+the server writes (`tofu.json` and `certs/`), and it is the one directory the
+image pre-creates owned by the runtime user and mode `700` — which is what lets
+a named volume come up writable instead of root-owned. Mounting anywhere else
+persists an empty directory. `~/.gemini` is **not** the path: it is only a
+read-in-place upgrade route for installs that pinned certificates before
+gopher-mcp had a directory of its own, and it is honoured only when its store
+file is already there, which it never is in a fresh image.
+
+**Health checks.** The HTTP transports serve `GET /health`, which answers
+`{"status": "ok", "version": "..."}` and nothing else — no configuration, no
+allowlists, no store paths. It bypasses authorization by SDK design, which is
+what makes it usable as a probe. The image's `HEALTHCHECK` polls it on the
+hard-coded port `8000` to match the default `CMD`, so override the healthcheck
+alongside `--port`, and pass `--no-healthcheck` when running stdio — a stdio
+container serves no HTTP and would otherwise be reported unhealthy while working
+perfectly.
+
 > **Note:** the default `CMD` binds `0.0.0.0` so the container is reachable out
-> of the box. The HTTP transports are unauthenticated and have no TLS — put the
-> container behind a trusted reverse proxy, or use `--transport stdio`, before
-> exposing it beyond your machine.
+> of the box. A non-loopback `--host` also turns off FastMCP's DNS-rebinding
+> `Host`/`Origin` check, matching what the SDK does when it is constructed with
+> such a host — otherwise every client that was not on localhost got
+> `421 Misdirected Request`. Keep the check on by naming the hostnames the
+> deployment answers to with `--allowed-host NAME` (repeatable; a bare name
+> matches any port). The HTTP transports are unauthenticated and have no TLS
+> either — put the container behind a trusted reverse proxy, or use
+> `--transport stdio`, before exposing it beyond your machine.
 
-### Claude Desktop Integration
+### MCP Client Integration
 
-Add to your `claude_desktop_config.json`. The recommended entry uses `uvx`, so
-no clone or local checkout is required:
+Every client below runs the server over **stdio** — no ports, no TLS, no
+listening socket. The entry is the same three fields everywhere; only the file
+and the top-level key change:
+
+| Client         | Where the entry goes                                                                                                                                                                      | Top-level key     |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `%APPDATA%\Claude\claude_desktop_config.json` (Windows), `~/.config/Claude/claude_desktop_config.json` (Linux) | `mcpServers`      |
+| Claude Code    | `claude mcp add --scope user gopher -- uvx gopher-mcp`, or `.mcp.json` at the repository root for `--scope project`                                                                       | `mcpServers`      |
+| Cursor         | `~/.cursor/mcp.json`, or `.cursor/mcp.json` for one project                                                                                                                               | `mcpServers`      |
+| VS Code        | `.vscode/mcp.json` in the workspace, or **MCP: Open User Configuration**                                                                                                                  | `servers`         |
+| Zed            | `settings.json` (**zed: open settings**)                                                                                                                                                  | `context_servers` |
+| Windsurf       | `~/.codeium/windsurf/mcp_config.json`                                                                                                                                                     | `mcpServers`      |
 
 ```json
 {
   "mcpServers": {
     "gopher": {
       "command": "uvx",
-      "args": ["gopher-mcp"],
-      "env": {
-        "GOPHER_MAX_RESPONSE_SIZE": "1048576",
-        "GOPHER_TIMEOUT_SECONDS": "30"
-      }
+      "args": ["gopher-mcp"]
     }
   }
 }
 ```
+
+That is the whole entry: every setting in [Configuration](#configuration) has a
+working default, so add an `"env"` block only when you actually want to change
+one. Installed with `pip` rather than `uvx`? Use `"command": "gopher-mcp"` and
+`"args": []` instead.
+
+The [Installation Guide](https://cameronrye.github.io/gopher-mcp/installation/#mcp-client-integration)
+has the exact JSON for each client, including the two that do not use the
+`mcpServers` key.
+
+If a GUI client reports that the server failed to start, it is almost always
+`PATH`: a GUI-launched application does not inherit your shell's, so `uvx` may
+not be found. Use the absolute path (`which uvx`) as `"command"`, and restart
+the application fully rather than reloading the window.
 
 <details>
 <summary>Alternative: run from a local checkout</summary>
@@ -140,11 +208,7 @@ no clone or local checkout is required:
   "mcpServers": {
     "gopher": {
       "command": "uv",
-      "args": ["--directory", "/path/to/gopher-mcp", "run", "task", "serve"],
-      "env": {
-        "GOPHER_MAX_RESPONSE_SIZE": "1048576",
-        "GOPHER_TIMEOUT_SECONDS": "30"
-      }
+      "args": ["--directory", "/path/to/gopher-mcp", "run", "task", "serve"]
     }
   }
 }
@@ -154,48 +218,6 @@ On Windows use the absolute path with escaped backslashes
 (`C:\\path\\to\\gopher-mcp`).
 
 </details>
-
-## Cross-Platform Development
-
-This project includes a **unified Python-based task management system** that works across all platforms:
-
-### Recommended (All Platforms)
-
-```bash
-python task.py <command>    # Unified Python task runner (recommended)
-```
-
-### Alternative Options
-
-```bash
-# Unix/macOS/Linux
-make <command>              # Traditional make (delegates to task.py)
-
-# Universal fallback
-uv run task <command>       # Direct taskipy usage
-```
-
-### Available Commands
-
-| Command            | Description                    |
-| ------------------ | ------------------------------ |
-| `dev-setup`        | Set up development environment |
-| `install-hooks`    | Install pre-commit hooks       |
-| `lint`             | Run ruff linting               |
-| `format`           | Format code with ruff          |
-| `typecheck`        | Run mypy type checking         |
-| `quality`          | Run all quality checks         |
-| `check`            | Run lint + typecheck           |
-| `test`             | Run all tests                  |
-| `test-cov`         | Run tests with coverage        |
-| `test-unit`        | Run unit tests only            |
-| `test-integration` | Run integration tests          |
-| `serve`            | Run MCP server (stdio)         |
-| `serve-http`       | Run MCP server (HTTP)          |
-| `docs-serve`       | Serve docs locally             |
-| `docs-build`       | Build documentation            |
-| `clean`            | Clean build artifacts          |
-| `ci`               | Run CI pipeline locally        |
 
 ## Usage
 
@@ -216,6 +238,15 @@ The four fetch tools are annotated read-only and open-world. The four
 certificate tools never touch the network, and each pair is split read from
 write so a client can gate the destructive one on its own.
 
+Alongside them the server exposes one resource, `gopher-mcp://policy`, which
+renders the fetch policy this process is actually running with — the allowlists,
+caps and robots settings a refusal is decided from, with the two store paths
+reduced to `<configured>` / `<default>`. There is deliberately no tool that
+edits it: a fetched page talked into widening an allowlist would have widened it
+for every later fetch. Two prompts, **Explore a capsule or Gopher hole** and
+**Summarize a gemlog or phlog**, package the navigation and safety rules as a
+one-click starting point.
+
 ### `gopher_fetch` Tool
 
 Fetches Gopher menus, text files, or metadata by URL with comprehensive error handling and security safeguards.
@@ -223,18 +254,29 @@ Fetches Gopher menus, text files, or metadata by URL with comprehensive error ha
 **Parameters:**
 
 - `url` (string, required): Full Gopher URL (e.g., `gopher://gopher.floodgap.com/1/`)
+- `search` (string, optional): Terms for a type-7 (Index-Search) selector. They are
+  percent-encoded and sent as the query string, so pass the user's words raw — a
+  query holding `#`, `+`, `&` or non-ASCII is truncated or mangled when written
+  into the URL by hand. RFC 1436 gives only type 7 a query field, so leave it
+  unset for every other item type
 - `refresh` (boolean, optional, default `false`): Skip the cached copy and re-fetch from the server
+- `offset` (integer, optional, default `0`): Continue a truncated result — pass the
+  previous result's `next_offset`, which counts menu items for a menu
 
 **Response Types:**
 
-- **MenuResult**: For Gopher menus (type 1) and search results (type 7)
-  - Contains structured menu items with type, title, selector, host, and port
-- **TextResult**: For text files (type 0)
-  - Returns the full text content with metadata
-- **BinaryResult**: Metadata only for binary files (types 4, 5, 6, 9, g, I)
-  - Provides file information without downloading binary content
-- **ErrorResult**: For errors or unsupported content
-  - Includes detailed error messages and troubleshooting hints
+- **MenuResult** (`kind: "menu"`): For Gopher menus (type 1) and search results (type 7)
+  - Structured menu items with type, title, selector, host and port, each with a
+    `next_url` to follow. An empty `next_url` marks a display-only info line
+- **TextResult** (`kind: "text"`): For text files (type 0)
+  - Returns the text content with metadata
+- **BinaryResult** (`kind: "binary"`): Metadata only for the binary item types
+  (`4`, `5`, `6`, `9`, `g`, `I`, `d`, `s`, `;`, `p`, `P`, `:`, `M`, `<`)
+  - Provides `bytes` and `mime_type` without downloading binary content
+- **ErrorResult** (`kind: "error"`): For errors and unfetchable content
+  - `error.code` and `error.message`; nothing was fetched. The interactive types
+    (`2` CSO, `8` telnet, `T` tn3270) have no fetchable body at all and answer
+    `NOT_FETCHABLE` without opening a connection
 
 ### `gemini_fetch` Tool
 
@@ -245,20 +287,40 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 - `url` (string, required): Full Gemini URL (e.g., `gemini://geminiprotocol.net/`)
 - `input` (string, optional): Text to answer a Gemini input prompt (status 10/11); it is percent-encoded into the query string
 - `refresh` (boolean, optional, default `false`): Skip the cached copy and re-fetch from the server
+- `offset` (integer, optional, default `0`): Continue a truncated result — pass the
+  previous result's `next_offset`, which counts characters for a page body
 
-**Response Types:**
+**Response Types:** seven, one per `kind`.
 
-- **GeminiGemtextResult**: For gemtext content (text/gemini)
-  - Parsed gemtext document with structured lines and links (headings are line entries)
-- **GeminiSuccessResult**: For other text and binary content
-  - Raw content with MIME type information
-- **GeminiInputResult**: For input requests (status 10-11)
-  - Prompts for user input with optional sensitive flag
-- **GeminiRedirectResult**: For redirects (status 30-31)
-  - New URL for temporary or permanent redirects
-- **GeminiErrorResult**: For errors (status 40-69)
-  - Detailed error information with status codes
-- **GeminiCertificateResult**: For certificate requests (status 60-69)
+- **GeminiGemtextResult** (`kind: "gemtext"`): For gemtext content (`text/gemini`)
+  - Parsed document in `document.lines` and `document.links`, whose `url` fields
+    are already resolved. A line carries its own `type`, `content` and whatever
+    the marker cannot say (`text`, `level`, `alt_text`, `language`); there is no
+    nested per-line object and no whole-document `raw_content` in the payload
+- **GeminiSuccessResult** (`kind: "success"`): For other **text** content types
+  - Decoded text in `content`, with MIME type information
+- **GeminiBinaryResult** (`kind: "binary"`): For binary content
+  - Metadata only — `size` and the detected `mime_type`, never the bytes. A 1 MB
+    body would be ~350k tokens of base64 the model cannot render anyway
+- **GeminiInputResult** (`kind: "input"`): For input requests (status 1x)
+  - The capsule's `prompt`, with `sensitive: true` on status 11. Answer it by
+    calling again with `input=`, never by hand-building a query string
+- **GeminiRedirectResult** (`kind: "redirect"`): For redirects (status 3x, where
+  31 is permanent)
+  - `new_url` is the target. Redirects are **not**
+    followed for you, so the result also carries `cross_host` (the target
+    belongs to a different party than the one you asked for) and `scheme`
+    (anything but `gemini` leaves Geminispace and cannot be fetched with this
+    tool). Follow at most five in a row and stop on a URL already seen
+- **GeminiErrorResult** (`kind: "error"`): For errors (status 40-59), and for
+  failures raised on this side of the wire — SSRF and allowlist refusals, a
+  robots block, a certificate mismatch, a timeout
+  - `error.code` and `error.message`, where `message` is written by this server.
+    The capsule's own untrusted `META` text is kept apart in `error.meta`, so a
+    hostile `51 <instruction>` cannot be read as this server's guidance. Where a
+    status has a defined remedy — the whole temporary 4x family included — that
+    remedy is in `error.next_step`
+- **GeminiCertificateResult** (`kind: "certificate"`): For certificate statuses (60-69)
   - Certificate requirement information, plus a `next_step` written by this
     server (`message` is the capsule's own text). A certificate that already
     exists for the host/port/path scope is attached automatically and the fetch
@@ -268,7 +330,11 @@ Fetches Gemini content with full TLS security, TOFU certificate validation, and 
 
 `GeminiErrorResult` is an alias for the same `ErrorResult` model `gopher_fetch`
 returns, not a separate type — its `error` object simply carries the extra
-`status` and `temporary` keys when the server actually answered.
+`status`, `temporary` and `meta` keys when the capsule actually answered.
+
+Gemini results name the content length `size` where the Gopher results name the
+same fact `bytes`. One concept, two wire names, kept apart only because renaming
+either would break every existing consumer.
 
 ### Cached Results and `refresh`
 
@@ -277,27 +343,58 @@ from the cache says so, so a replay is never mistaken for the current state of a
 resource:
 
 - `cached` — `true` when the result was replayed from the local cache
-- `cached_at` — when that copy was actually fetched (UNIX timestamp)
+- `cached_at` — when that copy was actually fetched, as an ISO-8601 UTC
+  timestamp (`2026-09-02T12:00:00+00:00`)
 - `cache_age_seconds` — how old the copy was when it was returned
 
 These appear only on the kinds that are actually cached (Gopher `menu`, `text`,
 `binary`; Gemini `gemtext`, `success`, `binary`). Errors, redirects and
 input/certificate prompts are never cached.
 
-Pass `refresh: true` to `gopher_fetch` or `gemini_fetch` when the user wants the
-current state — it skips the cache for that one call and still stores the fresh
-response. The batch tools do not take `refresh`.
+Pass `refresh: true` when the user wants the current state — it skips the cache
+for that one call and still stores the fresh response. All four fetch tools take
+it, the batch pair included.
+
+### Truncated Results and `offset`
+
+Menus and page bodies are capped before they reach the model
+(`*_MAX_RENDERED_CHARS`, `GOPHER_MAX_MENU_ITEMS`), but a cap is not a dead end.
+A result cut short sets `truncated: true` and says where to resume:
+
+- `next_offset` — where the part that was cut begins, or `null` when there is
+  nothing more
+- `total_items` (Gopher `menu`) / `total_chars` (`text`, `success`, `gemtext`) —
+  how big the whole resource is. `total_items` is `null` when the directory was
+  larger than the render cap, because the total is not counted in that case
+
+Call the same tool again with `offset` set to the previous `next_offset` and keep
+going until `next_offset` comes back `null`. The unit is items for a menu and
+**characters** for a body; `bytes` and `size` are byte counts and are never
+offsets. For gemtext, a window ends on the last complete line, so consecutive
+windows abut exactly and half a link never parses as a whole one.
+
+Neither batch tool takes `offset`: one offset cannot mean anything sensible
+across a list of different URLs. Continue a truncated batch item with the
+single-URL tool, which is where `next_offset` is answerable.
 
 ### Gemini Trust-Store Tools
 
 Gemini has no certificate authorities: the first certificate seen for a host is
 pinned, and every later connection must present the same one. When a host reissues
 its certificate — routine for self-signed certs, usually at expiry — the fetch
-fails with `CERTIFICATE_CHANGED`. Two tools handle that without hand-editing
-`~/.gemini/tofu.json`:
+fails with `CERTIFICATE_CHANGED`. Two tools handle that without hand-editing the
+trust store on disk — `$XDG_DATA_HOME/gopher-mcp/tofu.json`, falling back to
+`~/.local/share/gopher-mcp/`, `~/Library/Application Support/gopher-mcp/` on
+macOS and `%LOCALAPPDATA%\gopher-mcp\` on Windows, and overridable with
+`GEMINI_TOFU_STORAGE_PATH`. An install that already has `~/.gemini/tofu.json`
+keeps using it exactly where it is, permanently: moving pins would lose them or,
+worse, make a pinned host look unpinned. The full rules are in
+[Where Gemini state is stored](https://cameronrye.github.io/gopher-mcp/configuration/#where-gemini-state-is-stored).
 
 - **`gemini_trust_list`** (read-only) reports what is pinned, optionally for one
-  `host`: fingerprint, port, first/last seen and expiry.
+  `host`: fingerprint, port, first/last seen and expiry as ISO-8601 UTC, plus a
+  precomputed `expired` — an ended validity window makes a routine reissue the
+  likely explanation for a changed fingerprint.
 - **`gemini_trust_update`** (destructive) removes (`action: "remove"`) or
   replaces (`action: "pin"`) the pin of one named `host`. There is no wildcard.
 
@@ -360,12 +457,17 @@ gemini://geminiprotocol.net/
 # Gemini software directory
 gemini://geminiprotocol.net/software/
 
-# Example personal gemlog
-gemini://warmedal.se/~antenna/
+# Example personal capsule
+gemini://skyjake.fi/
 
-# Gemini search aggregator
+# A large, browsable aggregator capsule
 gemini://kennedy.gemi.dev/
 ```
+
+Geminispace has no search engine this tool can drive. Kennedy and `tlgs.one` are
+worth browsing, but both `Disallow: /search` in their `robots.txt`, so a search
+URL on either comes back `BLOCKED_BY_ROBOTS`. That is a stop, not a setting to
+change: the operators asked automated clients to stay off those paths.
 
 ### Example AI Interactions
 
@@ -387,13 +489,31 @@ Once configured, you can ask Claude:
 
 ## Development
 
+### Task Runner
+
+Every development command is a task in `[tool.taskipy.tasks]` (pyproject.toml),
+which is the single definition of each one — there is no second table to keep in
+sync. Run them the same way on every platform:
+
+```bash
+uv run task dev-setup     # install dependencies and pre-commit hooks
+uv run task quality       # lint + typecheck + test
+uv run task ci            # what CI runs: check + test-cov
+uv run task help          # list every task (alias for `task --list`)
+```
+
+On Unix and macOS, `make <command>` is a thin catch-all onto the same table, and
+bare `make` runs `help`. `uv run task help` is the authoritative list; the tasks
+and the reasoning behind the ones that are not obvious are described in
+[CONTRIBUTING.md](CONTRIBUTING.md#the-task-runner).
+
 ### Project Structure
 
 ```text
 gopher-mcp/
 ├── src/gopher_mcp/          # Main package
 │   ├── __init__.py          # Package initialization
-│   ├── __main__.py          # CLI entry point (transports, --host/--port)
+│   ├── __main__.py          # CLI entry point (--transport/--host/--port/--allowed-host)
 │   ├── server.py            # FastMCP server + the eight MCP tool definitions
 │   ├── client_base.py       # Shared fetch scaffolding for both clients
 │   ├── gopher_client.py     # Gopher protocol client
@@ -406,6 +526,7 @@ gopher-mcp/
 │   ├── mime.py              # MIME type detection and filtering
 │   ├── tofu.py              # Trust-on-First-Use certificate store
 │   ├── client_certs.py      # Gemini client certificate storage
+│   ├── identity.py          # Trust/identity decision and wording helpers
 │   ├── ssrf.py              # SSRF protection / address filtering
 │   ├── ratelimit.py         # Per-host rate limiting
 │   ├── robots.py            # robots.txt fetching and policy gate
@@ -419,8 +540,9 @@ gopher-mcp/
 ├── scripts/                 # Development scripts
 ├── config/                  # Example configuration (example.env)
 ├── .github/workflows/       # CI/CD pipelines
-├── Makefile                 # Unix/macOS task runner
-├── task.py                  # Cross-platform task runner
+├── Dockerfile               # Slim, non-root container image
+├── Makefile                 # Unix/macOS shortcut onto the taskipy tasks
+├── server.json              # MCP registry manifest
 └── pyproject.toml           # Modern Python project config
 ```
 
@@ -445,8 +567,8 @@ uv run task test-cov
 uv run task test-unit
 uv run task test-integration
 
-# Run tests in watch mode during development
-uv run pytest --watch
+# Run one file
+uv run pytest tests/test_server.py
 ```
 
 ## Configuration
@@ -537,7 +659,7 @@ export GEMINI_MAX_RESPONSE_SIZE=2097152
 export GEMINI_TIMEOUT_SECONDS=60
 export GEMINI_TOFU_ENABLED=true
 export GEMINI_CLIENT_CERTS_ENABLED=true
-export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,warmedal.se"
+export GEMINI_ALLOWED_HOSTS="geminiprotocol.net,skyjake.fi"
 
 # Run with custom config
 uv run task serve
@@ -578,13 +700,14 @@ for a tool an LLM drives unattended. Policies are cached per host for 24 hours
 (`*_ROBOTS_CACHE_TTL_SECONDS`), so the extra round-trip is paid once per host,
 not per fetch.
 
-Set `GOPHER_RESPECT_ROBOTS_TXT=false` / `GEMINI_RESPECT_ROBOTS_TXT=false` to
-turn it off — for example if you are fetching from a host you operate, or if a
-blanket `Disallow: /` is blocking a deployment that previously worked. A
-blocked fetch returns the `BLOCKED_BY_ROBOTS` error code rather than failing
-silently, and a fetch refused because the policy could not be read at all
-returns `ROBOTS_UNAVAILABLE` — a separate code because it is transient and means
-nothing disallowed you.
+`GOPHER_RESPECT_ROBOTS_TXT=false` / `GEMINI_RESPECT_ROBOTS_TXT=false` turns it
+off, but the override is for **a host you operate** — a blanket `Disallow: /` on
+someone else's server is a decision, not a misconfiguration. The error messages
+are written that way too, because they are read by the model, not by you: a
+blocked fetch returns `BLOCKED_BY_ROBOTS` and says to stop and tell the user
+rather than retry or try another spelling of the path. A fetch refused because
+the policy could not be read at all returns `ROBOTS_UNAVAILABLE` instead — a
+separate code because it is transient and means nothing disallowed you.
 
 Which convention applies depends on the protocol:
 
@@ -594,7 +717,9 @@ Which convention applies depends on the protocol:
   It does not claim `archiver` or `researcher`: nothing here retains content,
   and `researcher` is defined for tools that operate without surfacing what they
   fetch.
-- **Gopher** follows the convention [Veronica-2 documents][veronica]. This
+- **Gopher** follows the convention Veronica-2 documents at
+  `gopher://gopher.floodgap.com/0/v2/help/indexer` (written out rather than
+  linked, because a `gopher://` href does not survive PyPI's sanitizer). This
   server matches `gopher-mcp` and `*`. It does not claim `veronica`, which
   belongs to Floodgap's indexer.
 
@@ -641,11 +766,10 @@ nor RFC 9309 §2.3 defines one; on shared hosts the established pattern is a
 single file at the root using path prefixes.
 
 [gemini-robots]: https://geminiprotocol.net/docs/companion/robots.gmi
-[veronica]: gopher://gopher.floodgap.com/0/v2/help/indexer
 
 ## Contributing
 
-We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.md) for details.
+We welcome contributions! Please see our [Contributing Guidelines](https://github.com/cameronrye/gopher-mcp/blob/main/CONTRIBUTING.md) for details.
 
 ### Quick Contribution Steps
 
@@ -662,19 +786,19 @@ We welcome contributions! Please see our [Contributing Guidelines](CONTRIBUTING.
 ### Development Standards
 
 - **Type hints** for all functions and methods
-- **Comprehensive tests** (CI enforces a minimum of 85% coverage)
+- **Comprehensive tests** (CI enforces a minimum of 95% coverage)
 - **Documentation** for all public APIs
 - **Security** considerations for all network operations
 - **Cross-platform** compatibility (Windows, macOS, Linux)
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License - see the [LICENSE](https://github.com/cameronrye/gopher-mcp/blob/main/LICENSE) file for details.
 
 ## Acknowledgments
 
 - **[Model Context Protocol](https://modelcontextprotocol.io/)** by Anthropic - The foundation that makes this integration possible
-- **[FastMCP](https://github.com/jlowin/fastmcp)** - High-level Python framework for building MCP servers
+- **[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)** - Its bundled `FastMCP` (`mcp.server.fastmcp`) is what this server is built on, pinned to `mcp>=1.28.1,<2`
 - **The Gopher Protocol Community** - Keeping the spirit of the early internet alive
 
 ## Related Projects
@@ -686,9 +810,14 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## Support
 
 - **Bug Reports**: [GitHub Issues](https://github.com/cameronrye/gopher-mcp/issues)
-- **Feature Requests**: [GitHub Discussions](https://github.com/cameronrye/gopher-mcp/discussions)
+- **Feature Requests**: [Open a feature request](https://github.com/cameronrye/gopher-mcp/issues/new?template=feature_request.yml)
+- **Questions**: [Ask a question](https://github.com/cameronrye/gopher-mcp/issues/new?template=question.yml)
 - **Documentation**: [Project Docs](https://cameronrye.github.io/gopher-mcp/)
 - **Community**: [MCP Discord](https://discord.gg/modelcontextprotocol)
+
+Whichever you open, include the version: `gopher-mcp --version` reports it and
+works for the `uvx` and Docker installs, where there is no checkout to import
+the package from.
 
 ---
 

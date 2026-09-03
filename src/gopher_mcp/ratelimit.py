@@ -48,6 +48,31 @@ def sanitize_penalty_seconds(seconds: float) -> float:
     return min(max(seconds, 0.0), MAX_PENALTY_SECONDS)
 
 
+class RateLimited(Exception):
+    """The wait for a slot exceeded what one call may spend sleeping.
+
+    Raised instead of sleeping when :attr:`RateLimiter.max_wait_seconds` is set
+    and the pending wait is longer than it. A status-44 penalty runs up to
+    :data:`MAX_PENALTY_SECONDS`, which is far longer than an MCP client will
+    wait for a tool call and, inside a batch, holds one of the concurrency slots
+    for the duration -- so past that ceiling the caller is told how long the
+    backoff has left and can answer the model instead of hanging.
+    """
+
+    def __init__(self, host: str, retry_after: float) -> None:
+        """Initialize the refusal.
+
+        Args:
+            host: The host that is still backing off.
+            retry_after: Seconds remaining before a request would be permitted.
+        """
+        super().__init__(
+            f"Requests to {host} are backing off for another {retry_after:.1f} seconds"
+        )
+        self.host = host
+        self.retry_after = retry_after
+
+
 class RateLimiter:
     """Throttle outbound requests to at most one per ``min_interval`` per host.
 
@@ -61,6 +86,7 @@ class RateLimiter:
         *,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        max_wait_seconds: float | None = None,
     ) -> None:
         """Initialize the limiter.
 
@@ -69,10 +95,15 @@ class RateLimiter:
                 less) disables interval throttling (penalties still apply).
             clock: Monotonic clock source (injectable for tests).
             sleep: Async sleep function (injectable for tests).
+            max_wait_seconds: Longest wait :meth:`acquire` may sleep through.
+                Past it, it raises :class:`RateLimited` instead. ``None`` (the
+                default) sleeps however long the reservation demands, which is
+                the historical behaviour.
         """
         self.min_interval = (
             60.0 / requests_per_minute if requests_per_minute > 0 else 0.0
         )
+        self.max_wait_seconds = max_wait_seconds
         self._next_allowed: dict[str, float] = {}
         self._lock = asyncio.Lock()
         self._clock = clock
@@ -89,6 +120,9 @@ class RateLimiter:
 
         Fast-paths out entirely when throttling is disabled and the host carries
         no outstanding penalty, so it adds no overhead in the default config.
+
+        Raises:
+            RateLimited: If the pending wait exceeds :attr:`max_wait_seconds`.
         """
         if self.min_interval <= 0 and host not in self._next_allowed:
             return
@@ -97,6 +131,10 @@ class RateLimiter:
             now = self._clock()
             allowed_at = self._next_allowed.get(host, 0.0)
             wait = allowed_at - now
+            if self.max_wait_seconds is not None and wait > self.max_wait_seconds:
+                # Refuse BEFORE reserving: this request is not going out, so it
+                # must not push the next caller's slot further into the future.
+                raise RateLimited(host, wait)
             base = allowed_at if wait > 0 else now
             if self.min_interval > 0:
                 self._next_allowed[host] = base + self.min_interval

@@ -10,11 +10,13 @@ These tests verify end-to-end functionality including:
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from gopher_mcp.config import reset_config
 from gopher_mcp.gemini_client import GeminiClient
 from gopher_mcp.gopher_client import GopherClient
 from gopher_mcp.server import (
@@ -28,6 +30,30 @@ from gopher_mcp.server import (
 def clear_client_manager():
     """Helper to clear client manager singleton."""
     ClientManager._instance = None
+
+
+@pytest.fixture(autouse=True)
+def _no_politeness_throttle(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Turn per-host rate limiting off for this module.
+
+    Politeness throttling ships on at one request per second per host, and every
+    test here drives the module-level tools -- which build their client inside
+    the server's ``ClientManager``, out of reach of a constructor argument, so
+    the env vars are the only way in. Nothing in this file is *about* the
+    limiter: the concurrency tests fire ten requests at ONE host, so they were
+    spending nine real seconds asleep each, and asserting that ten serialized
+    sleeps eventually finish rather than that the requests overlapped. The
+    limiter's own behaviour is pinned in tests/test_ratelimit.py, and its
+    defaults in tests/test_config.py::TestPolitenessDefaults.
+
+    ``get_config()`` memoizes into a module global that monkeypatch cannot
+    restore, so the cache is dropped on the way in AND on the way out.
+    """
+    monkeypatch.setenv("GOPHER_REQUESTS_PER_MINUTE", "0")
+    monkeypatch.setenv("GEMINI_REQUESTS_PER_MINUTE", "0")
+    reset_config()
+    yield
+    reset_config()
 
 
 @contextmanager
@@ -128,11 +154,19 @@ class TestGopherIntegration:
             assert mock_fetch.await_count == 1
 
             # Same content, but the replay says so: the model must be able to
-            # tell a five-minute-old copy from a fresh read.
+            # tell a five-minute-old copy from a fresh read. `cached_at` names
+            # when the copy was FETCHED -- the instant of the first call, not of
+            # this replay -- and both instants are reported in the one format,
+            # so they parse and compare directly against each other.
             assert result2["cached"] is True
-            assert result2["cached_at"] == pytest.approx(
-                result1["request_info"]["timestamp"]
-            )
+            cached_at = datetime.fromisoformat(result2["cached_at"])
+            fetched_at = datetime.fromisoformat(result1["request_info"]["timestamp"])
+            assert cached_at.tzinfo is not None, result2["cached_at"]
+            # Seconds of slack, not minutes: the two instants are recorded
+            # microseconds apart within one call, and both drop the sub-second
+            # part. A looser bound would stop distinguishing the fetch from the
+            # replay, which is the whole property here.
+            assert abs((cached_at - fetched_at).total_seconds()) <= 2
             assert result2["cache_age_seconds"] >= 0
 
             # A refreshing fetch bypasses the cache but still repopulates it.
@@ -181,8 +215,16 @@ class TestGeminiIntegration:
             result = await gemini_fetch("gemini://example.com/")
 
             assert result["kind"] == "gemtext"
-            assert "document" in result
-            assert "raw_content" in result
+            # The body reaches the caller once, as the parsed document. The
+            # whole-page copy is still held on the model for server-side
+            # readers (the robots.txt parser reads `raw_content`) but is
+            # excluded from the payload, where it was a third of the tokens.
+            assert [line["content"] for line in result["document"]["lines"]] == [
+                "# Test Page",
+                "Hello, Gemini!",
+            ]
+            assert "raw_content" not in result
+            assert "rawContent" not in result
             mock_connect.assert_called_once()
             mock_send.assert_called_once()
             mock_receive.assert_called_once()

@@ -5,12 +5,13 @@ helpers), ``mime`` (MIME guessing/detection), ``gemtext`` (gemtext parsing),
 ``gopher_parse`` (gopher URL/menu parsing) and ``gemini_parse`` (gemini
 URL/response parsing). Every public name is re-exported here so that
 ``from gopher_mcp.utils import X`` keeps working unchanged.
-"""
 
-# ``os`` stays importable from this module so the suite can keep patching
-# ``gopher_mcp.utils.os.fsync`` -- the durability fsync used by
-# ``atomic_write_json``, which now lives in ``helpers``.
-import os  # noqa: F401
+Deprecated for internal use: this module exists only for importers outside the
+package. Code inside ``gopher_mcp`` should import from the submodule that owns
+the name, so that the facade can eventually be retired without touching the
+package's own import graph -- and so a reader looking for the bottom of that
+graph finds ``helpers`` rather than the identically generic-sounding ``utils``.
+"""
 
 from .gemini_parse import (
     format_gemini_url,

@@ -21,6 +21,11 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from gopher_mcp import client_certs
 from gopher_mcp.client_certs import ClientCertificateError
 from gopher_mcp.gemini_client import GeminiClient
+from gopher_mcp.identity import (
+    _covering_certificate,
+    _mismatch_next_step,
+    _shadowing_certificates,
+)
 from gopher_mcp.models import (
     GeminiCertificateInfo,
     GeminiResponse,
@@ -491,6 +496,20 @@ class TestClientCertToolsFailSafely:
             assert "/home/u" not in str(result)
 
     @pytest.mark.asyncio
+    async def test_a_host_that_will_not_idna_encode_is_reported_not_raised(
+        self, client
+    ):
+        """The host filter normalizes, and normalization refuses a host with an
+        empty or over-long label. Uncaught, that escaped the tool as a bare
+        exception -- isError with no structuredContent at all, on a call whose
+        outputSchema promises one."""
+        with _serving(client):
+            listed = await gemini_client_cert_list(host="\u00e4..com")
+
+        assert listed["kind"] == "error"
+        assert listed["error"]["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
     async def test_an_unreadable_store_is_reported_not_raised(self, client):
         with (
             _serving(client),
@@ -549,9 +568,8 @@ class TestClientCertToolsFailSafely:
             "https://example.org/app/",
             "gemini://example.org:70000/app/",
             "gemini://",
-            "gemini://example.org/app/#frag",
         ],
-        ids=["wrong-scheme", "bad-port", "no-host", "fragment"],
+        ids=["wrong-scheme", "bad-port", "no-host"],
     )
     async def test_an_invalid_scope_url_is_reported_not_raised(self, client, url):
         with _serving(client):
@@ -559,6 +577,20 @@ class TestClientCertToolsFailSafely:
 
         assert result["error"]["code"] == "INVALID_REQUEST"
         assert client.list_client_certificates() == []
+
+    @pytest.mark.asyncio
+    async def test_a_fragment_is_stripped_rather_than_refused(self, client):
+        """The parser now drops a fragment instead of rejecting the URL (the
+        Gemini spec makes stripping the client's job), so the scope is the path
+        the fragment hung off -- not an error, and not a scope named '#frag'."""
+        with _serving(client):
+            result = await gemini_client_cert_update(
+                action="create", url=SECTION_URL + "#frag"
+            )
+
+        assert result["changed"] is True
+        assert result["path"] == "/app/"
+        assert _fingerprint(client, "example.org", "/app/") is not None
 
 
 class TestExpiryReporting:
@@ -1054,3 +1086,127 @@ class TestScopeIsDecidedOnANormalizedPath:
         _mint(client, "example.org", "/app/")
 
         assert _attached_via_url(client, "gemini://example.org./app/x") is True
+
+
+def _entry(host: str, path: str, port: int = 1965, fingerprint: str = "aa" * 32):
+    """A registry entry, built directly rather than by minting a real key."""
+    return GeminiCertificateInfo(
+        host=host,
+        port=port,
+        path=path,
+        fingerprint=fingerprint,
+        subject="CN=test",
+        issuer="CN=test",
+        not_before=LONG_AGO,
+        not_after="2100-01-01T00:00:00+00:00",
+        cert_path="/dev/null",
+        key_path="/dev/null",
+    )
+
+
+class TestCoveringCertificate:
+    """`_covering_certificate` decides which identity a scope already has, and
+    so whether a create is refused and which key a remove destroys. It reads
+    the registry alone: an entry whose files are gone still covers the scope,
+    so it can be named and cleared."""
+
+    def test_the_longest_in_scope_path_wins(self):
+        section = _entry("example.org", "/app/")
+        page = _entry("example.org", "/app/private/")
+        certs = [section, page]
+
+        covering = _covering_certificate(certs, "example.org", 1965, "/app/private/x")
+        assert covering is page
+
+    def test_a_scope_above_the_path_still_covers_it(self):
+        section = _entry("example.org", "/app/")
+        assert (
+            _covering_certificate([section], "example.org", 1965, "/app/deep/page.gmi")
+            is section
+        )
+
+    def test_a_sibling_scope_covers_nothing(self):
+        assert (
+            _covering_certificate(
+                [_entry("example.org", "/other/")], "example.org", 1965, "/app/"
+            )
+            is None
+        )
+
+    def test_the_host_is_matched_the_way_the_store_normalizes_it(self):
+        stored = _entry("Example.ORG.", "/app/")
+        assert _covering_certificate([stored], "example.org", 1965, "/app/") is stored
+
+    def test_a_different_port_is_a_different_capsule(self):
+        assert (
+            _covering_certificate(
+                [_entry("example.org", "/app/", port=1965)],
+                "example.org",
+                1966,
+                "/app/",
+            )
+            is None
+        )
+
+
+class TestShadowingCertificates:
+    """Attachment picks the longest matching scope, so identities stored BELOW
+    a new one keep winning underneath their own prefixes. A created-identity
+    message that did not name them would be false exactly where it matters."""
+
+    def test_narrower_scopes_below_the_new_one_are_returned_in_path_order(self):
+        deep = _entry("example.org", "/app/z/")
+        shallow = _entry("example.org", "/app/a/")
+
+        shadowing = _shadowing_certificates(
+            [deep, shallow], "example.org", 1965, "/app/"
+        )
+        assert [cert.path for cert in shadowing] == ["/app/a/", "/app/z/"]
+
+    def test_the_scope_itself_is_not_its_own_shadow(self):
+        exact = _entry("example.org", "/app/")
+        assert _shadowing_certificates([exact], "example.org", 1965, "/app/") == []
+
+    def test_a_scope_above_the_new_one_is_not_shadowing(self):
+        above = _entry("example.org", "/")
+        assert _shadowing_certificates([above], "example.org", 1965, "/app/") == []
+
+    def test_another_host_never_shadows(self):
+        assert (
+            _shadowing_certificates(
+                [_entry("other.example", "/app/deep/")], "example.org", 1965, "/app/"
+            )
+            == []
+        )
+
+
+class TestMismatchNextStep:
+    """A removal that names the wrong fingerprint has to say what to do next.
+    Telling the caller to list the host and copy a fingerprint is telling it to
+    repeat what it just did -- the named fingerprint usually IS one the list
+    reported, for a different scope."""
+
+    def test_a_fingerprint_stored_elsewhere_names_that_scope(self):
+        other = _entry("example.org", "/other/", fingerprint="bb" * 32)
+        step = _mismatch_next_step([other], "bb" * 32)
+
+        assert "gemini://example.org/other/" in step
+        assert "gemini_client_cert_list" not in step
+
+    def test_a_non_default_port_survives_into_the_named_url(self):
+        other = _entry("example.org", "/other/", port=1966, fingerprint="bb" * 32)
+        assert "gemini://example.org:1966/other/" in _mismatch_next_step(
+            [other], "bb" * 32
+        )
+
+    def test_a_fingerprint_stored_for_nothing_sends_the_caller_to_the_list(self):
+        step = _mismatch_next_step([_entry("example.org", "/app/")], "cc" * 32)
+
+        assert "No stored identity has that fingerprint" in step
+        assert "gemini_client_cert_list" in step
+
+    def test_the_covering_identitys_own_fingerprint_is_never_handed_back(self):
+        """Naming it would let a caller that never read the store destroy the
+        identity anyway, which is the whole point of the interlock."""
+        covering = _entry("example.org", "/app/", fingerprint="dd" * 32)
+        assert "dd" * 32 not in _mismatch_next_step([covering], "cc" * 32)

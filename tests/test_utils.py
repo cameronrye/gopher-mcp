@@ -1,11 +1,17 @@
 """Tests for gopher_mcp.utils module."""
 
+import errno
+import os
+import re
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+import gopher_mcp
+import gopher_mcp.utils
+from gopher_mcp.helpers import describe_oserror, window_text
 from gopher_mcp.utils import (
     atomic_write_json,
     format_gemini_url,
@@ -33,7 +39,7 @@ class TestAtomicWriteJson:
         with tempfile.TemporaryDirectory() as d:
             target = str(Path(d) / "store.json")
             with (
-                patch("gopher_mcp.utils.os.fsync", side_effect=OSError("ENOSPC")),
+                patch("gopher_mcp.helpers.os.fsync", side_effect=OSError("ENOSPC")),
                 pytest.raises(OSError),
             ):
                 atomic_write_json(target, {"a": 1})
@@ -106,6 +112,29 @@ class TestParseGopherUrl:
             parse_gopher_url("http://example.com/")
         assert "URL must start with 'gopher://'" in str(exc_info.value)
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "GOPHER://example.com/1/world",
+            "Gopher://example.com/1/world",
+            "gOpHeR://example.com/1/world",
+        ],
+    )
+    def test_scheme_is_case_insensitive(self, url):
+        """RFC 3986 s3.1 makes the scheme case-insensitive, matching what
+        ``parse_gemini_url`` already accepts. Refusing a capitalised one told
+        the caller a valid Gopher URL was not a Gopher URL at all."""
+        result = parse_gopher_url(url)
+
+        assert result.host == "example.com"
+        assert result.gopher_type == "1"
+        assert result.selector == "/world"
+
+    def test_a_non_gopher_scheme_is_still_refused(self):
+        """Only the case is forgiven; the scheme itself is still checked."""
+        with pytest.raises(ValueError, match="URL must start with 'gopher://'"):
+            parse_gopher_url("GEMINI://example.com/")
+
     def test_url_without_hostname(self):
         """Test parsing URL without hostname."""
         with pytest.raises(ValueError) as exc_info:
@@ -156,6 +185,10 @@ class TestParseMenuLine:
         assert result.selector == ""
         assert result.host == "error.host"
         assert result.port == 1
+        # "error.host"/1 are the placeholders servers fill an info line's unused
+        # fields with, so a URL built from them is dead by construction. The
+        # item is display-only and says so with an empty nextUrl.
+        assert result.next_url == ""
 
     def test_hurl_web_link_selector(self):
         """The hURL convention encodes a web link as a 'URL:<target>' selector
@@ -394,7 +427,13 @@ class TestParseMenuLineIPv6:
 
 
 class TestParseMenuLineItemTypeRoundTrip:
-    """The item-type character is server-controlled and must survive nextUrl."""
+    """A server-controlled item type must survive nextUrl, or not be carried.
+
+    Every printable type -- including the URL-significant ones -- has to
+    round-trip through the constructed URL unchanged. A non-printable one is
+    the single exception: it is degraded rather than encoded, so there is
+    nothing to round-trip.
+    """
 
     def test_question_mark_type_does_not_become_a_search(self):
         """An unencoded '?' type turned the selector into a query string, so
@@ -417,12 +456,20 @@ class TestParseMenuLineItemTypeRoundTrip:
         assert parsed.gopher_type == "#"
         assert parsed.selector == "/sel"
 
-    def test_control_char_type_is_not_embedded_raw(self):
+    def test_control_char_type_is_degraded_to_the_info_type(self):
+        """A non-printable byte is not an item type, so it is not carried at
+        all: `type` degrades to "i", which leaves the item display-only and
+        therefore without a nextUrl to embed the byte in. Encoding it into a
+        URL instead would have handed the model a link whose type no client
+        can act on, built from an info line's placeholder host and port."""
         item = parse_menu_line("\x1bEsc\t/sel\texample.com\t70")
 
         assert item is not None
-        assert "\x1b" not in item.next_url
-        assert parse_gopher_url(item.next_url).gopher_type == "\x1b"
+        assert item.type == "i"
+        assert item.title == "Esc"
+        assert item.next_url == ""
+        # No field carries the escape onward, in any spelling.
+        assert not any("\x1b" in str(value) for value in item.model_dump().values())
 
     def test_ordinary_type_stays_literal(self):
         item = parse_menu_line("1About\t/about\texample.com\t70")
@@ -513,3 +560,95 @@ class TestGopherUrlPortAndSelectorHandling:
         """A control char in the type-7 search field must be rejected."""
         with pytest.raises(ValueError, match=r"control character"):
             parse_gopher_url("gopher://example.com/7sel%09a%0db")
+
+
+class TestDescribeOSError:
+    """The address an OSError carries must never reach the caller-facing text."""
+
+    def test_asyncio_connect_failure_text_is_dropped(self):
+        """asyncio raises ``OSError(err, f"Connect call failed {address}")``, so
+        ``strerror`` itself carries the sockaddr -- the resolved IP the SSRF
+        guard vetted. Only the errno's canonical text may survive."""
+        exc = OSError(errno.ECONNREFUSED, "Connect call failed ('127.0.0.1', 1)")
+
+        described = describe_oserror(exc)
+
+        assert "127.0.0.1" not in described
+        assert described == os.strerror(errno.ECONNREFUSED)
+
+    def test_errnoless_oserror_gets_a_generic_description(self):
+        assert describe_oserror(OSError("boom")) == "unable to connect"
+
+
+class TestWindowText:
+    """The render cap has to be continuable, not just a cut."""
+
+    def test_first_window_reports_where_the_rest_starts(self):
+        window = window_text("abcdefghij", 0, 4)
+
+        assert window.text == "abcd"
+        assert window.start == 0
+        assert window.total == 10
+        assert window.next_offset == 4
+
+    def test_windows_chain_to_the_exact_original(self):
+        text = "".join(f"line {i}\n" for i in range(50))
+        seen = ""
+        offset = 0
+        # Bounded, not `while offset is not None`: a next_offset that stops
+        # advancing must fail this one test, not spin until the suite-wide
+        # timeout kills the process without a pytest summary. 400 characters in
+        # 37-character windows needs 11 iterations.
+        for _ in range(30):
+            if offset is None:
+                break
+            window = window_text(text, offset, 37)
+            seen += window.text
+            offset = window.next_offset
+        else:
+            pytest.fail(f"windows never terminated: next_offset stuck at {offset}")
+
+        assert seen == text
+
+    def test_last_window_has_no_next_offset(self):
+        assert window_text("abcdefghij", 8, 4).next_offset is None
+
+    def test_zero_means_unlimited(self):
+        window = window_text("abcdefghij", 2, 0)
+
+        assert window.text == "cdefghij"
+        assert window.next_offset is None
+
+    def test_offset_past_the_end_is_empty_not_an_error(self):
+        window = window_text("abc", 99, 4)
+
+        assert window.text == ""
+        assert window.start == 3
+        assert window.next_offset is None
+
+
+class TestUtilsFacadeIsExternalCompatOnly:
+    """The facade re-exports names for importers OUTSIDE the package.
+
+    While the package's own modules imported through it, it could never be
+    retired -- and a new reader looking for the bottom of the import graph
+    found the generically named `utils` instead of `helpers`, which is where
+    the implementations actually live.
+    """
+
+    def test_no_module_in_the_package_imports_it(self):
+        package = Path(gopher_mcp.__file__).parent
+        offenders = [
+            path.name
+            for path in sorted(package.glob("*.py"))
+            if path.name != "utils.py"
+            and re.search(
+                r"^from \.utils import|^from \. import utils", path.read_text(), re.M
+            )
+        ]
+
+        assert offenders == []
+
+    def test_it_still_re_exports_every_name_it_promises(self):
+        for name in gopher_mcp.utils.__all__:
+            assert hasattr(gopher_mcp.utils, name), name

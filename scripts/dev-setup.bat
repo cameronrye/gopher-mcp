@@ -63,7 +63,11 @@ if errorlevel 1 (
 
 REM Install dependencies
 call :log_info "Installing project dependencies..."
-uv sync --all-extras
+REM --all-groups, not --all-extras: dev/docs/test are PEP 735 dependency
+REM groups now (they were extras, which published a gopher-mcp[dev] install
+REM surface to PyPI). There are no extras left, so --all-extras would
+REM silently install nothing but the runtime dependencies.
+uv sync --all-groups
 if errorlevel 1 (
     call :log_error "Failed to install dependencies"
     exit /b 1

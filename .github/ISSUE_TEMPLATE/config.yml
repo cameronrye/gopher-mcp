@@ -1,11 +1,12 @@
 blank_issues_enabled: false
+# No Discussions link here: Discussions is not enabled on this repository, and
+# with blank issues off this chooser is the only route in — a 404 among three
+# options reads as an abandoned project. Questions have their own template
+# (question.yml), which appears above these links.
 contact_links:
   - name: 📚 Documentation
     url: https://cameronrye.github.io/gopher-mcp
     about: Check the documentation for guides and API reference
-  - name: 💬 Discussions
-    url: https://github.com/cameronrye/gopher-mcp/discussions
-    about: Ask questions and discuss ideas with the community
   - name: 🔒 Security Issues
     url: https://github.com/cameronrye/gopher-mcp/security/advisories/new
     about: Report security vulnerabilities privately

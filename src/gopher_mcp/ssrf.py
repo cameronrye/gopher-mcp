@@ -83,16 +83,51 @@ DANGEROUS_PORTS = frozenset(
 def normalize_host(host: str) -> str:
     """Normalize a hostname for comparison.
 
-    Strips surrounding IPv6 brackets, a single trailing dot, and lowercases,
-    so that ``Example.COM`` and ``example.com.`` compare equal to
-    ``example.com`` (closing common allowlist-bypass tricks).
+    Strips surrounding IPv6 brackets, a single trailing dot, lowercases, and
+    IDNA-encodes, so that ``Example.COM``, ``example.com.`` and the U-label
+    spelling of an internationalized name all compare equal to the single
+    A-label form (closing common allowlist-bypass tricks).
+
+    The IDNA step matters because everything keyed on a host -- the TOFU pin
+    store, the client-certificate scope, the per-host rate-limit bucket, the
+    robots policy cache -- would otherwise hand ``exämple.org`` its own entry
+    while ``socket.getaddrinfo`` and ``ssl`` quietly apply the same codec and
+    talk to the one server behind ``xn--exmple-cua.org``. A pinned capsule
+    reached by its Unicode spelling would get a fresh trust-on-first-use rather
+    than a CERTIFICATE_CHANGED, which is exactly the hole the trailing-dot and
+    case folding above already close.
+
+    Args:
+        host: Hostname or IP literal, in any spelling.
+
+    Returns:
+        The canonical ASCII form to key on and compare against.
+
+    Raises:
+        SSRFError: If ``host`` is non-ASCII and cannot be IDNA-encoded. There is
+            no safe canonical form to return in that case, and passing the raw
+            U-label through would reopen the split this function exists to
+            close, so the target is refused instead.
     """
     h = host.strip()
     if h.startswith("[") and h.endswith("]"):
         h = h[1:-1]
     if h.endswith("."):
         h = h[:-1]
-    return h.lower()
+    h = h.lower()
+
+    # An all-ASCII host is already in its comparison form -- an A-label, an IP
+    # literal, or a plain name -- and is returned untouched. Running the codec
+    # over it would change nothing but its failure modes: ``encodings.idna``
+    # rejects an empty or over-long ASCII label, and those spellings belong in
+    # front of the SSRF and allowlist checks unaltered rather than raising here.
+    if h.isascii():
+        return h
+
+    try:
+        return h.encode("idna").decode("ascii")
+    except UnicodeError as e:
+        raise SSRFError(f"Host cannot be IDNA-encoded: {host}") from e
 
 
 def classify_blocked_ip(value: str) -> str | None:
