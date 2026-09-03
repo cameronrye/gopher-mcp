@@ -66,7 +66,12 @@ class TestTOFUManager:
         # The store's own directory is created owner-only...
         state_dir = tmp_path / "data" / "gopher-mcp"
         assert state_dir.is_dir()
-        assert state_dir.stat().st_mode & 0o777 == 0o700
+        if os.name != "nt":
+            # Windows has no POSIX mode bits: a directory reports 0o777 there
+            # whatever mode was requested, so asserting 0o700 fails on a
+            # correctly-created store. Access control on that platform is the
+            # ACL the user's profile directory already carries.
+            assert state_dir.stat().st_mode & 0o777 == 0o700
         # ...and the other product's directory is left alone entirely.
         assert not (tmp_path / ".gemini").exists()
 
@@ -1052,26 +1057,40 @@ class TestTOFUStoreWriteFailures:
     """A store that cannot be written must say so -- and record nothing."""
 
     @staticmethod
-    def _unwritable_store(tmp_path: Path) -> tuple[TOFUManager, Path]:
-        """Build a manager over a store directory that refuses writes."""
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("root ignores directory permissions")
+    def _store_that_refuses_writes():
+        """Make the store's write fail, on every platform.
+
+        A read-only directory is the real-world cause, but it cannot be the
+        mechanism here: Windows ignores the mode bits ``chmod`` sets on a
+        directory, so the write succeeded there and this whole class asserted
+        nothing on a third of the matrix while reporting green. Failing the
+        write itself exercises exactly the branch under test -- an OSError out
+        of the persist step -- and does so identically everywhere.
+
+        Scoped with ``patch`` rather than ``monkeypatch``: these tests go on to
+        assert that the store works again once the fault clears, and
+        ``monkeypatch`` only undoes at teardown, so the fault would still be in
+        place for that half of the test.
+        """
+        return patch(
+            "gopher_mcp.tofu.atomic_write_json",
+            side_effect=PermissionError(13, "Permission denied"),
+        )
+
+    @staticmethod
+    def _manager(tmp_path: Path) -> TOFUManager:
         store_dir = tmp_path / "store"
         store_dir.mkdir()
-        manager = TOFUManager(str(store_dir / "tofu.json"))
-        store_dir.chmod(0o500)
-        return manager, store_dir
+        return TOFUManager(str(store_dir / "tofu.json"))
 
     def test_unwritable_store_raises_storage_error_not_oserror(self, tmp_path):
         """The raw OSError used to escape as far as the robots probe's blanket
         transport handler, which reported a read-only disk as an unreachable
         capsule and told the caller to retry shortly -- forever."""
-        manager, store_dir = self._unwritable_store(tmp_path)
-        try:
+        manager = self._manager(tmp_path)
+        with self._store_that_refuses_writes():
             with pytest.raises(TOFUStorageError) as exc_info:
                 manager.validate_certificate("example.com", 1965, "ab" * 32)
-        finally:
-            store_dir.chmod(0o700)
 
         assert not isinstance(exc_info.value, OSError)
         assert "trust store" in str(exc_info.value)
@@ -1084,8 +1103,8 @@ class TestTOFUStoreWriteFailures:
         the host was trusted on first use all over again, which is exactly the
         window the fail-closed error exists to deny.
         """
-        manager, store_dir = self._unwritable_store(tmp_path)
-        try:
+        manager = self._manager(tmp_path)
+        with self._store_that_refuses_writes():
             with pytest.raises(TOFUStorageError):
                 manager.validate_certificate("example.com", 1965, "ab" * 32)
 
@@ -1093,20 +1112,18 @@ class TestTOFUStoreWriteFailures:
 
             with pytest.raises(TOFUStorageError):
                 manager.validate_certificate("example.com", 1965, "ab" * 32)
-        finally:
-            store_dir.chmod(0o700)
 
         # And once the store is usable again the pin is genuinely recorded,
         # rather than being throttled out for another SAVE_THROTTLE_SECONDS.
         is_valid, warning = manager.validate_certificate("example.com", 1965, "ab" * 32)
         assert is_valid is True
         assert warning is not None and "trusted on first use" in warning
-        on_disk = json.loads((store_dir / "tofu.json").read_text())
+        on_disk = json.loads(Path(manager.storage_path).read_text())
         assert on_disk["example.com:1965"]["fingerprint"] == "ab" * 32
 
     def test_failed_pin_change_leaves_the_previous_pin_in_place(self, tmp_path):
         """A rejected gemini_trust_update must not change trust in memory either."""
-        manager, store_dir = self._unwritable_store(tmp_path)
+        manager = self._manager(tmp_path)
         manager._entries["example.com:1965"] = TOFUEntry(
             host="example.com",
             port=1965,
@@ -1114,11 +1131,9 @@ class TestTOFUStoreWriteFailures:
             first_seen=1.0,
             last_seen=1.0,
         )
-        try:
+        with self._store_that_refuses_writes():
             with pytest.raises(TOFUStorageError):
                 manager.update_certificate("example.com", 1965, "bb" * 32, force=True)
-        finally:
-            store_dir.chmod(0o700)
 
         assert manager._entries["example.com:1965"].fingerprint == "aa" * 32
 
@@ -1129,7 +1144,7 @@ class TestTOFUStoreWriteFailures:
         use whatever that host now presents, which is the opposite of what the
         error told the operator.
         """
-        manager, store_dir = self._unwritable_store(tmp_path)
+        manager = self._manager(tmp_path)
         manager._entries["example.com:1965"] = TOFUEntry(
             host="example.com",
             port=1965,
@@ -1137,11 +1152,9 @@ class TestTOFUStoreWriteFailures:
             first_seen=1.0,
             last_seen=1.0,
         )
-        try:
+        with self._store_that_refuses_writes():
             with pytest.raises(TOFUStorageError):
                 manager.remove_certificate("example.com", 1965)
-        finally:
-            store_dir.chmod(0o700)
 
         assert "example.com:1965" in manager._entries
 

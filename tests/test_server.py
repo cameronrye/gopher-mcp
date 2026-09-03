@@ -1548,7 +1548,11 @@ class TestFetchToolDescriptions:
         """
         tools = {t.name: t for t in await mcp.list_tools()}
         lines = (tools[name].description or "").splitlines()
-        bullets = [i for i, line in enumerate(lines) if line.startswith("    - `")]
+        # Match the stripped line, not a fixed indent: Python 3.13 removes the
+        # common leading whitespace from __doc__ at compile time, so the same
+        # bullet arrives as "    - `menu`" on 3.12 and "- `menu`" on 3.13. An
+        # indent-sensitive match found nothing at all on 3.13+ and passed.
+        bullets = [i for i, line in enumerate(lines) if line.strip().startswith("- `")]
         assert bullets, f"{name} lists no kinds"
         run = lines[bullets[0] : bullets[-1] + 1]
         assert all(line.strip() for line in run), (

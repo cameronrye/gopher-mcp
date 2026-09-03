@@ -564,8 +564,16 @@ class TestGopherTimeoutIsOneBudget:
 
         # Two transport phases: the robots probe, then the fetch it guards.
         assert len(seen) == 2, seen
-        # Each is strictly smaller than the last -- one budget, drawn down.
-        assert seen[1] < seen[0] < 1.0, seen
+        # One budget, drawn down: neither phase may be handed more time than the
+        # one before it, and both must be below the configured timeout because
+        # the slow resolve has already been charged.
+        #
+        # Not a strict `<` between the two. The probe and the fetch now share a
+        # single DNS lookup, so almost no wall time passes between them, and on
+        # a platform whose clock ticks in ~15ms steps -- Windows -- both reads
+        # land in the same tick and come back exactly equal. That is the code
+        # working, not failing.
+        assert 0 < seen[1] <= seen[0] < 1.0, seen
 
     @pytest.mark.asyncio
     async def test_an_exhausted_budget_reports_as_a_timeout(self):

@@ -763,38 +763,32 @@ class TestClientCertScopeNormalization:
 class TestClientCertStoreWriteFailures:
     """An unusable certificate store must be reported as exactly that."""
 
-    @staticmethod
-    def _guard_root() -> None:
-        if hasattr(os, "geteuid") and os.geteuid() == 0:
-            pytest.skip("root ignores directory permissions")
-
     def test_uncreatable_store_raises_storage_error_not_oserror(self, tmp_path):
         """A raw OSError out of the manager reaches a transport handler upstream
         and is reported as an unreachable capsule -- retry-forever advice for a
-        permanent local fault."""
-        self._guard_root()
-        parent = tmp_path / "parent"
-        parent.mkdir()
-        parent.chmod(0o500)
-        try:
+        permanent local fault.
+
+        The fault is injected rather than staged with a read-only directory:
+        Windows ignores the mode bits ``chmod`` sets on a directory, so the
+        real-filesystem version of this test asserted nothing on a third of the
+        matrix while reporting green.
+        """
+        with patch("pathlib.Path.mkdir", side_effect=PermissionError(13, "denied")):
             with pytest.raises(ClientCertificateStorageError) as exc_info:
-                ClientCertificateManager(str(parent / "certs"))
-        finally:
-            parent.chmod(0o700)
+                ClientCertificateManager(str(tmp_path / "parent" / "certs"))
 
         assert not isinstance(exc_info.value, OSError)
         assert isinstance(exc_info.value, ClientCertificateError)
 
     def test_unwritable_registry_raises_storage_error_not_oserror(self, tmp_path):
         """Same for the registry write behind gemini_client_cert_update."""
-        self._guard_root()
         manager = ClientCertificateManager(str(tmp_path / "certs"))
-        manager.storage_path.chmod(0o500)
-        try:
+        with patch(
+            "gopher_mcp.client_certs.atomic_write_json",
+            side_effect=PermissionError(13, "denied"),
+        ):
             with pytest.raises(ClientCertificateStorageError) as exc_info:
                 manager.generate_certificate("example.com", 1965, "/", validity_days=30)
-        finally:
-            manager.storage_path.chmod(0o700)
 
         assert not isinstance(exc_info.value, OSError)
         # And nothing is left claiming an identity that was never stored.
