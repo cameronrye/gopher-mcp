@@ -41,6 +41,7 @@ from .models import (
     GemtextDocument,
     GemtextLine,
     GemtextLineType,
+    RequestInfo,
     iso_utc,
 )
 
@@ -441,13 +442,13 @@ def process_gemini_response(
     if request_time is None:
         request_time = time.time()
 
-    request_info = {
-        "url": request_url,
+    request_info = RequestInfo(
+        url=request_url,
         # The parameter stays a UNIX float -- callers time the request with the
         # same clock they use for deadlines -- and only the reported value is
         # rendered, the way ``mark_from_cache`` takes an epoch and reports ISO.
-        "timestamp": iso_utc(request_time),
-    }
+        timestamp=iso_utc(request_time),
+    )
 
     status = response.status
     meta = response.meta
@@ -500,7 +501,7 @@ def process_gemini_response(
 
 
 def _process_input_response(
-    status_code: int, meta: str, request_info: dict[str, Any]
+    status_code: int, meta: str, request_info: RequestInfo
 ) -> "GeminiInputResult":
     """Process input request response (status 10-11).
 
@@ -525,7 +526,7 @@ def _process_input_response(
 def _process_success_response(
     meta: str,
     body: bytes | None,
-    request_info: dict[str, Any],
+    request_info: RequestInfo,
     *,
     offset: int = 0,
     max_rendered_chars: int = 0,
@@ -787,7 +788,7 @@ def _decode_with_fallback(body: bytes, charset: str) -> tuple[str, str]:
 
 
 def _process_redirect_response(
-    status_code: int, meta: str, request_info: dict[str, Any]
+    status_code: int, meta: str, request_info: RequestInfo
 ) -> "GeminiRedirectResult | GeminiErrorResult":
     """Process redirect response (status 30-31).
 
@@ -921,7 +922,7 @@ _GENERIC_TEMPORARY_NEXT_STEP = (
 
 
 def _process_error_response(
-    status_code: int, meta: str, request_info: dict[str, Any], temporary: bool = True
+    status_code: int, meta: str, request_info: RequestInfo, temporary: bool = True
 ) -> "GeminiErrorResult":
     """Process error response (status 40-59).
 
@@ -1003,7 +1004,7 @@ _UNASSIGNED_CERTIFICATE_STEP = (
 
 
 def _process_certificate_response(
-    status_code: int, meta: str, request_info: dict[str, Any]
+    status_code: int, meta: str, request_info: RequestInfo
 ) -> "GeminiCertificateResult":
     """Process certificate request response (status 60-62).
 

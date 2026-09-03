@@ -373,3 +373,118 @@ class TestContinuationContract:
 
         assert result.total_items is None
         assert result.next_offset is None
+
+
+class TestRequestInfoIsTyped:
+    """`request_info` is a described model, not an anything-goes object.
+
+    It was the last `dict[str, Any]` on the wire, so the outputSchema the fetch
+    tools advertise described the one field that carries the provenance of the
+    answer as "any object". These tests pin the three things that buys: an
+    undeclared key is refused instead of silently riding along, a declared key
+    is type-checked, and the payload still carries only the keys a call site
+    actually supplied.
+    """
+
+    def test_an_undeclared_key_is_refused(self):
+        """A key nobody declared is a typo or a leak, never a feature.
+
+        Under `dict[str, Any]` `{"selektor": ...}` was accepted and published,
+        so a misspelt provenance key reached the model as real provenance.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            MenuResult(items=[], request_info={"selektor": "/typo"})
+
+        assert "selektor" in str(exc_info.value)
+
+    def test_a_declared_key_is_type_checked(self):
+        """`port` is a port number; a string there was published unchecked."""
+        with pytest.raises(ValidationError):
+            MenuResult(items=[], request_info={"port": "not-a-port"})
+
+    def test_only_the_keys_a_call_site_supplied_reach_the_wire(self):
+        """No null padding: a Gopher menu must not grow `has_query`/`cipher`.
+
+        Fourteen optional fields serialized in full would put ten permanently
+        null keys on every result, which is exactly the noise this codebase
+        refuses elsewhere (see the cache-provenance comment in models.py).
+        """
+        payload = MenuResult(
+            items=[], request_info={"url": "gopher://example.com/1/"}
+        ).model_dump()
+
+        assert payload["request_info"] == {"url": "gopher://example.com/1/"}
+
+    def test_a_key_supplied_as_null_still_reaches_the_wire(self):
+        """`tls_version: None` means "we looked and the TLS layer had none".
+
+        The Gemini client always writes the four connection-info keys, null
+        included, so dropping nulls (rather than unsupplied keys) would delete
+        four keys the payload has always carried.
+        """
+        payload = ErrorResult(
+            error={"code": "X", "message": "y"},
+            request_info={"url": "gemini://example.org/", "tls_version": None},
+        ).model_dump()
+
+        assert payload["request_info"] == {
+            "url": "gemini://example.org/",
+            "tls_version": None,
+        }
+
+    def test_it_still_reads_like_the_dict_it_replaced(self):
+        """Consumers index `request_info` by key; that has to keep working.
+
+        `result.request_info["url"]` and `"search_ignored" in request_info` are
+        how the clients, the parser and the existing tests read provenance, so
+        the model keeps a read-only mapping face over the keys that were
+        actually supplied.
+        """
+        result = MenuResult(items=[], request_info={"url": "gopher://example.com/1/"})
+
+        assert result.request_info["url"] == "gopher://example.com/1/"
+        assert "url" in result.request_info
+        assert "search_ignored" not in result.request_info
+        assert result.request_info.get("search_ignored") is None
+        assert result.request_info.get("port", 70) == 70
+        with pytest.raises(KeyError):
+            result.request_info["port"]
+
+
+class TestRequestInfoEchoesWhatWasAskedEvenWhenItIsNonsense:
+    """The provenance echo repeats the request; it does not re-judge it.
+
+    Argument validation lives at the tools' boundary, where a bad value is
+    turned into a structured `INVALID_REQUEST` the caller can read. Duplicating
+    that judgement inside the echo makes the report of a bad argument
+    impossible to construct.
+    """
+
+    def test_an_out_of_range_port_can_still_be_echoed_back(self):
+        """`gemini_trust_update` builds its echo BEFORE it checks its port.
+
+        It then rejects a bad port by quoting it back:
+        `_error("INVALID_REQUEST", f"Invalid port number: {port}",
+        **request_info)` with `port=70000` already in `request_info`. A
+        `le=65535` on this field made constructing that rejection raise
+        `ValidationError` out of the tool -- so the one code path whose entire
+        job is to report an out-of-range port became an unhandled crash, which
+        is what
+        `test_trust_tool.py::TestTrustUpdateRejectsBadInput::
+        test_an_out_of_range_port_is_refused` caught.
+        """
+        payload = ErrorResult(
+            error={"code": "INVALID_REQUEST", "message": "Invalid port number: 70000"},
+            request_info={"host": "example.org", "port": 70000},
+        ).model_dump()
+
+        assert payload["request_info"]["port"] == 70000
+
+    def test_a_negative_port_is_echoed_too(self):
+        """The same rejection path accepts `port=-1`; `ge=0` broke that half."""
+        payload = ErrorResult(
+            error={"code": "INVALID_REQUEST", "message": "Invalid port number: -1"},
+            request_info={"host": "example.org", "port": -1},
+        ).model_dump()
+
+        assert payload["request_info"]["port"] == -1

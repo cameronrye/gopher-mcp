@@ -313,3 +313,70 @@ class TestContinuationFieldsOnTheWire:
         assert second.structuredContent["text"] == "abcdefghij"
         assert second.structuredContent["truncated"] is False
         assert second.structuredContent["next_offset"] is None
+
+
+class TestTheAdvertisedSchemaIsWrittenForClients:
+    """`outputSchema` is prompt text, not a design document.
+
+    Every description in it is shipped to the client on `tools/list` and, in
+    every host that renders schemas into the prompt, spent as context tokens on
+    every session -- the same budget this codebase already refuses to spend on
+    permanently-null keys and on a duplicated page body. A docstring that
+    narrates the change history of a Python class ("this was `dict[str, Any]`",
+    "`extra="forbid"` is the point of the exercise") is invisible in review,
+    because nothing else in the repo reads a model docstring, and useless to
+    the only audience that receives it.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["gopher_fetch", "gemini_fetch"])
+    async def test_no_advertised_description_narrates_the_codebase(self, name):
+        """Names that only make sense to someone reading models.py.
+
+        These are the tells, not an exhaustive ban: a description mentioning a
+        Python annotation, a pydantic setting or the repo's own history is
+        addressed to a maintainer and belongs in a comment beside the code.
+        """
+        async with _connected() as session:
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+
+        tells = ("dict[str, Any]", "extra=", "model_dump", "default_factory")
+        offenders = [
+            (path, tell)
+            for path, text in _descriptions(tools[name].outputSchema)
+            for tell in tells
+            if tell in text
+        ]
+        assert not offenders, f"{name} advertises maintainer prose: {offenders}"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("name", ["gopher_fetch", "gemini_fetch"])
+    async def test_no_single_description_dwarfs_the_tool_description(self, name):
+        """A cap, so the next long docstring is caught the same way.
+
+        600 characters is roughly three sentences -- more than any other
+        description in either schema needs, and far below the 1,500-character
+        class docstring that prompted this guard.
+        """
+        async with _connected() as session:
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+
+        oversize = {
+            path: len(text)
+            for path, text in _descriptions(tools[name].outputSchema)
+            if len(text) > 600
+        }
+        assert not oversize, f"{name} advertises oversize descriptions: {oversize}"
+
+
+def _descriptions(schema, path=""):
+    """Yield every ``(json-pointer, description)`` in an advertised schema."""
+    if isinstance(schema, dict):
+        for key, value in schema.items():
+            if key == "description" and isinstance(value, str):
+                yield path or "/", value
+            else:
+                yield from _descriptions(value, f"{path}/{key}")
+    elif isinstance(schema, list):
+        for index, value in enumerate(schema):
+            yield from _descriptions(value, f"{path}/{index}")

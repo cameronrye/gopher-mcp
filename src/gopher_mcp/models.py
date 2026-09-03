@@ -1,6 +1,7 @@
 """Pydantic models for Gopher MCP data validation."""
 
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime
 from enum import IntEnum, StrEnum
 from typing import Annotated, Any, Generic, Literal, TypeVar
@@ -9,6 +10,7 @@ from urllib.parse import urlsplit
 from pydantic import (
     AliasChoices,
     BaseModel,
+    ConfigDict,
     Field,
     RootModel,
     field_validator,
@@ -121,6 +123,239 @@ _KIND = Field(discriminator="kind")
 # keep working. Nothing about the published payload changes. Written out at
 # each field rather than built by a helper -- mypy reads ``Field(...)`` as a
 # dataclass field specifier and cannot follow ``**kwargs`` into one.
+
+
+# NOTE: this class's docstring becomes the ``description`` of the ``RequestInfo``
+# entry in both fetch tools' advertised ``outputSchema``, which is shipped to
+# every client on ``tools/list`` and, in hosts that render schemas into the
+# prompt, spent as context tokens on every session. So the design rationale
+# lives here, in a comment nothing publishes, and the docstring says only what a
+# consumer of the payload needs. A 1,500-character docstring narrating this
+# class's own change history grew gopher_fetch's schema by 61% (8,323 -> 13,438
+# bytes) and told the reader nothing it could act on.
+#
+# WHY THIS IS A MODEL AND NOT A DICT
+# ---------------------------------
+# It was ``dict[str, Any]`` on fourteen result models: the one unconstrained
+# object left on the wire, so the advertised schema described the field that
+# says *which request this answer belongs to* as "any object". A client could
+# not tell ``selector`` from a typo of it, and nothing checked ``port`` was a
+# number. Every key below was read off a real construction site (the two
+# clients, the Gemini status parser and the server's ``_error``/trust/
+# certificate tools), not invented. ``extra="forbid"`` is the point: an
+# undeclared key is a misspelling or an accidental disclosure, and under the old
+# annotation both were published verbatim.
+#
+# WHY NOTHING IS REQUIRED
+# -----------------------
+# * ``timestamp`` is absent from the server's URL-only error paths -- the
+#   ``_error("INVALID_REQUEST", ..., url=display)`` rejections raised before a
+#   client is ever built, including one per URL of a rejected batch fetch.
+# * ``url`` is absent from the trust-store and certificate-store tools, whose
+#   echo is ``host``/``port``, and from the Gopher NOT_FETCHABLE result, which
+#   has no URL string of its own until :meth:`GopherClient.fetch` fills it in.
+#
+# Making either one required would turn those paths into crashes at the moment
+# they are trying to report a failure.
+class RequestInfo(BaseModel):
+    """What this result answers for: the request, echoed back.
+
+    Only the keys the request actually had are present, so a missing key means
+    "did not apply here", not "unknown". `url` plus `timestamp` identify which
+    question a result belongs to when several arrive together from a batch.
+    """
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    # -- Present for both protocols ------------------------------------------
+    url: str | None = Field(
+        default=None,
+        description="The resource this result answers for, as the server was "
+        "asked for it. A Gemini URL never carries its query string here: the "
+        "answer to a status-10/11 prompt travels in the query and may be a "
+        "secret",
+    )
+    timestamp: str | None = Field(
+        default=None,
+        description="ISO-8601 UTC instant at which this request was made. With "
+        "`cached_at` it is what distinguishes 'fetched now' from 'replayed "
+        "from cache'. Absent when the request was rejected before it was sent",
+    )
+    host: str | None = Field(default=None, description="Host that was contacted")
+    # Deliberately UNBOUNDED, despite naming a port. ``gemini_trust_update``
+    # builds its provenance echo -- host, port, timestamp -- before it validates
+    # its arguments, and then reports a bad port by echoing it back:
+    # ``_error("INVALID_REQUEST", f"Invalid port number: {port}", **request_info)``
+    # with port=70000. A ``le=65535`` here makes constructing that rejection
+    # raise ValidationError out of the tool, so the one call that exists to
+    # *report* an out-of-range port becomes an unhandled crash instead
+    # (tests/test_trust_tool.py::TestTrustUpdateRejectsBadInput::
+    # test_an_out_of_range_port_is_refused). The echo's job is to repeat what
+    # was asked, including when what was asked is nonsense; range-checking
+    # belongs at the tools' argument boundary, where it already happens.
+    port: int | None = Field(
+        default=None, description="Port that was contacted, as it was named"
+    )
+
+    # -- Gopher-only ----------------------------------------------------------
+    type: str | None = Field(
+        default=None,
+        description="Gopher item type character the URL named (RFC 1436)",
+    )
+    selector: str | None = Field(
+        default=None,
+        description="Gopher selector that was sent, rendered JSON-safe",
+    )
+    search_ignored: bool | None = Field(
+        default=None,
+        description="True when the URL carried a search query that was NOT "
+        "sent: RFC 1436 gives only type-7 items a query field, so a query on "
+        "any other type is dropped. Absent when nothing was dropped",
+    )
+
+    # -- Gemini-only ----------------------------------------------------------
+    path: str | None = Field(default=None, description="Path that was requested")
+    has_query: bool | None = Field(
+        default=None,
+        description="Whether the request carried a query string. Reported as a "
+        "flag rather than a value because the query holds the answer to a "
+        "status-10/11 prompt, which may be sensitive",
+    )
+    tls_version: str | None = Field(
+        default=None,
+        description="TLS version negotiated with the capsule. Null when the "
+        "connection reported none",
+    )
+    cipher: str | None = Field(
+        default=None,
+        description="TLS cipher suite negotiated with the capsule. Null when "
+        "the connection reported none",
+    )
+    cert_fingerprint: str | None = Field(
+        default=None,
+        description="SHA-256 fingerprint of the certificate the capsule "
+        "presented, as `sha256:<hex>`. Null when none was available",
+    )
+    tofu_warning: str | None = Field(
+        default=None,
+        description="Why this connection's certificate is not the pinned one, "
+        "when it is not. Null on a clean trust-on-first-use check",
+    )
+    client_cert_warning: str | None = Field(
+        default=None,
+        description="Why the client identity that was presented may not have "
+        "been usable. Present only when there is such a caveat",
+    )
+
+    @model_serializer(mode="wrap")
+    def _emit_only_what_was_supplied(
+        self, handler: Callable[["RequestInfo"], dict[str, Any]]
+    ) -> dict[str, Any]:
+        """Serialize the keys a call site set, and no others.
+
+        Fourteen optional fields dumped in full would put ten permanently-null
+        keys on every Gopher menu (`has_query`, `cipher`, ...) and three on
+        every Gemini page -- the same per-call noise the cache-provenance fields
+        are deliberately kept off uncacheable results to avoid. It would also be
+        a gratuitous wire change: `request_info` has always carried exactly the
+        keys its producer wrote.
+
+        Unset, not null, is the filter: the Gemini client writes `tls_version`,
+        `cipher`, `cert_fingerprint` and `tofu_warning` on every fetch, null
+        included, and those nulls are real answers ("we looked; there was
+        none"). Dropping nulls instead would silently delete four keys the
+        payload has always had.
+
+        Every field's serialization name equals its field name, so the filter
+        holds under ``by_alias=True`` as well -- which matters, because that is
+        how the MCP SDK dumps a tool result once the tool declares an output
+        model.
+        """
+        return {
+            name: value
+            for name, value in handler(self).items()
+            if name in self.model_fields_set
+        }
+
+    # -- The read-only mapping face -------------------------------------------
+    #
+    # Provenance is read by key everywhere it is read at all -- the Gemini
+    # status parser resolves a redirect against ``request_info["url"]``, and
+    # both clients' tests ask whether ``"search_ignored"``/
+    # ``"client_cert_warning"`` is present at all. Keeping ``[]``, ``in`` and
+    # ``.get()`` working is what let this field become a model without
+    # rewriting every consumer of it, and the semantics are the dict's: a key
+    # nobody supplied is ABSENT, not None, so ``"search_ignored" not in
+    # request_info`` still distinguishes "no query was dropped" from "a query
+    # was dropped and the flag says so".
+    #
+    # Writes deliberately do NOT get a mapping face: ``merge`` is the only way
+    # in, so every write is validated against the declared keys.
+
+    def __getitem__(self, key: str) -> Any:
+        """Return the supplied value for ``key``, as the old dict did."""
+        if key not in self.model_fields_set:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __contains__(self, key: object) -> bool:
+        """Report whether a call site actually supplied ``key``."""
+        return isinstance(key, str) and key in self.model_fields_set
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """Return the supplied value for ``key``, or ``default``."""
+        if key not in self.model_fields_set:
+            return default
+        return getattr(self, key)
+
+    def merge(self, other: "RequestInfo") -> None:
+        """Copy the keys ``other`` supplies onto this echo, in place.
+
+        Both clients build their result first and learn the rest of the
+        provenance afterwards -- the Gopher client attaches the URL and selector
+        once the response is back, the Gemini client attaches the negotiated TLS
+        details. That merge used to be ``dict.update``, the one write on this
+        field that nothing checked: a misspelt key there became a published key
+        that no schema, test or reader would ever question.
+
+        In place, not a copy, because the caller holds the result and not the
+        echo. Only ``other``'s SUPPLIED keys are copied, so merging cannot
+        resurrect a key as null and change what reaches the wire.
+        """
+        for name in other.model_fields_set:
+            setattr(self, name, getattr(other, name))
+
+
+# The one description of the provenance echo, shared by all fourteen result
+# models the way ``_CachedFlag`` and friends are shared -- it was a seven-line
+# ``Field(...)`` block copy-pasted at each, which is how the descriptions drifted
+# out of saying anything.
+_RequestInfo = Annotated[
+    RequestInfo,
+    Field(
+        validation_alias=AliasChoices("request_info", "requestInfo"),
+        serialization_alias="request_info",
+        description="What was actually requested, echoed back so an answer can "
+        "be matched to its question -- which matters most in a batch, where "
+        "several results arrive together",
+    ),
+]
+
+# The default belongs in the ASSIGNMENT, not in the ``Annotated`` above, and the
+# difference is not cosmetic: mypy reads a model body through
+# ``dataclass_transform``, where ``x: T`` with no assignment means "required in
+# ``__init__``" and only an assigned field specifier makes it optional. With the
+# ``default_factory`` buried in the annotation, pydantic filled the field in at
+# runtime while ``mypy src`` reported "Missing named argument "request_info"" at
+# every ``MenuResult``/``TextResult``/``BinaryResult`` the Gopher client builds
+# -- the type checker forbidding what the code already does, and CI red. Same
+# reason ``cached: _CachedFlag = False`` assigns its default here rather than in
+# ``_CachedFlag``.
+#
+# A ``default_factory``, never a shared ``RequestInfo()`` instance: the clients
+# merge provenance INTO this object in place, so one shared default would let
+# every result on the process write over every other result's echo.
+_REQUEST_INFO = Field(default_factory=RequestInfo)
 
 
 def iso_utc(timestamp: float | None) -> str | None:
@@ -266,12 +501,7 @@ class MenuResult(BaseModel):
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class TextResult(BaseModel):
@@ -292,12 +522,7 @@ class TextResult(BaseModel):
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class BinaryResult(BaseModel):
@@ -318,33 +543,28 @@ class BinaryResult(BaseModel):
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class ErrorResult(BaseModel):
     """Result model for error responses, shared by both protocols.
 
-    ``error`` is deliberately ``dict[str, Any]``: a Gemini failure carries the
-    numeric ``status`` (and the boolean ``temporary``) beside the message, and a
-    Gopher-only ``dict[str, str]`` twin meant that annotation was the only thing
-    keeping those fields out of a Gopher error.
+    `error` always carries `code` and `message`; a Gemini failure adds the
+    numeric `status` and a boolean `temporary` saying whether retrying may help.
     """
+
+    # ``error`` is ``dict[str, Any]`` rather than a typed model, and this
+    # comment rather than the docstring says so because the docstring is
+    # published as the ``ErrorResult`` description in both fetch tools'
+    # ``outputSchema``. A Gopher-only ``dict[str, str]`` twin was the only thing
+    # keeping ``status``/``temporary`` out of a Gopher error, which is a
+    # constraint the two protocols should not have to share a class to express.
 
     # 'kind' makes the result self-describing and a reliable discriminator
     # across every result type.
     kind: Literal["error"] = "error"
     error: dict[str, Any] = Field(..., description="Error information")
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 # Union type for all possible response types
@@ -596,12 +816,7 @@ class GeminiSuccessResult(BaseModel):
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
 
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class GeminiBinaryResult(BaseModel):
@@ -629,12 +844,7 @@ class GeminiBinaryResult(BaseModel):
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class GeminiInputResult(BaseModel):
@@ -643,12 +853,7 @@ class GeminiInputResult(BaseModel):
     kind: Literal["input"] = "input"
     prompt: str = Field(..., description="Input prompt text")
     sensitive: bool = Field(default=False, description="Whether input is sensitive")
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class GeminiRedirectResult(BaseModel):
@@ -683,12 +888,7 @@ class GeminiRedirectResult(BaseModel):
         "Geminispace and cannot be fetched with this tool. Null when the "
         "target names no scheme and the request's is unknown",
     )
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
     @model_validator(mode="after")
     def describe_target(self) -> "GeminiRedirectResult":
@@ -699,8 +899,10 @@ class GeminiRedirectResult(BaseModel):
         """
         try:
             target = urlsplit(self.new_url)
-            requested = self.request_info.get("url")
-            source = urlsplit(requested) if isinstance(requested, str) else None
+            # ``.url`` rather than ``.get("url")``: the echo is a typed model
+            # now, so the "is it even a string?" guard the dict needed is gone.
+            requested = self.request_info.url
+            source = urlsplit(requested) if requested is not None else None
         except ValueError:  # a target too malformed to split tells us nothing
             return self
 
@@ -750,12 +952,7 @@ class GeminiCertificateResult(BaseModel):
         "rather than by the capsule. The three sub-codes need different "
         "answers, and only one of them is fixed by creating a certificate.",
     )
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 # Gemtext content models
@@ -794,19 +991,21 @@ class GemtextLink(BaseModel):
 
 
 class GemtextLine(BaseModel):
-    """Model for a single line in gemtext format.
+    """One line of a gemtext document: `type`, `content`, and nothing repeated.
 
-    One fact, one field, all of them on the line itself. Each line type used to
-    nest a second object as well (``heading``/``list_item``/``quote``/
-    ``preformat``), and every one of those carried a ``raw_content`` (or
-    ``content``) that repeated this line's ``content`` verbatim -- so a parsed
-    page serialized each of its lines two or three times, and the whole body
-    once more in ``GeminiGemtextResult.raw_content``. Context is the scarce
-    resource for a model reading a capsule, so only what ``type`` and
-    ``content`` cannot already say is kept: the resolved link target, the
-    heading level, the marker-stripped ``text``, and a preformatted block's
-    alt-text and detected language.
+    Beyond `type` and `content` a line carries only what those two cannot say --
+    a link's resolved `url`, a heading's `level`, the marker-stripped `text`,
+    and a preformatted block's alt-text and detected language.
     """
+
+    # This docstring is published as the ``GemtextLine`` description in
+    # gemini_fetch's ``outputSchema``, so the history stays in this comment.
+    # Each line type used to nest a second object (``heading``/``list_item``/
+    # ``quote``/``preformat``), and every one of those carried a
+    # ``raw_content`` (or ``content``) repeating this line's ``content``
+    # verbatim -- a parsed page serialized each line two or three times, and the
+    # whole body once more in ``GeminiGemtextResult.raw_content``. Context is
+    # the scarce resource for a model reading a capsule.
 
     type: GemtextLineType = Field(..., description="Type of gemtext line")
     content: str = Field(
@@ -911,12 +1110,7 @@ class GeminiGemtextResult(BaseModel):
     cached: _CachedFlag = False
     cached_at: _CachedAt = None
     cache_age_seconds: _CacheAgeSeconds = None
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 # Union type for all possible Gemini fetch responses
@@ -1141,12 +1335,7 @@ class TOFUTrustListResult(BaseModel):
             ]
         return v
 
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class TOFUTrustUpdateResult(BaseModel):
@@ -1168,12 +1357,7 @@ class TOFUTrustUpdateResult(BaseModel):
         "there was nothing to change (e.g. the host had no pin to remove)",
     )
     message: str = Field(..., description="Human-readable summary of the outcome")
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class GeminiClientCertListResult(BaseModel):
@@ -1190,12 +1374,7 @@ class GeminiClientCertListResult(BaseModel):
         description="Stored client certificates matching the request, ordered "
         "by host, port and path scope",
     )
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class GeminiClientCertUpdateResult(BaseModel):
@@ -1233,12 +1412,7 @@ class GeminiClientCertUpdateResult(BaseModel):
         "scope named for removal)",
     )
     message: str = Field(..., description="Human-readable summary of the outcome")
-    request_info: dict[str, Any] = Field(
-        default_factory=dict,
-        validation_alias=AliasChoices("request_info", "requestInfo"),
-        serialization_alias="request_info",
-        description="Information about the original request",
-    )
+    request_info: _RequestInfo = _REQUEST_INFO
 
 
 class GeminiCacheEntry(_BaseCacheEntry[GeminiFetchResponse]):

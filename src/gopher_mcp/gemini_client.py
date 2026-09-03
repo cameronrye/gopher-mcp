@@ -31,6 +31,7 @@ from .models import (
     GeminiErrorResult,
     GeminiFetchResponse,
     GeminiURL,
+    RequestInfo,
     TOFUEntry,
     iso_utc,
     mark_from_cache,
@@ -447,17 +448,17 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             # answer is carried in the query and may be a secret (status 11).
             # This result is returned to the LLM/transcript via model_dump(),
             # so record only that a query was present, matching the log policy.
-            request_info = {
-                "url": _safe_display_url(parsed_url),
-                "host": parsed_url.host,
-                "port": parsed_url.port,
-                "path": parsed_url.path,
+            request_info = RequestInfo(
+                url=_safe_display_url(parsed_url),
+                host=parsed_url.host,
+                port=parsed_url.port,
+                path=parsed_url.path,
                 # ``is not None``: an empty answer to a status-10/11 prompt is a
                 # present query, and reporting it as absent contradicts the
                 # request that was actually sent.
-                "has_query": parsed_url.query is not None,
-                "timestamp": iso_utc(time.time()),
-            }
+                has_query=parsed_url.query is not None,
+                timestamp=iso_utc(time.time()),
+            )
 
             # Fetch the content (optionally bounded by the concurrency cap)
             response = await self._bounded_fetch(parsed_url)
@@ -470,7 +471,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             # Add request info to response. Every union member declares
             # ``request_info``, so access it directly rather than behind a
             # hasattr guard mypy can never check.
-            response.request_info.update(request_info)
+            response.request_info.merge(request_info)
 
             # Cache the response. Skip transient/non-content results: error
             # and redirect targets can change moment to moment, and
@@ -652,7 +653,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 ),
                 "retry_after_seconds": retry_after,
             },
-            request_info={"url": safe_url, "timestamp": iso_utc(time.time())},
+            request_info=RequestInfo(url=safe_url, timestamp=iso_utc(time.time())),
         )
 
     def _safe_error_url(self, url: str) -> str:
@@ -771,13 +772,13 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return GeminiErrorResult(
             error={"code": code, "message": message},
-            request_info={
-                "url": _safe_display_url(parsed_url),
-                "host": parsed_url.host,
-                "port": parsed_url.port,
-                "path": parsed_url.path,
-                "timestamp": iso_utc(time.time()),
-            },
+            request_info=RequestInfo(
+                url=_safe_display_url(parsed_url),
+                host=parsed_url.host,
+                port=parsed_url.port,
+                path=parsed_url.path,
+                timestamp=iso_utc(time.time()),
+            ),
         )
 
     async def _fetch_robots(self, host: str, port: int) -> str | None:
@@ -1152,16 +1153,20 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
 
                 # Add connection info to request info. Every union member
                 # declares ``request_info``, so no hasattr guard is needed.
-                result.request_info.update(
-                    {
-                        "tls_version": connection_info.get("tls_version"),
-                        "cipher": connection_info.get("cipher"),
-                        "cert_fingerprint": connection_info.get("cert_fingerprint"),
-                        "tofu_warning": tofu_warning,
-                    }
+                # All four are written even when null: "we looked and the
+                # connection reported none" is a different answer from "nobody
+                # looked", and RequestInfo publishes only the keys that were
+                # actually written.
+                result.request_info.merge(
+                    RequestInfo(
+                        tls_version=connection_info.get("tls_version"),
+                        cipher=connection_info.get("cipher"),
+                        cert_fingerprint=connection_info.get("cert_fingerprint"),
+                        tofu_warning=tofu_warning,
+                    )
                 )
                 if client_cert_warning is not None:
-                    result.request_info["client_cert_warning"] = client_cert_warning
+                    result.request_info.client_cert_warning = client_cert_warning
 
                 return result
 

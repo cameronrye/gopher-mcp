@@ -31,6 +31,7 @@ from .models import (
     GopherFetchResponse,
     GopherURL,
     MenuResult,
+    RequestInfo,
     TextResult,
     iso_utc,
     mark_from_cache,
@@ -390,8 +391,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             if interactive is not None:
                 # _interactive_result has no URL string of its own, so the echo
                 # every other error carries is completed here rather than left
-                # as the empty dict this one code used to return.
-                interactive.request_info["url"] = url
+                # as the empty echo this one code used to return. Assignment on
+                # the model, not item assignment: RequestInfo takes writes only
+                # through validated attributes, so a misspelt key is a
+                # type-check failure here instead of a published nonsense key.
+                interactive.request_info.url = url
                 return interactive
 
             # Robot exclusion, before the cache lookup below: a Disallow must
@@ -445,26 +449,26 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                     return cached_response
 
             # Create request info for provenance
-            request_info: dict[str, object] = {
-                "url": url,
-                "host": parsed_url.host,
-                "port": parsed_url.port,
-                "type": parsed_url.gopher_type,
-                "selector": _display_selector(parsed_url.selector),
-                "timestamp": iso_utc(time.time()),
-            }
+            request_info = RequestInfo(
+                url=url,
+                host=parsed_url.host,
+                port=parsed_url.port,
+                type=parsed_url.gopher_type,
+                selector=_display_selector(parsed_url.selector),
+                timestamp=iso_utc(time.time()),
+            )
             # RFC 1436 gives only type-7 (Index-Search) servers a query field, so
             # _fetch_content drops a ?query on anything else. Say so: a menu (or
             # the model) that mislabels a search item as type 0/1 otherwise gets
             # an unrelated page back with nothing to reveal the terms vanished.
             if parsed_url.search is not None and parsed_url.gopher_type != "7":
-                request_info["search_ignored"] = True
+                request_info.search_ignored = True
 
             # Fetch the content (optionally bounded by the concurrency cap)
             response = await self._bounded_fetch(parsed_url)
             # Merge (not clobber) so any fields a processor attached survive --
             # matches the Gemini client and avoids a latent maintenance trap.
-            response.request_info.update(request_info)
+            response.request_info.merge(request_info)
 
             # Cache the response, but skip errors: a transient failure would
             # otherwise be served stale for the whole TTL. Mirrors the Gemini
@@ -581,7 +585,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         code = "ROBOTS_UNAVAILABLE" if reason == "unavailable" else "BLOCKED_BY_ROBOTS"
         return ErrorResult(
             error={"code": code, "message": message},
-            request_info={"url": url, "timestamp": iso_utc(time.time())},
+            request_info=RequestInfo(url=url, timestamp=iso_utc(time.time())),
         )
 
     async def _fetch_robots(self, host: str, port: int) -> str | None:
@@ -693,13 +697,13 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # request that produced it -- most visibly for one entry of a
             # gopher_batch_fetch list. The ``url`` is filled in by ``fetch``,
             # which is the only caller that has the original string.
-            request_info={
-                "host": parsed_url.host,
-                "port": parsed_url.port,
-                "type": parsed_url.gopher_type,
-                "selector": _display_selector(parsed_url.selector),
-                "timestamp": iso_utc(time.time()),
-            },
+            request_info=RequestInfo(
+                host=parsed_url.host,
+                port=parsed_url.port,
+                type=parsed_url.gopher_type,
+                selector=_display_selector(parsed_url.selector),
+                timestamp=iso_utc(time.time()),
+            ),
         )
 
     async def _fetch_content(self, parsed_url: GopherURL) -> GopherFetchResponse:

@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** `request_info` is a described object rather than an open one. It
+  was the last unconstrained `dict[str, Any]` on the wire, declared identically
+  on fourteen result models, so the `outputSchema` 0.9.0 worked to make precise
+  still said "any object" for the field every result carries. It is now a
+  `RequestInfo` model with fourteen documented, individually optional fields
+  (`url`, `timestamp`, `host`, `port`, `type`, `selector`, `search_ignored`,
+  `path`, `has_query`, `tls_version`, `cipher`, `cert_fingerprint`,
+  `tofu_warning`, `client_cert_warning`), and the advertised schema references
+  it with `additionalProperties: false`. What a caller receives is otherwise
+  unchanged: the values are byte-identical to 0.9.1 and a key absent before is
+  absent now. Two things do change. A client validating strictly will reject a
+  payload carrying any other key, which previously passed through; and the key
+  ORDER within `request_info` now follows the field declarations rather than the
+  order the producer happened to insert them, which is invisible to a JSON
+  parser but visible in the pretty-printed text block many hosts show the model.
+- `port` in `RequestInfo` is deliberately unbounded despite naming a port.
+  `gemini_trust_update` builds its provenance echo before validating its
+  arguments and reports a bad port by quoting it back, so a `le=65535` here
+  turned the one call whose job is to _report_ an out-of-range port into an
+  unhandled crash.
+
 - The server tells the model two things it previously only knew internally. A
   Gopher `i` (info) item is display text whose `next_url` is empty, which is
   most of a typical menu -- a model told to navigate by `next_url` could only

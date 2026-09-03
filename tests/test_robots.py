@@ -1730,9 +1730,14 @@ class TestReviewRegressions:
             process_gemini_response,
         )
 
+        # The second argument is the request URL STRING, not a request_info
+        # mapping. Passing `{"url": ...}` used to survive because request_info
+        # was `dict[str, Any]`, so the dict was nested inside itself and the
+        # redirect base silently became the repr "{'url': '...'}"; RequestInfo
+        # types `url` as `str | None`, which is what caught it.
         result = process_gemini_response(
             parse_gemini_response(b"31 //[::1\r\n"),
-            {"url": "gemini://example.com/a"},
+            "gemini://example.com/a",
         )
         assert isinstance(result, GeminiErrorResult)
         assert result.error["code"] == "INVALID_REDIRECT"

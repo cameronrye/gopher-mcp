@@ -27,7 +27,7 @@ from typing import ClassVar, Generic, Protocol, TypeVar
 import structlog
 
 from .cache import TTLCacheMixin
-from .models import ErrorResult, iso_utc
+from .models import ErrorResult, RequestInfo, iso_utc
 from .ratelimit import RateLimiter
 from .robots import AI_AGENT_TOKENS, RobotsGate
 from .ssrf import normalize_host
@@ -215,7 +215,7 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
         )
         return ErrorResult(
             error={"code": code, "message": message},
-            request_info={"url": safe_url, "timestamp": iso_utc(time.time())},
+            request_info=RequestInfo(url=safe_url, timestamp=iso_utc(time.time())),
         )
 
     async def _bounded_fetch(self, parsed_url: UrlT) -> ResponseT:

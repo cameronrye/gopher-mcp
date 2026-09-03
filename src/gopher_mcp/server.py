@@ -54,6 +54,7 @@ from .models import (
     GeminiFetchRequest,
     GopherFetchOutput,
     GopherFetchRequest,
+    RequestInfo,
     TOFUTrustEntry,
     TOFUTrustListResult,
     TOFUTrustUpdateResult,
@@ -730,10 +731,18 @@ def _error(code: str, message: str, **request_info: Any) -> dict[str, Any]:
     ``request_info`` echoes back only what the caller supplied (a URL, or the
     host a trust-store call named), so an error can never become a way to read
     state the caller did not ask about.
+
+    The kwargs are splatted into :class:`~gopher_mcp.models.RequestInfo` rather
+    than handed over as a bare dict, which is what makes the keyword names in
+    this module's ~20 ``_error(...)`` calls checkable at all: the model declares
+    ``extra="forbid"``, so a misspelt ``hsot=`` raises here instead of becoming
+    a published provenance key that no schema, reader or test would question.
+    Passing the dict straight through typed as ``dict[str, Any]`` also failed
+    ``mypy src`` once the field stopped being a dict.
     """
     return ErrorResult(
         error={"code": code, "message": message},
-        request_info=request_info,
+        request_info=RequestInfo(**request_info),
     ).model_dump()
 
 
@@ -1200,7 +1209,7 @@ async def gemini_trust_list(host: _TrustHostFilter = None) -> dict[str, Any]:
     # the type checker to see that the two agree.
     return TOFUTrustListResult(
         entries=[TOFUTrustEntry.from_entry(entry) for entry in matched],
-        request_info=request_info,
+        request_info=RequestInfo(**request_info),
     ).model_dump()
 
 
@@ -1362,7 +1371,7 @@ async def gemini_trust_update(
         port=port,
         changed=changed,
         message=message,
-        request_info=request_info,
+        request_info=RequestInfo(**request_info),
     ).model_dump()
 
 
@@ -1468,7 +1477,7 @@ async def gemini_client_cert_list(host: _CertHostFilter = None) -> dict[str, Any
             )
             for cert in matched
         ],
-        request_info=request_info,
+        request_info=RequestInfo(**request_info),
     ).model_dump()
 
 
@@ -1850,7 +1859,7 @@ async def gemini_client_cert_update(
         expires=outcome.expires,
         changed=outcome.changed,
         message=outcome.message,
-        request_info=request_info,
+        request_info=RequestInfo(**request_info),
     ).model_dump()
 
 

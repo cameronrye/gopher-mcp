@@ -190,11 +190,21 @@ class TestGeminiIntegration:
         """Test complete workflow for fetching Gemini content."""
         clear_client_manager()
 
-        # Mock TLS connection and response
+        # Mock TLS connection and response.
+        #
+        # `cipher` is the suite NAME, not ssl.SSLObject.cipher()'s 3-tuple:
+        # GeminiTLSClient._get_connection_info already reduces it with
+        # `cipher[0] if cipher else None` (pinned by
+        # tests/test_gemini_tls.py::...::info["cipher"] == "TLS_AES_256_GCM_SHA384").
+        # These mocks used to hand `connect` the raw tuple, a shape production
+        # never produces; RequestInfo.cipher being `str | None` turned that
+        # fiction into a ValidationError that the fetch wrapper caught and
+        # reported as an INVALID_REQUEST error result, so five workflow tests
+        # asserted on `kind == "error"` instead of the page they fetched.
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS_AES_256_GCM_SHA384", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "sha256:testfp",
         }
 
@@ -237,7 +247,7 @@ class TestGeminiIntegration:
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "sha256:testfp",
         }
 
@@ -269,7 +279,7 @@ class TestGeminiIntegration:
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "sha256:testfp",
         }
 
@@ -301,7 +311,7 @@ class TestGeminiIntegration:
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "sha256:testfp",
         }
         raw_response = b"20 text/gemini\r\n# Cached\nCached content"
@@ -420,7 +430,7 @@ class TestErrorPaths:
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "test_fingerprint_123",
         }
 
@@ -451,7 +461,7 @@ class TestErrorPaths:
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "sha256:testfp",
         }
 
@@ -518,7 +528,7 @@ class TestConcurrency:
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "sha256:testfp",
         }
         raw_response = b"20 text/gemini\r\n# Concurrent\nContent"
@@ -567,7 +577,7 @@ class TestConcurrency:
         mock_ssl_sock = Mock()
         mock_connection_info = {
             "peer_cert": Mock(),
-            "cipher": ("TLS", "TLSv1.3", 256),
+            "cipher": "TLS_AES_256_GCM_SHA384",
             "cert_fingerprint": "sha256:testfp",
         }
         raw_gemini_response = b"20 text/gemini\r\n# Gemini\nContent"
