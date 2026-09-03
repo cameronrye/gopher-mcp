@@ -73,14 +73,18 @@ SERVER_INSTRUCTIONS = (
     "Browse Gopher and Gemini resources. Use gopher_fetch for gopher:// URLs and "
     "gemini_fetch for gemini:// URLs; the *_batch_fetch variants take several "
     "URLs at once. Navigate by following the `next_url` field of Gopher menu "
-    "items and the `links` of Gemini gemtext documents. Binary and oversize "
-    "bodies are returned as metadata only (no raw bytes). On a Gemini status-10 "
-    "or status-11 (input) response, call gemini_fetch again with the `input` "
-    "argument set to the user's answer rather than building a query string by "
-    "hand. A result marked `truncated` carries a `next_offset`: call the same "
-    "tool again with `offset` set to it to read the rest, rather than treating "
-    "the first window as the whole resource. To query a Gopher type-7 search "
-    "server, pass the terms in "
+    "items and the `links` of Gemini gemtext documents. A Gopher menu entry "
+    "with an empty `next_url` is an `i` (info) banner: display text, with "
+    "nothing to fetch. Binary and oversize bodies are returned as metadata only "
+    "(no raw bytes). On a Gemini status-10 or status-11 (input) response, call "
+    "gemini_fetch again with the `input` argument set to the user's answer "
+    "rather than building a query string by hand. A status-11 answer is a "
+    "secret the capsule asked for: pass it in `input` and never echo it back -- "
+    "not in your reply, a summary, or a later prompt. A result marked "
+    "`truncated` carries a `next_offset`: call the same tool again with "
+    "`offset` set to it to read the rest, rather than treating the first window "
+    "as the whole resource. To query a Gopher type-7 search server, pass the "
+    "terms in "
     "gopher_fetch's `search` argument rather than appending them to the URL "
     "yourself: `search` percent-encodes them, so terms containing #, + or "
     "non-ASCII survive intact (a gopher://host/7/selector?terms URL is still "
@@ -850,8 +854,10 @@ async def gopher_fetch(
     Branch on the result's `kind`, which is one of four:
 
     - `menu` -- a directory. Each entry in `items` carries `next_url`, which is
-      what you follow to navigate; `truncated: true` means the directory had
-      more entries than the render limit.
+      what you follow to navigate -- except where it is empty, which marks an
+      `i` (info) entry: banner text with nothing to fetch (passing that empty
+      string back returns INVALID_REQUEST). `truncated: true` means the
+      directory had more entries than the render limit.
     - `text` -- a body in `text`, with `truncated` telling you whether it was
       cut at the render limit.
     - `binary` -- metadata only: `bytes` and `mime_type`, never the content.
@@ -915,6 +921,9 @@ async def gemini_fetch(
     - `binary` -- metadata only: `size` and `mime_type`, never the content.
     - `input` -- the capsule is asking a question (status 10/11). Call this tool
       again with `input=` set to the user's answer; do not build a query string.
+      Status 11 carries `sensitive: true` and is asking for a password or
+      token: pass the answer through `input` and never echo it back -- not in
+      your reply, a summary, or a later prompt.
     - `redirect` -- status 30/31, NOT followed for you. Fetch `new_url`
       yourself if it is right to, and see the redirect rules below first.
     - `certificate` -- a client-identity status (60/61/62), described next.

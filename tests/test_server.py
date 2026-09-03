@@ -3,6 +3,7 @@
 import inspect
 import json
 import os
+import re
 import tempfile
 from importlib.metadata import version as importlib_version
 from pathlib import Path
@@ -17,7 +18,7 @@ from gopher_mcp import __version__, server
 from gopher_mcp.config import GeminiConfig, GopherConfig, reset_config
 from gopher_mcp.gemini_client import GeminiClient
 from gopher_mcp.gopher_client import GopherClient
-from gopher_mcp.gopher_parse import parse_gopher_url
+from gopher_mcp.gopher_parse import parse_gopher_menu, parse_gopher_url
 from gopher_mcp.models import GopherMenuItem, MenuResult, TextResult
 from gopher_mcp.server import (
     ClientManager,
@@ -1667,3 +1668,125 @@ class TestResourcesAndPrompts:
         assert "gemini://example.org/" in text
         assert "five redirects" in text
         assert "untrusted" in text
+
+
+def _sentences(text: str) -> list[str]:
+    """Split description prose into sentences with whitespace normalised.
+
+    Docstring prose is hard-wrapped at 88 columns, so a claim the model reads as
+    one sentence is several source lines. Asserting that two words appear
+    somewhere in a 2000-character description proves nothing about whether they
+    were said together; asserting they share a sentence does, without pinning
+    the exact wording.
+    """
+    normalised = " ".join(text.split())
+    return [part for part in re.split(r"(?<=[.;]) ", normalised) if part]
+
+
+class TestInfoLinesAreDeclaredUnfollowable:
+    """An empty `next_url` on a Gopher menu entry means it is an info banner.
+
+    Info lines are display text with a placeholder selector, so there is nothing
+    to fetch -- and they are the majority of the entries in a typical menu. A
+    model told only to "navigate by `next_url`" therefore meets dozens of empty
+    strings per directory, and the only way it can discover they are not links
+    is to spend a tool call on each and get INVALID_REQUEST back. The server
+    knows this at parse time; the model learns it only if the prose says so.
+    """
+
+    @pytest.mark.asyncio
+    async def test_an_info_line_has_no_url_and_the_empty_one_is_refused(self):
+        """Anchors the claim the prose makes, so it cannot quietly go stale.
+
+        All three parts matter: the parser really does emit "" for an ordinary
+        `i` item, handing that "" back to the tool really is an INVALID_REQUEST
+        rather than, say, a fetch of the server root, and an `i` line carrying
+        an explicit `URL:` target keeps that target -- gopher_parse checks the
+        hURL prefix *before* the info-line rule. That last case is why the
+        prose is keyed on an empty `next_url` rather than on the item type:
+        "an info item's next_url is empty" would be a claim this menu line
+        falsifies, and prose the model is handed must be true of every menu.
+        """
+        items = parse_gopher_menu("iWelcome to the hole\tfake\t(NULL)\t0")
+        assert [item.next_url for item in items] == [""]
+
+        linked = parse_gopher_menu("iSee us\tURL:https://example.org\t(NULL)\t0")
+        assert [item.next_url for item in linked] == ["https://example.org"]
+
+        result = await gopher_fetch(url="")
+        assert result["kind"] == "error"
+        assert result["error"]["code"] == "INVALID_REQUEST"
+
+    @pytest.mark.asyncio
+    async def test_the_gopher_fetch_description_says_info_items_are_not_links(self):
+        """The description is the one thing every client sends the model."""
+        tools = {t.name: t for t in await mcp.list_tools()}
+        description = tools["gopher_fetch"].description or ""
+        said_together = [
+            sentence
+            for sentence in _sentences(description)
+            if "info" in sentence.lower() and "next_url" in sentence
+        ]
+        assert said_together, (
+            "gopher_fetch never tells the model what an info item's next_url is"
+        )
+        assert any("empty" in sentence.lower() for sentence in said_together)
+
+    def test_the_instructions_say_it_where_navigation_is_described(self):
+        """SERVER_INSTRUCTIONS is where the model is told to follow `next_url`,
+        so it is where the exception to that belongs."""
+        said_together = [
+            sentence
+            for sentence in _sentences(mcp.instructions or "")
+            if "next_url" in sentence
+        ]
+        assert said_together
+        assert any(
+            "info" in sentence.lower() and "empty" in sentence.lower()
+            for sentence in said_together
+        )
+
+
+class TestSensitiveInputIsNeverEchoed:
+    """A status-11 answer is a secret and must not be repeated back.
+
+    Status 11 (SENSITIVE INPUT) asks for a password or token. The result model
+    carries `sensitive: true` and docs/ai-assistant-guide.md tells a human
+    reader never to echo the answer, but documentation is not delivered over
+    MCP: only the instructions and the tool descriptions are. Without this the
+    model can hold a user's password and repeat it into a summary, a follow-up
+    prompt, or the transcript itself.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_gemini_fetch_description_forbids_echoing_the_answer(self):
+        tools = {t.name: t for t in await mcp.list_tools()}
+        description = tools["gemini_fetch"].description or ""
+        forbidding = [
+            sentence
+            for sentence in _sentences(description)
+            if "echo" in sentence.lower()
+        ]
+        assert forbidding, "gemini_fetch never warns against echoing an answer"
+        assert any("never" in sentence.lower() for sentence in forbidding)
+        # The warning has to be attached to the status that earns it, or the
+        # model cannot tell which answers it applies to.
+        assert any(
+            "11" in sentence or "sensitive" in sentence.lower()
+            for sentence in forbidding
+        )
+
+    def test_the_instructions_forbid_it_too(self):
+        """A client may drop instructions, and it may equally drop nothing but
+        show the model a tool list; the rule has to survive either."""
+        forbidding = [
+            sentence
+            for sentence in _sentences(mcp.instructions or "")
+            if "echo" in sentence.lower()
+        ]
+        assert forbidding, "SERVER_INSTRUCTIONS never warns against echoing"
+        assert any("never" in sentence.lower() for sentence in forbidding)
+        assert any(
+            "11" in sentence or "sensitive" in sentence.lower()
+            for sentence in forbidding
+        )

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The server tells the model two things it previously only knew internally. A
+  Gopher `i` (info) item is display text whose `next_url` is empty, which is
+  most of a typical menu -- a model told to navigate by `next_url` could only
+  discover that by spending a tool call on each one and getting
+  `INVALID_REQUEST`. And an answer to a status-11 (SENSITIVE INPUT) prompt must
+  never be echoed: the result already carried a `sensitive` flag and the AI
+  assistant guide already said so, but nothing that reached the model over MCP
+  did. Both now appear in the server instructions and at the point of use in the
+  relevant tool description.
+- README states which protocols are in scope, and that Titan, Misfin, Spartan,
+  Nex and Gopher+ are deliberately out of it rather than merely unbuilt -- the
+  first two because they are write protocols and this is a read-only gateway.
+  It also stops claiming every standard RFC 1436 item type is categorised: `+`
+  (redundant server) has no category of its own and takes the unknown-type path,
+  which is deliberate and was already pinned by a test.
+
+### Fixed
+
+- The `outputSchema` round-trip test validated through Pydantic, which is not
+  what clients do -- the MCP SDK's own `ClientSession` runs
+  `jsonschema.validate` against the advertised schema on every call, and
+  `jsonschema` ignores the `discriminator` keyword, so the union is enforced as
+  a bare `oneOf` that must match exactly one branch. That path had no test. It
+  now has 52, covering every `kind` of both fetch tools as minimal and maximal
+  payloads, asserting each matches exactly one branch, checking the schema is
+  itself valid, and exercising the cache-replay path where `mark_from_cache`
+  stamps fields via `model_copy(update=...)` without validating them. No
+  currently-reachable payload fails, and the guards were mutation-tested to
+  confirm they are not vacuous.
+
 ## [0.9.1] - 2026-09-03
 
 ### Fixed

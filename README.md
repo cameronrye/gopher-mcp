@@ -36,7 +36,10 @@ modern Python practices, it provides secure, efficient gateways to these distinc
   (`1`) and Index-Search servers (`7`) as structured menus, text (`0`), HTML
   (`h`), info (`i`) and error (`3`) lines as text, the fourteen binary types as
   metadata only, and the three interactive ones (`2`, `8`, `T`) refused without
-  opening a connection. An unknown type is read as text, best-effort, and an
+  opening a connection. The one standard type with no category of its own is `+`
+  (redundant server), which names an alternate host for the preceding item
+  rather than content to render; it takes the unknown-type path below. An
+  unknown type is read as text, best-effort, and an
   hURL `URL:<target>` selector is followed to the destination the server
   actually stated
 - **Full Gemini Implementation**: Native gemtext parsing, TLS security, and status code handling
@@ -47,6 +50,26 @@ modern Python practices, it provides secure, efficient gateways to these distinc
 - **Modern Development**: Full type checking, linting, testing, and CI/CD pipeline
 - **High Performance**: Async/await patterns with intelligent caching — and cached results say so, with a per-request `refresh` bypass
 - **Continuable Reads**: A menu or page cut at the render limit reports where it stops, so `offset` reads the rest instead of leaving a partial view
+
+### Protocols in scope
+
+Gopher (RFC 1436, including the de-facto item types in common use) and Gemini,
+both read-only. That is the whole surface, and the neighbouring protocols are
+deliberately out of scope rather than merely unbuilt:
+
+- **Titan** and **Misfin** are write protocols — upload and mail. A tool an LLM
+  drives should not be able to publish to someone's capsule or send mail as
+  them, and adding either would make every safeguard here (robots, rate limits,
+  allowlists) protect a much smaller share of what the tool can do.
+- **Spartan** and **Nex** are separate protocols with their own parsers and
+  their own failure modes, serving a small fraction of the hosts these two do.
+  They would double the security-relevant surface for a rounding error in reach.
+- **Gopher+** is not implemented. The `:` item type is recognised because it
+  appears in ordinary menus, but no Gopher+ attribute or metadata request is
+  ever sent.
+
+If you need one of these, an MCP server that does it well is a better answer
+than a flag on this one.
 
 ## Documentation
 
