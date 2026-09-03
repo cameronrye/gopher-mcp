@@ -489,6 +489,13 @@ _GEMTEXT_LINES = st.sampled_from(
         "text with => inside",
         "####deep",
         "",
+        # Partial and over-long fence markers. A cut landing inside a ``` marker
+        # is the case that made the first version of this fix wrong: the prefix
+        # alone starts no fence, but the line it belongs to does.
+        "`",
+        "``",
+        "````",
+        "```=> /x Y",
     ]
 )
 
@@ -511,7 +518,7 @@ def test_a_resumed_window_never_invents_a_link(body: str, cut: int) -> None:
     base = "gemini://example.org/"
 
     whole = {link.url for link in parse_gemtext(body, base).links}
-    in_preformat, starts_mid_line = gemtext_state_at(body[:cut])
+    in_preformat, starts_mid_line = gemtext_state_at(body, cut)
     resumed = {
         link.url
         for link in parse_gemtext(

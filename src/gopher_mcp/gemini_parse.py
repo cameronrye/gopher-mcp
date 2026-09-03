@@ -630,7 +630,7 @@ def _process_success_response(
         # A window is not the top of a document. Recover the parse state it
         # resumes in from the text before it, so a ``` block or a line that
         # straddles the cut keeps its meaning across the boundary.
-        resume_in_preformat, resume_mid_line = gemtext_state_at(content[: window.start])
+        resume_in_preformat, resume_mid_line = gemtext_state_at(content, window.start)
         content = window.text
         truncated = window.next_offset is not None
         next_offset = window.next_offset

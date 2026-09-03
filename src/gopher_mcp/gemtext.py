@@ -254,30 +254,48 @@ def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
     return None
 
 
-def gemtext_state_at(prefix: str) -> tuple[bool, bool]:
-    """Return the parse state a window starting after ``prefix`` resumes in.
+def gemtext_state_at(text: str, offset: int) -> tuple[bool, bool]:
+    """Return the parse state a window of ``text`` starting at ``offset`` resumes in.
 
     A continuation window is not the top of a document, but
     :func:`parse_gemtext` classifies from the top of whatever it is handed. Two
     bits of state decide what the resumed lines mean, and both are recoverable
-    from the text that came before: whether the resume point sits inside a
+    from the surrounding document: whether the resume point sits inside a
     preformat block, and whether it sits inside a line.
+
+    This takes the whole text rather than just the prefix because a cut can land
+    INSIDE a fence marker. Given "```\\n=> url text" cut at 1, the prefix is a
+    single backtick, which starts no fence -- but the line it belongs to does,
+    and judging it by its prefix alone reports "not in a preformat block" and
+    lets the window parse the fenced link as a real one. The line the cut lands
+    in has to be judged whole, so the toggle is read from ``text`` at the line's
+    real start.
 
     Returns:
         ``(in_preformat, starts_mid_line)``
 
     """
-    if not prefix:
+    offset = min(max(offset, 0), len(text))
+    if offset == 0:
         return False, False
-    normalized = prefix.replace("\r\n", "\n").replace("\r", "\n")
-    segments = normalized.split("\n")
-    # A trailing segment with no terminator is a line the window resumes inside.
-    starts_mid_line = segments[-1] != ""
-    # Every ``` line toggles, in both directions, so parity is the whole state.
-    # The unterminated trailing segment counts: the toggle belongs to the line,
-    # and that line STARTED here even though it ends in the window.
-    in_preformat = sum(seg.startswith("```") for seg in segments) % 2 == 1
-    return in_preformat, starts_mid_line
+
+    # Start of the line the cut lands in. Bare CR is a terminator here for the
+    # same reason it is in the parser: a legacy capsule can use it alone.
+    line_start = max(text.rfind("\n", 0, offset), text.rfind("\r", 0, offset)) + 1
+    starts_mid_line = line_start < offset
+
+    # Every ``` line toggles, in both directions, so parity over the completed
+    # lines is the whole state.
+    head = text[:line_start]
+    completed = head.replace("\r\n", "\n").replace("\r", "\n").split("\n")[:-1]
+    toggles = sum(line.startswith("```") for line in completed)
+    # ... plus the straddling line itself, whose marker sits in the prefix and
+    # whose tail is the window's first fragment: the toggle belongs to the line,
+    # and by the time the window resumes, that line has already happened.
+    if starts_mid_line and text.startswith("```", line_start):
+        toggles += 1
+
+    return toggles % 2 == 1, starts_mid_line
 
 
 def parse_gemtext(
