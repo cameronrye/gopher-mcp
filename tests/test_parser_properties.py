@@ -27,6 +27,7 @@ from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from gopher_mcp.gemini_parse import normalize_gemini_path
+from gopher_mcp.gemtext import gemtext_state_at
 from gopher_mcp.models import GeminiResponse, GopherMenuItem
 from gopher_mcp.utils import (
     format_gemini_url,
@@ -464,3 +465,64 @@ def test_gemini_status_in_range_accepted(status: int) -> None:
     raw = f"{status:02d} text/gemini\r\n".encode("ascii")
     resp = parse_gemini_response(raw)
     assert int(resp.status) == status
+
+
+# ---------------------------------------------------------------------------
+# Continuation windows: resuming a parse must not invent markup
+# ---------------------------------------------------------------------------
+
+# Lines chosen to exercise every branch of the classifier, including the two
+# that carry state across a line boundary: the ``` toggle and a ``=>`` that a
+# fence turns into sample text.
+_GEMTEXT_LINES = st.sampled_from(
+    [
+        "```",
+        "``` python",
+        "=> gemini://real.example/a Real link",
+        "=> /rel Relative",
+        "# heading",
+        "## h2",
+        "### h3",
+        "* item",
+        "> quote",
+        "plain text line",
+        "text with => inside",
+        "####deep",
+        "",
+    ]
+)
+
+_GEMTEXT_BODY = st.lists(_GEMTEXT_LINES, min_size=1, max_size=14).map("\n".join)
+
+
+@PROPERTY
+@given(body=_GEMTEXT_BODY, cut=st.integers(min_value=0, max_value=400))
+def test_a_resumed_window_never_invents_a_link(body: str, cut: int) -> None:
+    """The invariant the continuation protocol promises the model.
+
+    A window is parsed with the state recovered from the text before it. Whatever
+    that window yields, it must be a subset of what the whole document yields:
+    a continuation may show fewer links than a full parse, never a link the
+    capsule did not write as one. Before the state was carried, a cut landing
+    inside a ``` block or inside a line produced targets that appear nowhere in
+    a full parse.
+    """
+    cut = min(cut, len(body))
+    base = "gemini://example.org/"
+
+    whole = {link.url for link in parse_gemtext(body, base).links}
+    in_preformat, starts_mid_line = gemtext_state_at(body[:cut])
+    resumed = {
+        link.url
+        for link in parse_gemtext(
+            body[cut:],
+            base,
+            in_preformat=in_preformat,
+            starts_mid_line=starts_mid_line,
+        ).links
+    }
+
+    assert resumed <= whole, (
+        f"resuming at {cut} invented {sorted(resumed - whole)} — "
+        f"targets that appear nowhere in a full parse of the document"
+    )

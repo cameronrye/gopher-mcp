@@ -2301,3 +2301,122 @@ class TestGeminiOffsetContinuation:
         assert replay.cached is True
         assert replay.raw_content == first.raw_content
         assert client.tls_client.receive_data.await_count == 2
+
+
+class TestContinuationCarriesParseState:
+    """A continuation window resumes mid-document, so it must resume mid-parse.
+
+    ``parse_gemtext`` classifies from the top of whatever string it is handed.
+    A window that starts inside a ``` block, or inside a line, is not the top of
+    a document, and parsing it as one inverts the meaning of every line after
+    the resume point -- silently, with ``partial_line`` false.
+    """
+
+    def _client(self, **kw):
+        defaults = {
+            "respect_robots_txt": False,
+            "tofu_enabled": False,
+            "client_certs_enabled": False,
+            "requests_per_minute": 0,
+            "cache_enabled": False,
+            "max_rendered_chars": 1000,
+        }
+        client = GeminiClient(**{**defaults, **kw})
+        client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+            return_value=(Mock(), {"cert_fingerprint": "x"})
+        )
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+        return client
+
+    async def _walk(self, client, url="gemini://example.org/"):
+        """Return every window of a body, following the documented loop."""
+        windows = []
+        offset: int | None = 0
+        for _ in range(20):
+            if offset is None:
+                break
+            window = await client.fetch(url, offset=offset)
+            windows.append(window)
+            offset = window.next_offset
+        else:
+            pytest.fail(f"windows never terminated: next_offset stuck at {offset}")
+        return windows
+
+    @pytest.mark.asyncio
+    async def test_a_fenced_link_line_is_never_a_link_in_a_later_window(self):
+        """The sharper half: no over-long line, no hostile capsule, no flag.
+
+        A ``=>`` inside a ``` block is sample text, not a link. When the block
+        straddles the render cap the second window starts inside it, and a
+        parser that resets to normal mode reads that sample as a real link,
+        resolves it, and puts it in ``document.links`` -- the exact thing the
+        continuation protocol promises cannot happen.
+        """
+        from gopher_mcp.models import GemtextLineType
+
+        fenced_link = "=> gemini://attacker.example/drain-wallet Official portal"
+        body = "\n".join(
+            ["```"]
+            + [f"code line {i}" for i in range(150)]
+            + [fenced_link, "```", "real text"]
+        )
+        client = self._client()
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/gemini\r\n" + body.encode()
+        )
+
+        windows = await self._walk(client)
+        assert len(windows) > 1, "test needs a body that actually straddles the cap"
+
+        for i, window in enumerate(windows):
+            assert window.document.links == [], (
+                f"window {i} fabricated {window.document.links} from a line the "
+                f"capsule sent inside a preformat block"
+            )
+
+        lines = [line for w in windows for line in w.document.lines]
+        fenced = [ln for ln in lines if ln.content == fenced_link]
+        assert fenced, "the fenced link line never came back at all"
+        assert all(ln.type is GemtextLineType.PREFORMAT for ln in fenced), (
+            f"fenced sample text came back typed {[ln.type for ln in fenced]}"
+        )
+
+        # ... and the closing fence must still close: a line genuinely outside
+        # the block must not be swallowed by an inverted toggle.
+        tail = [ln for ln in lines if ln.content == "real text"]
+        assert tail and all(ln.type is GemtextLineType.TEXT for ln in tail), (
+            f"the line after the closing fence came back typed "
+            f"{[ln.type for ln in tail]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_tail_of_an_over_long_line_is_not_parsed_as_a_line(self):
+        """The resume side of the ``partial_line`` fix.
+
+        0.9.0 refuses to parse the window that ends mid-line. The window that
+        *starts* mid-line is the other half of the same cut, and it was still
+        parsed from the top -- so a ``=>`` sitting just past the cap boundary
+        arrives as a complete link whose target the capsule never offered as one.
+        """
+        from gopher_mcp.models import GemtextLineType
+
+        tail = "=> gemini://attacker.example/drain-wallet Official portal"
+        body = "A" * 1000 + tail + "\n"
+        client = self._client()
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/gemini\r\n" + body.encode()
+        )
+
+        windows = await self._walk(client)
+        assert windows[0].partial_line is True, "test needs the mid-line cut"
+        assert len(windows) > 1
+
+        for i, window in enumerate(windows):
+            assert window.document.links == [], (
+                f"window {i} presented the tail of a text line as link "
+                f"{window.document.links}"
+            )
+        resumed = windows[1].document.lines[0]
+        assert resumed.type is GemtextLineType.TEXT
+        assert resumed.link is None

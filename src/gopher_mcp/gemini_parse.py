@@ -12,7 +12,7 @@ import time
 from typing import Any, Union
 from urllib.parse import quote, urlparse
 
-from .gemtext import parse_gemtext
+from .gemtext import gemtext_state_at, parse_gemtext
 from .helpers import (
     bracket_host,
     resolve_gemini_reference,
@@ -627,6 +627,10 @@ def _process_success_response(
         # under the byte limit) is ~250k tokens. `size` still reports the full
         # original byte length.
         window = window_text(content, offset, max_rendered_chars)
+        # A window is not the top of a document. Recover the parse state it
+        # resumes in from the text before it, so a ``` block or a line that
+        # straddles the cut keeps its meaning across the boundary.
+        resume_in_preformat, resume_mid_line = gemtext_state_at(content[: window.start])
         content = window.text
         truncated = window.next_offset is not None
         next_offset = window.next_offset
@@ -686,7 +690,10 @@ def _process_success_response(
             )
         else:
             document = parse_gemtext(
-                parsed_source, str(request_info.get("url", "")) or None
+                parsed_source,
+                str(request_info.get("url", "")) or None,
+                in_preformat=resume_in_preformat,
+                starts_mid_line=resume_mid_line,
             )
 
         return GeminiGemtextResult(

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A continuation window no longer invents markup. `parse_gemtext` classified
+  from the top of whatever string it was handed, but a window resumes
+  mid-document, so a cut inside a ` ``` ` block read the block's contents as live
+  markup: a fenced `=> url text` line came back as a resolved link in
+  `document.links`, the closing fence was read as an opening toggle, and every
+  line after it was typed wrong. `partial_line` stays false on both windows, so
+  nothing flagged it, and it needs no hostile capsule -- any page with a code
+  block longer than the render cap does it. The tail of an over-long line had
+  the same defect from the other side: 0.9.0 declines to parse the window that
+  _ends_ mid-line, but the window that _starts_ mid-line was still parsed from
+  the top, so a `=>` just past the cap boundary arrived as a complete link to a
+  target the capsule never offered. Both are one missing bit of state, and both
+  contradicted what `models.py` and the API reference promise the model on every
+  call.
+
 ## [0.9.0] - 2026-09-03
 
 Everything below applies the findings of a full review of the code, the

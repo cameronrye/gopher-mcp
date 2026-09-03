@@ -254,7 +254,39 @@ def _parse_quote(line_content: str) -> Optional["GemtextLine"]:
     return None
 
 
-def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument":
+def gemtext_state_at(prefix: str) -> tuple[bool, bool]:
+    """Return the parse state a window starting after ``prefix`` resumes in.
+
+    A continuation window is not the top of a document, but
+    :func:`parse_gemtext` classifies from the top of whatever it is handed. Two
+    bits of state decide what the resumed lines mean, and both are recoverable
+    from the text that came before: whether the resume point sits inside a
+    preformat block, and whether it sits inside a line.
+
+    Returns:
+        ``(in_preformat, starts_mid_line)``
+
+    """
+    if not prefix:
+        return False, False
+    normalized = prefix.replace("\r\n", "\n").replace("\r", "\n")
+    segments = normalized.split("\n")
+    # A trailing segment with no terminator is a line the window resumes inside.
+    starts_mid_line = segments[-1] != ""
+    # Every ``` line toggles, in both directions, so parity is the whole state.
+    # The unterminated trailing segment counts: the toggle belongs to the line,
+    # and that line STARTED here even though it ends in the window.
+    in_preformat = sum(seg.startswith("```") for seg in segments) % 2 == 1
+    return in_preformat, starts_mid_line
+
+
+def parse_gemtext(
+    content: str,
+    base_url: str | None = None,
+    *,
+    in_preformat: bool = False,
+    starts_mid_line: bool = False,
+) -> "GemtextDocument":
     """Parse gemtext content into structured format.
 
     Args:
@@ -262,6 +294,15 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
         base_url: URL the content was fetched from. Relative link references are
             resolved against it so every returned link is directly fetchable;
             without it they are returned as written.
+        in_preformat: Whether this content resumes inside a preformat block. A
+            continuation window that starts inside one must not read its
+            contents as live markup -- a fenced ``=>`` is sample text, and
+            typing it as a link hands the caller a target the capsule never
+            offered. Defaults to false, which is correct for a whole document.
+        starts_mid_line: Whether the first line is the tail of a line that began
+            before this content. Such a fragment is emitted verbatim and never
+            classified, for the same reason the cut end of a window is not: half
+            a ``=> url text`` line must never arrive as a whole link.
 
     Returns:
         Parsed gemtext document
@@ -270,7 +311,6 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
 
     lines = []
     links = []
-    in_preformat = False
 
     # Strip control characters before splitting: the body is server-controlled
     # and reaches the model (and often a terminal) verbatim, and the latin-1
@@ -288,6 +328,20 @@ def parse_gemtext(content: str, base_url: str | None = None) -> "GemtextDocument
     raw_lines = normalized.split("\n")
     if raw_lines and raw_lines[-1] == "":
         raw_lines.pop()
+
+    if starts_mid_line and raw_lines:
+        # The tail of a line that began in an earlier window. Its opening
+        # characters are not at a line start, so nothing in it is a marker: a
+        # leading ``=>`` is the middle of a sentence, and a leading ``` cannot
+        # toggle a block. Emit it verbatim, unclassified, so every character
+        # still reaches the caller carrying no target.
+        fragment = raw_lines.pop(0)
+        lines.append(
+            _create_gemtext_line(
+                GemtextLineType.PREFORMAT if in_preformat else GemtextLineType.TEXT,
+                fragment,
+            )
+        )
 
     for raw_line in raw_lines:
         # Preformatted content must be preserved verbatim; only rstrip lines we
