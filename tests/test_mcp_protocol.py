@@ -111,6 +111,36 @@ class TestToolListing:
             assert tool.description, f"{name} advertises no description"
 
     @pytest.mark.asyncio
+    async def test_every_output_schema_is_an_object_at_its_root(self):
+        """``outputSchema`` must be an object schema, and the check has to be
+        this literal: the MCP spec says the root is ``"type": "object"``, and
+        the TypeScript SDK enforces it as ``z.literal('object')`` in its own
+        ``ToolSchema``. A discriminated union serializes to a bare ``oneOf``
+        with no root ``type``, which every Python client accepts -- the SDK's
+        ``ClientSession`` validates with ``jsonschema``, and ``jsonschema`` is
+        happy -- so the whole suite stays green while every TypeScript client
+        fails ``tools/list`` outright with ``-32603``.
+
+        And it fails for ALL of them: ``ListToolsResultSchema`` parses the
+        tools array as a unit, so one rootless schema hides all eight tools,
+        not just its own. That is not hypothetical -- it is what took down
+        Glama's registry inspection (build ``01a06d36``, @modelcontextprotocol/
+        sdk 1.30.0), which is why the assertion is per tool and exhaustive.
+        """
+        async with _connected() as session:
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+
+        assert set(tools) == EXPECTED_TOOLS
+        for name, tool in tools.items():
+            schema = tool.outputSchema
+            assert schema is not None
+            assert schema.get("type") == "object", (
+                f"{name} advertises outputSchema with root type "
+                f"{schema.get('type')!r}, not 'object' -- this makes tools/list "
+                f"fail for every TypeScript-SDK client"
+            )
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "name,kinds",
         [

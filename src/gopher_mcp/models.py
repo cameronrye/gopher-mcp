@@ -102,6 +102,30 @@ _ResultT = TypeVar("_ResultT", bound=BaseModel)
 _KIND = Field(discriminator="kind")
 
 
+_RootT = TypeVar("_RootT")
+
+
+class _ObjectRoot(RootModel[_RootT]):
+    """A ``RootModel`` whose advertised schema says it is an object.
+
+    Pydantic serializes a discriminated union to a bare ``oneOf`` with no root
+    ``type``, and every Python client accepts that: the MCP SDK's
+    ``ClientSession`` validates results with ``jsonschema``, which does not
+    require one. The MCP spec does, and the TypeScript SDK enforces it --
+    ``ToolSchema`` declares ``outputSchema`` with ``type: z.literal('object')``
+    -- so a rootless schema makes ``tools/list`` fail with ``-32603`` for every
+    TypeScript client, and fail for ALL tools at once, because the tools array
+    is parsed as a unit. Glama's registry inspection died exactly this way.
+
+    Adding ``type: "object"`` changes no payload: every branch of every union
+    below is an object, so the constraint was already true and is now merely
+    stated. It has to be said here rather than left to the union, because a
+    ``oneOf`` carries no type of its own.
+    """
+
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
+
+
 # Wire-name reconciliation for the camelCase aliases these models were written
 # with. A plain ``alias`` quietly made three different names for one field:
 #
@@ -581,7 +605,7 @@ GopherFetchResponse = MenuResult | TextResult | BinaryResult | ErrorResult
 # ``{"additionalProperties": true}`` object a ``-> dict[str, Any]`` annotation
 # produced. The docstrings are deliberately short: they are published to the
 # model as the schema's description.
-class GopherFetchOutput(RootModel[Annotated[GopherFetchResponse, _KIND]]):
+class GopherFetchOutput(_ObjectRoot[Annotated[GopherFetchResponse, _KIND]]):
     """One Gopher fetch result: a menu, text, binary metadata, or an error."""
 
 
@@ -1125,7 +1149,7 @@ GeminiFetchResponse = (
 )
 
 
-class GeminiFetchOutput(RootModel[Annotated[GeminiFetchResponse, _KIND]]):
+class GeminiFetchOutput(_ObjectRoot[Annotated[GeminiFetchResponse, _KIND]]):
     """One Gemini fetch result: gemtext, success, binary metadata, input,
     redirect, certificate, or an error."""
 
@@ -1432,22 +1456,22 @@ GeminiClientCertListResponse = GeminiClientCertListResult | ErrorResult
 GeminiClientCertUpdateResponse = GeminiClientCertUpdateResult | ErrorResult
 
 
-class GeminiTrustListOutput(RootModel[Annotated[GeminiTrustListResponse, _KIND]]):
+class GeminiTrustListOutput(_ObjectRoot[Annotated[GeminiTrustListResponse, _KIND]]):
     """The pinned certificates asked about, or an error."""
 
 
-class GeminiTrustUpdateOutput(RootModel[Annotated[GeminiTrustUpdateResponse, _KIND]]):
+class GeminiTrustUpdateOutput(_ObjectRoot[Annotated[GeminiTrustUpdateResponse, _KIND]]):
     """The outcome of changing the trust store, or an error."""
 
 
 class GeminiClientCertListOutput(
-    RootModel[Annotated[GeminiClientCertListResponse, _KIND]]
+    _ObjectRoot[Annotated[GeminiClientCertListResponse, _KIND]]
 ):
     """The client identities asked about, or an error."""
 
 
 class GeminiClientCertUpdateOutput(
-    RootModel[Annotated[GeminiClientCertUpdateResponse, _KIND]]
+    _ObjectRoot[Annotated[GeminiClientCertUpdateResponse, _KIND]]
 ):
     """The outcome of minting or removing an identity, or an error."""
 

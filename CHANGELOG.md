@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-09-03
+## [0.10.0] - 2026-09-04
 
 ### Added
 
@@ -143,6 +143,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which is deliberate and was already pinned by a test.
 
 ### Fixed
+
+- `tools/list` failed outright for every TypeScript-SDK client. The six tools
+  whose output is a discriminated union advertised an `outputSchema` that was a
+  bare `oneOf` with no root `"type": "object"`. The MCP spec requires one and
+  the TypeScript SDK enforces it -- `ToolSchema` declares `outputSchema` with
+  `type: z.literal('object')` -- so those clients rejected the response with
+  `-32603`. Because `ListToolsResultSchema` parses the tools array as a unit,
+  one rootless schema hid ALL eight tools, not just its own: the server
+  completed `initialize` and then appeared to have no tools at all.
+
+  Nothing caught it, and the reason is worth recording. Every test here
+  validates the way a _Python_ client does, and the Python path is genuinely
+  more permissive: the SDK's `ClientSession` checks results with
+  `jsonschema`, which does not require a root type. So the 52 round-trip tests
+  in the entry below were asking the right question about the wrong thing --
+  whether each _payload_ matches the advertised union -- while the question
+  nobody asked was whether the advertised _schema_ is itself legal. It is now
+  a wire-level assertion over every tool in `tests/test_mcp_protocol.py`.
+
+  Found when Glama's registry inspection failed against
+  @modelcontextprotocol/sdk 1.30.0. The two `*_batch_fetch` tools were never
+  affected, because a list return is already wrapped in a `result` object.
+
+  No payload changes. Every branch of every union was already an object, so
+  the constraint was true before it was stated; each advertised schema gained
+  exactly one key and lost nothing, and `structuredContent` is untouched. Note
+  that 0.9.0 and 0.9.1 carry the same defect on `gopher_fetch` and
+  `gemini_fetch`, and are only repaired by upgrading.
 
 - The `outputSchema` round-trip test validated through Pydantic, which is not
   what clients do -- the MCP SDK's own `ClientSession` runs
