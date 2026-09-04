@@ -629,6 +629,7 @@ for the full resolution order and the legacy fallback.
 | `TOFU_DISABLED` | `GEMINI_TOFU_ENABLED=false`, so there is no trust store to read or change. Gemini connections are then unauthenticated altogether — TLS runs without CA-chain validation, so nothing else checks server identity. |
 | `INVALID_REQUEST` | Empty `host`, a port outside `1`-`65535`, or a `fingerprint` that is not a full SHA-256 digest |
 | `FINGERPRINT_MISMATCH` | `action="remove"` named a fingerprint that is not the one pinned for that host and port; nothing was changed |
+| `USER_DECLINED` | The change was put to the user for confirmation and they declined, or the confirmation could not be delivered to a client that said it could carry one. Nothing was changed. Only reachable on a client that advertises MCP elicitation; a client without it is never asked and never sees this code. Retrying will ask again — treat it as an answer, not a transient failure |
 | `CERTIFICATE_STORE_UNAVAILABLE` | The store could not be opened, locked or written — another process holds the lock, or the location is read-only or misconfigured — so the pin could not be read or changed. This is a local fault, not the capsule: check `GEMINI_TOFU_STORAGE_PATH` and the HOME it defaults under rather than retrying. The path itself is logged, never returned |
 | `FETCH_ERROR` | An unexpected internal failure. A store that cannot be opened at all now reports `CERTIFICATE_STORE_UNAVAILABLE` instead, which is the code that names the remedy |
 
@@ -822,6 +823,7 @@ print(result["changed"], result["message"])
 | `INVALID_REQUEST` | `url` is not a valid `gemini://` URL, `fingerprint` is missing for `remove`, supplied for `create`, or is not a full SHA-256 digest |
 | `CERTIFICATE_EXISTS` | A certificate already covers the scope, so nothing was created; remove it first if the user wants a new identity |
 | `FINGERPRINT_MISMATCH` | `action="remove"` named a fingerprint that is not the one covering that scope; nothing was destroyed |
+| `USER_DECLINED` | The change was put to the user for confirmation and they declined, or the confirmation could not be delivered to a client that said it could carry one. Nothing was created or destroyed. Only reachable on a client that advertises MCP elicitation; a client without it is never asked and never sees this code. Retrying will ask again — treat it as an answer, not a transient failure |
 | `CERTIFICATE_STORE_UNAVAILABLE` | The certificate store could not be opened, locked or written — another process holds the lock, or the location is read-only or misconfigured — so the identity could not be created or removed. A local fault: check `GEMINI_CLIENT_CERTS_STORAGE_PATH` and the HOME it defaults under. The path itself is logged, never returned |
 | `FETCH_ERROR` | An unexpected internal failure. A store that cannot be opened at all now reports `CERTIFICATE_STORE_UNAVAILABLE` instead |
 

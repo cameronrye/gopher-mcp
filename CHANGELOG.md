@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The two tools that change stored state ask the user first, on clients that
+  can carry the question. Removing a certificate pin, and creating or removing
+  a client identity, are destructive, model-initiated, and not undone by trying
+  again -- a capsule knows an identity by its public key, so a replacement
+  certificate is a different person. MCP has had a channel for putting that
+  decision to a human since before this server existed, and nothing used it.
+
+  Behaviour is unchanged for every client that does not advertise elicitation:
+  it is never asked and never sees a refusal, because consent a client cannot
+  express is not consent withheld. A client that CAN be asked and answers no
+  gets the new `USER_DECLINED` code and nothing is changed. A client that
+  advertises the capability and then fails to deliver the question is also
+  refused -- the one place failing open would be indefensible, since it would
+  mean acting on consent nobody actually gave.
+
 - Reading one document now costs one download. Neither protocol has a range
   request, so a windowed read transfers the whole resource and shows a slice of
   it -- and every continuation went back to the server for the same bytes.

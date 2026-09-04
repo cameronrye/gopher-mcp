@@ -454,3 +454,72 @@ class TestTrustToolSchema:
         tools = {t.name: t for t in await mcp.list_tools()}
         schema = tools["gemini_trust_list"].inputSchema
         assert "visited" in schema["properties"]["host"]["description"]
+
+
+class TestDestructiveChangesAskFirst:
+    """Un-pinning a certificate is destructive and model-initiated.
+
+    A pin is the only thing authenticating a Gemini capsule, and the tool that
+    removes one is called by a model reasoning about text it fetched. MCP has a
+    channel for asking the user before acting -- elicitation -- and it was
+    unused. It is optional in the protocol, so a client that does not advertise
+    it must keep exactly the behaviour it had, or every existing caller breaks.
+    """
+
+    @staticmethod
+    async def _call(client, *, elicitation_callback, action="remove"):
+        """Drive the tool over a real session, so a context is injected."""
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from gopher_mcp.server import mcp
+
+        with _serving(client):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server, elicitation_callback=elicitation_callback
+            ) as session:
+                return await session.call_tool(
+                    "gemini_trust_update",
+                    {
+                        "action": action,
+                        "host": "example.org",
+                        "fingerprint": FINGERPRINT_A,
+                    },
+                )
+
+    @pytest.mark.asyncio
+    async def test_a_declined_confirmation_leaves_the_pin_alone(self, client):
+        async def decline(context, params):
+            from mcp.types import ElicitResult
+
+            return ElicitResult(action="decline")
+
+        result = await self._call(client, elicitation_callback=decline)
+
+        assert result.structuredContent["kind"] == "error"
+        assert result.structuredContent["error"]["code"] == "USER_DECLINED"
+        # The whole point: nothing changed.
+        assert _pinned(client, "example.org") == FINGERPRINT_A
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_confirmation_performs_the_change(self, client):
+        async def accept(context, params):
+            from mcp.types import ElicitResult
+
+            return ElicitResult(action="accept", content={"confirm": True})
+
+        result = await self._call(client, elicitation_callback=accept)
+
+        assert result.structuredContent["kind"] == "trust_update"
+        assert result.structuredContent["changed"] is True
+        assert _pinned(client, "example.org") is None
+
+    @pytest.mark.asyncio
+    async def test_a_client_that_cannot_be_asked_is_unaffected(self, client):
+        """No elicitation capability means no prompt and no refusal. Requiring
+        consent a client cannot express would make the tool unusable on every
+        client that has not implemented elicitation yet."""
+        result = await self._call(client, elicitation_callback=None)
+
+        assert result.structuredContent["kind"] == "trust_update"
+        assert result.structuredContent["changed"] is True
+        assert _pinned(client, "example.org") is None

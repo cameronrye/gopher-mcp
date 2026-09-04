@@ -12,9 +12,16 @@ from urllib.parse import quote
 
 import structlog
 import uvicorn
+from mcp.server.elicitation import AcceptedElicitation
 from mcp.server.fastmcp import Context, FastMCP
-from mcp.types import CallToolResult, TextContent, ToolAnnotations
-from pydantic import Field, ValidationError
+from mcp.types import (
+    CallToolResult,
+    ClientCapabilities,
+    ElicitationCapability,
+    TextContent,
+    ToolAnnotations,
+)
+from pydantic import BaseModel, Field, ValidationError
 from pydantic_core import to_json
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -737,6 +744,57 @@ async def _gemini_client() -> GeminiClient:
     return await manager.get_gemini_client()
 
 
+class _Confirmation(BaseModel):
+    """The single yes/no a destructive tool asks the user before acting."""
+
+    confirm: bool = Field(
+        description="True to carry out the change, false to leave things alone",
+    )
+
+
+async def _confirmed(ctx: "_ToolContext | None", message: str) -> bool:
+    """Ask the user to approve a destructive change, if the client can ask.
+
+    These tools are called by a model reasoning about text it fetched, and what
+    they change -- the pin that authenticates a capsule, the private key of a
+    persistent identity -- is not re-established by trying again. MCP has a
+    channel for putting that decision in front of a person, and it was unused.
+
+    Three outcomes, and which one is which matters more than the code:
+
+    * The client did not advertise elicitation, or there is no request context
+      at all (the tool function called directly in process). PROCEED. Consent a
+      client cannot express is not consent it withheld, and refusing here would
+      break every caller that has not implemented elicitation -- which today is
+      most of them.
+    * The client can be asked and answers "no", or cancels. REFUSE.
+    * The client can be asked and the exchange fails. REFUSE. This is the one
+      place fail-open would be indefensible: the client said it could carry the
+      question, so a failure means the user was never actually asked, and the
+      operation is destructive.
+    """
+    if ctx is None:
+        return True
+    try:
+        session = ctx.session
+    except ValueError:
+        # No request context: not running as an MCP request at all.
+        return True
+
+    if not session.check_client_capability(
+        ClientCapabilities(elicitation=ElicitationCapability())
+    ):
+        return True
+
+    try:
+        answer = await ctx.elicit(message=message, schema=_Confirmation)
+    except Exception as e:
+        logger.warning("confirmation could not be put to the user", error=str(e))
+        return False
+
+    return isinstance(answer, AcceptedElicitation) and answer.data.confirm
+
+
 def _error(code: str, message: str, **request_info: Any) -> dict[str, Any]:
     """Serialize a sanitized structured error the way the tools return one.
 
@@ -1299,6 +1357,7 @@ async def gemini_trust_update(
     host: _TrustHost,
     fingerprint: _TrustFingerprint,
     port: _TrustPort = 1965,
+    ctx: _ToolContext | None = None,
 ) -> dict[str, Any]:
     """Remove or replace the pinned Gemini certificate of ONE host.
 
@@ -1386,6 +1445,23 @@ async def gemini_trust_update(
                 )
             changed = False
             if pinned:
+                # Asked here, not earlier: the fingerprint interlock above can
+                # still reject this call, and putting a question to the user
+                # that the tool then refuses anyway trains them to click through
+                # it.
+                if not await _confirmed(
+                    ctx,
+                    f"Remove the pinned certificate for {host}:{port}? The next "
+                    f"fetch of that host will trust and pin whatever "
+                    f"certificate it presents, so its identity will no longer "
+                    f"be checked against the one pinned now.",
+                ):
+                    return _error(
+                        "USER_DECLINED",
+                        f"The pin for {host}:{port} was left unchanged because "
+                        f"the confirmation was declined.",
+                        **request_info,
+                    )
                 changed = await asyncio.to_thread(
                     client.remove_tofu_certificate, host, port
                 )
@@ -1404,6 +1480,18 @@ async def gemini_trust_update(
                 )
             )
         else:
+            if not await _confirmed(
+                ctx,
+                f"Pin certificate {canonical[:16]}... for {host}:{port}? Only "
+                f"that certificate will be accepted from this host until the "
+                f"pin is changed again.",
+            ):
+                return _error(
+                    "USER_DECLINED",
+                    f"The pin for {host}:{port} was left unchanged because the "
+                    f"confirmation was declined.",
+                    **request_info,
+                )
             await asyncio.to_thread(
                 client.update_tofu_certificate, host, port, canonical, force=True
             )
@@ -1769,6 +1857,7 @@ async def gemini_client_cert_update(
     action: _CertAction,
     url: _CertScopeUrl,
     fingerprint: _CertFingerprint = None,
+    ctx: _ToolContext | None = None,
 ) -> dict[str, Any]:
     """Create or remove ONE Gemini client identity for a named URL scope.
 
@@ -1883,6 +1972,24 @@ async def gemini_client_cert_update(
             stored = await asyncio.to_thread(client.list_client_certificates)
             covering = _covering_certificate(stored, host, port, path)
             if action == "create":
+                # A client certificate is a persistent pseudonymous identity
+                # with a private key on disk, and every later request in scope
+                # carries it automatically -- so the capsule can link those
+                # visits, across sessions, to one identity. That is a decision
+                # for the person, not for a model that hit a 60 response.
+                if not await _confirmed(
+                    ctx,
+                    f"Create a client identity for {scope_url}? Every request "
+                    f"to that scope will then carry it automatically, so the "
+                    f"capsule can link those visits to one persistent identity "
+                    f"for as long as the certificate lasts.",
+                ):
+                    return _error(
+                        "USER_DECLINED",
+                        f"No identity was created for {scope_url} because the "
+                        f"confirmation was declined.",
+                        **request_info,
+                    )
                 outcome = await _create_identity(
                     client,
                     stored=stored,
@@ -1894,6 +2001,23 @@ async def gemini_client_cert_update(
                     request_info=request_info,
                 )
             else:
+                # Removal destroys a private key. Nothing re-creates it: the
+                # capsule knows that identity by its public key, so anything
+                # tied to it -- an account, a posting history -- is not
+                # recoverable by making a new certificate.
+                if not await _confirmed(
+                    ctx,
+                    f"Remove the client identity for {scope_url}? Its private "
+                    f"key is deleted, and a new certificate is a different "
+                    f"identity -- anything the capsule associated with the old "
+                    f"one is not recoverable.",
+                ):
+                    return _error(
+                        "USER_DECLINED",
+                        f"The identity for {scope_url} was left in place "
+                        f"because the confirmation was declined.",
+                        **request_info,
+                    )
                 outcome = await _remove_identity(
                     client,
                     covering=covering,

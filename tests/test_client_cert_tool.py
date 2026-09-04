@@ -1210,3 +1210,80 @@ class TestMismatchNextStep:
         identity anyway, which is the whole point of the interlock."""
         covering = _entry("example.org", "/app/", fingerprint="dd" * 32)
         assert "dd" * 32 not in _mismatch_next_step([covering], "cc" * 32)
+
+
+class TestIdentityChangesAskFirst:
+    """Creating an identity writes a private key; removing one destroys it.
+
+    Neither is recoverable by trying again -- the capsule knows an identity by
+    its public key, so a replacement certificate is a different person. These
+    are the calls that most deserve a question, and the model driving them is
+    reasoning about text a capsule sent it.
+    """
+
+    @staticmethod
+    async def _call(client, args, *, elicitation_callback):
+        from mcp.shared.memory import create_connected_server_and_client_session
+
+        from gopher_mcp.server import mcp
+
+        with _serving(client):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server, elicitation_callback=elicitation_callback
+            ) as session:
+                return await session.call_tool("gemini_client_cert_update", args)
+
+    @pytest.mark.asyncio
+    async def test_a_declined_creation_writes_no_key(self, client):
+        async def decline(context, params):
+            from mcp.types import ElicitResult
+
+            return ElicitResult(action="decline")
+
+        result = await self._call(
+            client,
+            {"action": "create", "url": "gemini://example.org/app/"},
+            elicitation_callback=decline,
+        )
+
+        assert result.structuredContent["error"]["code"] == "USER_DECLINED"
+        assert not _attached_to(client, "example.org", "/app/")
+
+    @pytest.mark.asyncio
+    async def test_a_confirmation_the_client_cannot_answer_refuses(self, client):
+        """Fail CLOSED, and only here.
+
+        A client that never advertised elicitation is not asked at all and
+        proceeds. But a client that said it could carry the question and then
+        failed to means the user was never actually asked -- and the operation
+        writes a private key, so proceeding would be consent nobody gave.
+        """
+
+        async def broken(context, params):
+            raise RuntimeError("the client blew up")
+
+        result = await self._call(
+            client,
+            {"action": "create", "url": "gemini://example.org/app/"},
+            elicitation_callback=broken,
+        )
+
+        assert result.structuredContent["error"]["code"] == "USER_DECLINED"
+        assert not _attached_to(client, "example.org", "/app/")
+
+    @pytest.mark.asyncio
+    async def test_an_accepted_creation_mints_the_identity(self, client):
+        async def accept(context, params):
+            from mcp.types import ElicitResult
+
+            return ElicitResult(action="accept", content={"confirm": True})
+
+        result = await self._call(
+            client,
+            {"action": "create", "url": "gemini://example.org/app/"},
+            elicitation_callback=accept,
+        )
+
+        assert result.structuredContent["kind"] == "client_cert_update"
+        assert result.structuredContent["changed"] is True
+        assert _attached_to(client, "example.org", "/app/")
