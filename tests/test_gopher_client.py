@@ -1684,7 +1684,14 @@ class TestOffsetContinuation:
     async def test_the_cache_does_not_serve_one_window_for_another(self):
         """The cache stores the rendered window, not the body, so the offset is
         part of the key -- otherwise a request for the second window would be
-        answered with the first one, silently."""
+        answered with the first one, silently.
+
+        The offset stays in the cache key even now that the BODY is held
+        separately: the two do different jobs. The held body saves the
+        download; the per-offset cache key is what stops window 0 being handed
+        back for a request for window 1. Dropping either would be wrong, and
+        dropping the key would be wrong silently.
+        """
         client = self._client(cache_enabled=True, max_rendered_chars=40)
 
         with patch(
@@ -1697,7 +1704,112 @@ class TestOffsetContinuation:
 
         assert second.text != first.text
         assert second.text == self.TEXT.decode()[40:80]
-        # Each window is fetched once; the repeat of window 0 is served cached.
-        assert mock_fetch.await_count == 2
+        # ONE download for both windows: the second is rendered from the body
+        # the first already downloaded. This was 2 before that body was held --
+        # the count is the whole point of the change, so it is asserted rather
+        # than left to drift.
+        assert mock_fetch.await_count == 1
         assert replay.cached is True
         assert replay.text == first.text
+
+
+class TestContinuationDoesNotRefetchTheBody:
+    """Walking one document must cost one download, not one per window.
+
+    Gopher has no range request, so every window read the WHOLE body again:
+    reading a 208 KB page at a 10k cap cost 21 fetches and 4.4 MB, and with the
+    shipped per-host rate limit those 21 fetches are also 21 seconds. The cache
+    did not help, because what it stored was the rendered window -- keyed by
+    offset -- so window 2 was always a miss that went back to the server.
+
+    The comment that chose that trade said caching bodies "would put full-size
+    bodies in a cache whose entry cap exists to bound its memory". Measured, the
+    opposite is true: a full walk of that page left 21 entries holding 217,438
+    bytes, MORE than the 208,005-byte body it declined to cache.
+    """
+
+    BODY = ("".join(f"line {i}\n" for i in range(400))).encode()
+
+    def _client(self, **kwargs):
+        defaults = {
+            "respect_robots_txt": False,
+            "requests_per_minute": 0,
+            "cache_enabled": True,
+            "max_rendered_chars": 400,
+        }
+        return GopherClient(**{**defaults, **kwargs})
+
+    async def _walk(self, *, cache_enabled: bool):
+        """Read one document to the end, reporting cost and content."""
+        client = self._client(cache_enabled=cache_enabled)
+        transport = AsyncMock(return_value=self.BODY + b"\r\n.\r\n")
+
+        with patch("gopher_mcp.gopher_client.fetch_gopher", new=transport):
+            offset: int | None = 0
+            windows = 0
+            seen = ""
+            while offset is not None and windows < 40:
+                result = await client.fetch("gopher://example.com/0/big", offset=offset)
+                seen += result.text
+                windows += 1
+                offset = result.next_offset
+        return windows, transport.await_count, seen
+
+    @pytest.mark.asyncio
+    async def test_walking_a_body_downloads_it_once(self):
+        windows, downloads, _ = await self._walk(cache_enabled=True)
+
+        assert windows > 3, "test needs a body that takes several windows"
+        assert downloads == 1, (
+            f"{windows} windows cost {downloads} downloads of the same body"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_held_body_changes_the_cost_and_not_the_content(self):
+        """The invariant that matters: a reused body must render exactly what
+        another download would have rendered.
+
+        Compared against the same walk with the slot switched off rather than
+        against the raw body, deliberately. Concatenated windows do not equal
+        the body byte-for-byte -- there is a pre-existing extra newline at the
+        end -- and asserting equality with the body would fail for a reason
+        that has nothing to do with this slot, hiding the regression it is
+        here to catch.
+        """
+        held_windows, held_downloads, held_text = await self._walk(cache_enabled=True)
+        refetched_windows, refetched_downloads, refetched_text = await self._walk(
+            cache_enabled=False
+        )
+
+        assert held_text == refetched_text
+        assert held_windows == refetched_windows
+        assert held_downloads == 1
+        assert refetched_downloads == refetched_windows
+
+    @pytest.mark.asyncio
+    async def test_refresh_still_goes_back_to_the_server(self):
+        """A reused body must not turn `refresh` into a lie."""
+        client = self._client()
+        transport = AsyncMock(return_value=self.BODY + b"\r\n.\r\n")
+
+        with patch("gopher_mcp.gopher_client.fetch_gopher", new=transport):
+            await client.fetch("gopher://example.com/0/big")
+            await client.fetch("gopher://example.com/0/big", offset=400, refresh=True)
+
+        assert transport.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_a_different_url_is_never_served_another_documents_body(self):
+        """The slot holds one body; a request for a different resource must
+        miss it rather than be answered from whatever was read last."""
+        client = self._client()
+        first = ("".join(f"aaa {i}\n" for i in range(400))).encode() + b"\r\n.\r\n"
+        second = ("".join(f"bbb {i}\n" for i in range(400))).encode() + b"\r\n.\r\n"
+        transport = AsyncMock(side_effect=[first, second])
+
+        with patch("gopher_mcp.gopher_client.fetch_gopher", new=transport):
+            await client.fetch("gopher://example.com/0/one")
+            other = await client.fetch("gopher://example.com/0/two", offset=400)
+
+        assert transport.await_count == 2
+        assert "bbb" in other.text and "aaa" not in other.text

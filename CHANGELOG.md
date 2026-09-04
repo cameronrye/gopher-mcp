@@ -9,6 +9,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Reading one document now costs one download. Neither protocol has a range
+  request, so a windowed read transfers the whole resource and shows a slice of
+  it -- and every continuation went back to the server for the same bytes.
+  Measured on a 208 KB page at a 10k cap: 21 windows, 21 downloads, 4.4 MB, and
+  with the shipped per-host rate limit those 21 downloads are also 21 seconds,
+  paid by whoever is hosting it. Each client now holds the most recently
+  truncated body, so the windows after the first are free; the same walk is now
+  21 windows and 1 download.
+
+  The rationale this replaces was tested rather than assumed. Both clients
+  carried a comment saying that caching bodies "would put full-size bodies in a
+  cache whose entry cap exists to bound its memory", and the opposite turned out
+  to be true: a full walk left 21 per-window entries holding 217,438 bytes,
+  MORE than the 208,005-byte body they declined to cache. One slot rather than a
+  cache keeps the memory bounded by `max_response_size` however many resources
+  are read, and a continuation from a held body skips the per-host rate limit,
+  which exists to pace requests to a server and should not charge for one that
+  is never made. `refresh` still goes back to the server, the slot expires on
+  the same TTL a cached response does, and the offset stays in the response
+  cache key -- the two do different jobs, and dropping the key would serve
+  window 0 for a request for window 1.
+
+  A Gemini window rendered from a held page replays the TLS version, cipher,
+  certificate fingerprint and TOFU warning of the transfer those bytes came
+  from. Dropping them would be misreadable rather than merely absent: a window
+  with no fingerprint beside windows that have one reads as "this one was not
+  authenticated".
+
 - The batch fetch tools report progress. A batch is the one call here slow
   enough to need it: the per-host rate limit spaces same-host requests a second
   apart, so fifty URLs aimed at one capsule take at least forty-nine seconds,

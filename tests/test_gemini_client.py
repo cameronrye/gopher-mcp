@@ -2290,7 +2290,13 @@ class TestGeminiOffsetContinuation:
     async def test_the_cache_does_not_serve_one_window_for_another(self):
         """The cache stores the rendered window, not the body, so the offset is
         part of the key -- otherwise the second window would be answered with
-        the first, silently."""
+        the first, silently.
+
+        The offset stays in the cache key even now that the PAGE is held
+        separately: the two do different jobs. The held page saves the
+        download; the per-offset key is what stops window 0 being handed back
+        for a request for window 1.
+        """
         client = self._client(cache_enabled=True)
 
         first = await client.fetch("gemini://example.org/")
@@ -2300,7 +2306,11 @@ class TestGeminiOffsetContinuation:
         assert second.raw_content != first.raw_content
         assert replay.cached is True
         assert replay.raw_content == first.raw_content
-        assert client.tls_client.receive_data.await_count == 2
+        # ONE transfer for both windows: the second renders from the page the
+        # first already downloaded. This was 2 before that page was held, and
+        # the count is the point of the change, so it is asserted rather than
+        # left to drift.
+        assert client.tls_client.receive_data.await_count == 1
 
 
 class TestContinuationCarriesParseState:
@@ -2420,3 +2430,82 @@ class TestContinuationCarriesParseState:
         resumed = windows[1].document.lines[0]
         assert resumed.type is GemtextLineType.TEXT
         assert resumed.link is None
+
+
+class TestGeminiContinuationDoesNotRefetchTheBody:
+    """The Gemini half of the same problem, with one extra wrinkle.
+
+    Gemini has no range request either, so every window re-downloaded the whole
+    page. Unlike Gopher, a Gemini result also carries provenance about the
+    connection it arrived over -- TLS version, cipher, certificate fingerprint,
+    any TOFU warning -- and a window rendered from a body already in hand has no
+    live connection to describe. Replaying the stored connection details is the
+    honest answer: they describe the transfer those bytes actually came from,
+    which is exactly what the field means.
+    """
+
+    BODY = "".join(f"line {i}\n" for i in range(400))
+
+    def _client(self, **kw):
+        defaults = {
+            "respect_robots_txt": False,
+            "tofu_enabled": False,
+            "client_certs_enabled": False,
+            "requests_per_minute": 0,
+            "cache_enabled": True,
+            "max_rendered_chars": 400,
+        }
+        client = GeminiClient(**{**defaults, **kw})
+        client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+            return_value=(
+                Mock(),
+                {"cert_fingerprint": "abc123", "tls_version": "TLSv1.3"},
+            )
+        )
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+        return client
+
+    async def _walk(self, *, cache_enabled: bool):
+        client = self._client(cache_enabled=cache_enabled)
+        receive = AsyncMock(return_value=b"20 text/plain\r\n" + self.BODY.encode())
+        client.tls_client.receive_data = receive  # type: ignore[method-assign]
+
+        offset: int | None = 0
+        windows, seen, prints = 0, "", []
+        while offset is not None and windows < 40:
+            r = await client.fetch("gemini://example.org/big", offset=offset)
+            seen += r.content
+            prints.append(r.request_info.cert_fingerprint)
+            windows += 1
+            offset = r.next_offset
+        return windows, receive.await_count, seen, prints
+
+    @pytest.mark.asyncio
+    async def test_walking_a_page_downloads_it_once(self):
+        windows, downloads, _, _ = await self._walk(cache_enabled=True)
+
+        assert windows > 3, "test needs a page that takes several windows"
+        assert downloads == 1, (
+            f"{windows} windows cost {downloads} downloads of the same page"
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_held_body_changes_the_cost_and_not_the_content(self):
+        held_w, held_dl, held_text, _ = await self._walk(cache_enabled=True)
+        ref_w, ref_dl, ref_text, _ = await self._walk(cache_enabled=False)
+
+        assert held_text == ref_text
+        assert held_w == ref_w
+        assert held_dl == 1
+        assert ref_dl == ref_w
+
+    @pytest.mark.asyncio
+    async def test_a_continued_window_still_reports_the_connection(self):
+        """A window rendered from a held body must not silently lose the TLS
+        provenance every other window carries -- a reader comparing two windows
+        would take the absence for "this one was not authenticated"."""
+        _, _, _, prints = await self._walk(cache_enabled=True)
+
+        assert prints, "no windows were produced"
+        assert all(p == "abc123" for p in prints), prints

@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import structlog
 
@@ -123,6 +124,41 @@ _PROBE_CREDIT: ContextVar[_ProbeCredit | None] = ContextVar(
 # implement, and each task's own copy keeps concurrent fetches from reading each
 # other's window (a value parked on the shared client instance would not).
 _RENDER_OFFSET: ContextVar[int] = ContextVar("gopher_render_offset", default=0)
+
+# Cache key of the resource currently being fetched, WITHOUT the offset suffix.
+# Set by ``fetch`` and read by ``_fetch_content`` so the body it downloaded can
+# be filed under the resource rather than under one window of it -- the same
+# indirection ``_RENDER_OFFSET`` uses, and for the same reason: the transport
+# path is reached through the shared base class and cannot take extra arguments.
+_BODY_SLOT_KEY: ContextVar[str | None] = ContextVar(
+    "gopher_body_slot_key", default=None
+)
+
+
+class _ContinuationBody(NamedTuple):
+    """One downloaded body, held so its remaining windows are free.
+
+    Gopher has no range request, so a windowed read downloads the WHOLE
+    resource and shows a slice of it. Before this, every continuation went back
+    to the server for the same bytes: walking a 208 KB page at a 10k cap cost 21
+    downloads and 4.4 MB, and with the shipped per-host rate limit it also cost
+    21 seconds -- paid by whoever is hosting it, which is usually a hobbyist on
+    a small machine.
+
+    ONE slot, not a cache. A continuation is a sequential walk over a single
+    document, so one body serves the whole walk; the memory is bounded by
+    ``max_response_size`` (1 MiB by default) no matter how many resources are
+    read, which a per-URL cache could not promise. Superseding it on the next
+    truncated resource is the eviction policy.
+
+    Sized against the alternative rather than assumed: the per-window entries
+    this replaces held 217,438 bytes after a full walk of that 208,005-byte
+    page, so the slot costs LESS than what it saves, not more.
+    """
+
+    key: str
+    raw: bytes
+    stored_at: float
 
 
 class _BudgetExhausted(GopherProtocolError):
@@ -285,6 +321,9 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             robots_honor_ai_tokens=robots_honor_ai_tokens,
             robots_failure_backoff_seconds=robots_failure_backoff_seconds,
         )
+
+        # One downloaded body, so the windows after the first are free.
+        self._continuation_body: _ContinuationBody | None = None
         self.max_selector_length = max_selector_length
         self.max_search_length = max_search_length
         self.max_menu_items = max_menu_items
@@ -370,6 +409,12 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         # in the ``finally``, and each task's copy keeps concurrent fetches
         # from reading each other's window.
         offset_token = _RENDER_OFFSET.set(offset)
+        # Established here, next to the offset, so the reset in ``finally`` has
+        # a token no matter where the request fails. Set to the real key only
+        # once the URL has been validated -- an oversized selector or a
+        # smuggling attempt is rejected before there is a resource to file a
+        # body under, and the token must already exist by then.
+        body_key_token = _BODY_SLOT_KEY.set(None)
         try:
             # Rejected rather than clamped: a negative offset is a caller
             # mistake, and silently reading from 0 would answer a question that
@@ -414,6 +459,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # Canonical cache key (case-insensitive host) so requests differing
             # only in host case share one entry instead of duplicating.
             cache_key = normalize_cache_key(url)
+            # The body is filed under the RESOURCE, so every window of it can be
+            # rendered from one download; only the rendered-window cache below
+            # is keyed per offset.
+            body_key = cache_key
+            _BODY_SLOT_KEY.set(body_key)
             if offset:
                 # What the cache stores is the RENDERED WINDOW, not the body, so
                 # two windows of one resource are two entries -- serving window
@@ -464,8 +514,25 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             if parsed_url.search is not None and parsed_url.gopher_type != "7":
                 request_info.search_ignored = True
 
-            # Fetch the content (optionally bounded by the concurrency cap)
-            response = await self._bounded_fetch(parsed_url)
+            # A body this client already downloaded serves every remaining
+            # window of the same resource. Checked HERE rather than deeper in
+            # the transport path because the point is to skip the network
+            # entirely -- including the per-host rate limit, which exists to
+            # pace requests to a server and must not charge for a request that
+            # is never made.
+            held = self._reuse_continuation_body(body_key, refresh)
+            if held is not None:
+                response = self._render_body(
+                    held, gopher_type_category(parsed_url.gopher_type)
+                )
+                logger.debug(
+                    "Continuation served from the body already downloaded",
+                    url=url,
+                    response_type=response.kind,
+                )
+            else:
+                # Fetch the content (optionally bounded by the concurrency cap)
+                response = await self._bounded_fetch(parsed_url)
             # Merge (not clobber) so any fields a processor attached survive --
             # matches the Gemini client and avoids a latent maintenance trap.
             response.request_info.merge(request_info)
@@ -515,6 +582,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             _FETCH_BUDGET.reset(budget_token)
             _PROBE_CREDIT.reset(credit_token)
             _RENDER_OFFSET.reset(offset_token)
+            _BODY_SLOT_KEY.reset(body_key_token)
 
     async def _bounded_fetch(self, parsed_url: GopherURL) -> GopherFetchResponse:
         """Run the guarded fetch, spending what the robots probe already paid.
@@ -793,6 +861,18 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 f"The request timed out after {self.timeout_seconds} seconds"
             ) from e
 
+        response = self._render_body(raw, category)
+        self._remember_continuation_body(raw, response)
+        return response
+
+    def _render_body(self, raw: bytes, category: str) -> GopherFetchResponse:
+        """Turn a downloaded body into the window the caller asked for.
+
+        Split out from :meth:`_fetch_content` so a body already in hand can be
+        re-rendered at a new offset without going back to the server. Pure: no
+        I/O, no rate limit, no robots probe -- everything here operates on bytes
+        that have already been fetched and vetted.
+        """
         # Where the caller asked the render window to start. The whole response
         # is still read from the server -- Gopher has no range request -- so
         # this windows what is handed to the model, not what is transferred.
@@ -807,6 +887,41 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         else:
             # Text (type 0, h/HTML, i/info) and unknown types - try as text
             return self._process_text_response(raw, offset)
+
+    def _remember_continuation_body(
+        self, raw: bytes, response: GopherFetchResponse
+    ) -> None:
+        """Hold this body only if a later window could ask for it.
+
+        A response that was not truncated has no next window, so keeping its
+        body would spend the slot on a resource nothing will ask about again and
+        evict one that is mid-walk.
+        """
+        key = _BODY_SLOT_KEY.get()
+        if key is None or not self.cache_enabled:
+            return
+        if getattr(response, "next_offset", None) is None:
+            return
+        self._continuation_body = _ContinuationBody(key, raw, time.time())
+
+    def _reuse_continuation_body(self, key: str, refresh: bool) -> bytes | None:
+        """The body for ``key`` if this client just downloaded it.
+
+        ``refresh`` means "go and look again", so it must miss here as well as
+        in the response cache -- otherwise the flag would silently re-render
+        stale bytes. The slot expires on the same TTL as a cached response, so a
+        continuation can never outlive the freshness the rest of the client
+        promises.
+        """
+        held = self._continuation_body
+        if held is None or refresh or not self.cache_enabled:
+            return None
+        if held.key != key:
+            return None
+        if time.time() - held.stored_at > self.cache_ttl_seconds:
+            self._continuation_body = None
+            return None
+        return held.raw
 
     def _process_menu_response(self, raw: bytes, offset: int = 0) -> MenuResult:
         """Parse a Gopher menu (RFC 1436) into a structured result.

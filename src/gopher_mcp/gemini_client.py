@@ -4,7 +4,7 @@ import asyncio
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NamedTuple
 
 import structlog
 
@@ -151,6 +151,41 @@ _PROBE_CREDIT: ContextVar[_ProbeCredit | None] = ContextVar(
 # other's window (a value parked on the shared client instance would not).
 _RENDER_OFFSET: ContextVar[int] = ContextVar("gemini_render_offset", default=0)
 
+# Cache key of the page being fetched, WITHOUT the offset suffix, so the body it
+# downloads can be filed under the page rather than under one window of it. Same
+# indirection ``_RENDER_OFFSET`` uses: the transport path is reached through the
+# shared base class and cannot take extra arguments.
+_BODY_SLOT_KEY: ContextVar[str | None] = ContextVar(
+    "gemini_body_slot_key", default=None
+)
+
+
+class _ContinuationBody(NamedTuple):
+    """One downloaded page, held so its remaining windows are free.
+
+    Gemini has no range request, so a windowed read transfers the WHOLE page and
+    shows a slice of it, and every continuation used to go back to the capsule
+    for the same bytes -- paid for by whoever is hosting it, over TLS, with a
+    fresh handshake each time.
+
+    ONE slot, not a cache: a continuation is a sequential walk over a single
+    page, so one body serves the whole walk and the memory stays bounded by
+    ``max_response_size`` however many pages are read.
+
+    ``connection`` is stored with the bytes because a Gemini result reports the
+    connection it arrived over, and a window rendered from a held body has no
+    live connection of its own. Replaying these is the honest answer rather than
+    a convenient one: they describe the transfer these bytes actually came from,
+    which is what the field means. Dropping them would be worse than wrong, it
+    would be misreadable -- a window with no fingerprint next to windows that
+    have one reads as "this one was not authenticated".
+    """
+
+    key: str
+    raw: bytes
+    connection: RequestInfo
+    stored_at: float
+
 
 def _ipv4_first(addresses: list[str]) -> list[str]:
     """Order vetted connect addresses IPv4 first, keeping every one of them.
@@ -253,6 +288,12 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             robots_honor_ai_tokens=robots_honor_ai_tokens,
             robots_failure_backoff_seconds=robots_failure_backoff_seconds,
         )
+
+        # One downloaded page, so the windows after the first are free.
+        self._continuation_body: _ContinuationBody | None = None
+        # Warning that belonged to the held page's own request, replayed
+        # with it for the same reason its connection details are.
+        self._continuation_cert_warning: str | None = None
         # A status-44 penalty is capped at MAX_PENALTY_SECONDS (300), which is
         # far longer than one tool call may spend asleep: the MCP client's own
         # call timeout fires first, and in a batch the sleeping call also ties up
@@ -373,6 +414,10 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         # for it. Same lifecycle as the budget above, and each task's copy keeps
         # concurrent fetches from reading each other's window.
         offset_token = _RENDER_OFFSET.set(offset)
+        # Established here, alongside the offset, so the reset in ``finally``
+        # always has a token -- a URL rejected before there is a page to file a
+        # body under still unwinds through that block.
+        body_key_token = _BODY_SLOT_KEY.set(None)
         try:
             # Rejected rather than clamped: a negative offset is a caller
             # mistake, and silently reading from 0 would answer a question that
@@ -408,6 +453,11 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             cache_key = format_gemini_url(
                 parsed_url.host, parsed_url.port, parsed_url.path, parsed_url.query
             )
+            # The body is filed under the PAGE, so every window of it renders
+            # from one download; only the rendered-window cache is keyed per
+            # offset.
+            body_key = cache_key
+            _BODY_SLOT_KEY.set(body_key)
             if offset:
                 # What the cache stores is the RENDERED WINDOW, not the body, so
                 # two windows of one page are two entries -- serving window 0 to
@@ -461,7 +511,31 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             )
 
             # Fetch the content (optionally bounded by the concurrency cap)
-            response = await self._bounded_fetch(parsed_url)
+            # A page this client already downloaded serves every remaining
+            # window of it. Checked here rather than deeper in the transport
+            # path because the point is to skip the network entirely -- the TLS
+            # handshake, and the per-host rate limit, which paces requests to a
+            # capsule and must not charge for one that is never made.
+            held = self._reuse_continuation_body(body_key, refresh)
+            if held is not None:
+                response = self._render_body(
+                    held.raw,
+                    format_gemini_url(
+                        parsed_url.host,
+                        parsed_url.port,
+                        parsed_url.path,
+                        parsed_url.query,
+                    ),
+                    held.connection,
+                    self._continuation_cert_warning,
+                )
+                logger.debug(
+                    "Continuation served from the page already downloaded",
+                    host=parsed_url.host,
+                    response_type=response.kind,
+                )
+            else:
+                response = await self._bounded_fetch(parsed_url)
 
             # Honour a server SLOW_DOWN (status 44): back off this host for the
             # advertised number of seconds (meta) regardless of the configured
@@ -611,6 +685,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             _FETCH_BUDGET.reset(budget_token)
             _PROBE_CREDIT.reset(credit_token)
             _RENDER_OFFSET.reset(offset_token)
+            _BODY_SLOT_KEY.reset(body_key_token)
 
     async def _bounded_fetch(self, parsed_url: GeminiURL) -> GeminiFetchResponse:
         """Run the guarded fetch, spending what the robots probe already paid.
@@ -882,6 +957,69 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         # Redirect, input prompt, certificate request or a binary body: none of
         # these is a policy we can apply, so nothing is disallowed.
         return None
+
+    def _render_body(
+        self,
+        raw: bytes,
+        request_url: str,
+        connection: RequestInfo,
+        client_cert_warning: str | None,
+    ) -> GeminiFetchResponse:
+        """Render a window from a page already downloaded.
+
+        The two steps that follow the network in :meth:`_fetch_content`, and
+        nothing else: no handshake, no TOFU check, no rate limit. Everything
+        here operates on bytes that were fetched and vetted when the page was
+        first read.
+        """
+        result = process_gemini_response(
+            parse_gemini_response(raw),
+            request_url,
+            time.time(),
+            offset=_RENDER_OFFSET.get(),
+            max_rendered_chars=self.max_rendered_chars,
+            denied_mime_types=self.denied_mime_types,
+        )
+        result.request_info.merge(connection)
+        if client_cert_warning is not None:
+            result.request_info.client_cert_warning = client_cert_warning
+        return result
+
+    def _remember_continuation_body(
+        self,
+        raw: bytes,
+        result: GeminiFetchResponse,
+        connection: RequestInfo,
+        client_cert_warning: str | None,
+    ) -> None:
+        """Hold this page only if a later window could ask for it."""
+        key = _BODY_SLOT_KEY.get()
+        if key is None or not self.cache_enabled:
+            return
+        if getattr(result, "next_offset", None) is None:
+            return
+        self._continuation_body = _ContinuationBody(key, raw, connection, time.time())
+        self._continuation_cert_warning = client_cert_warning
+
+    def _reuse_continuation_body(
+        self, key: str, refresh: bool
+    ) -> _ContinuationBody | None:
+        """The page for ``key`` if this client just downloaded it.
+
+        ``refresh`` means "go and look again", so it misses here as well as in
+        the response cache, and the slot expires on the same TTL a cached
+        response does -- a continuation must never outlive the freshness the
+        rest of the client promises.
+        """
+        held = self._continuation_body
+        if held is None or refresh or not self.cache_enabled:
+            return None
+        if held.key != key:
+            return None
+        if time.time() - held.stored_at > self.cache_ttl_seconds:
+            self._continuation_body = None
+            return None
+        return held
 
     async def _fetch_content(
         self,
@@ -1167,6 +1305,19 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 )
                 if client_cert_warning is not None:
                     result.request_info.client_cert_warning = client_cert_warning
+
+                if apply_content_policy:
+                    self._remember_continuation_body(
+                        raw_response,
+                        result,
+                        RequestInfo(
+                            tls_version=connection_info.get("tls_version"),
+                            cipher=connection_info.get("cipher"),
+                            cert_fingerprint=connection_info.get("cert_fingerprint"),
+                            tofu_warning=tofu_warning,
+                        ),
+                        client_cert_warning,
+                    )
 
                 return result
 
