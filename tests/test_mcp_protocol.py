@@ -380,3 +380,62 @@ def _descriptions(schema, path=""):
     elif isinstance(schema, list):
         for index, value in enumerate(schema):
             yield from _descriptions(value, f"{path}/{index}")
+
+
+class TestBatchProgress:
+    """A batch is the one call here that is slow enough to need a progress bar.
+
+    Per-host rate limiting spaces same-host requests one second apart, so a
+    50-URL batch aimed at one capsule takes at least 49 seconds. MCP has a
+    progress channel for exactly this, and nothing was writing to it: the client
+    saw one request go out and nothing at all until every URL had been fetched.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_batch_reports_progress_as_each_url_finishes(self):
+        """One notification per completed URL, carrying the batch size.
+
+        ``report_progress`` is a no-op unless the caller sent a
+        ``progressToken``, so this asserts on what a client that asked for
+        progress actually receives.
+        """
+        seen: list[tuple[float, float | None, str | None]] = []
+
+        async def on_progress(
+            progress: float, total: float | None, message: str | None
+        ) -> None:
+            seen.append((progress, total, message))
+
+        urls = [f"gopher://example.com/0/{n}" for n in range(3)]
+        async with _offline_gopher(b"hello\r\n.\r\n"):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server
+            ) as client:
+                result = await client.call_tool(
+                    "gopher_batch_fetch",
+                    {"urls": urls},
+                    progress_callback=on_progress,
+                )
+
+        assert result.isError is not True
+        assert len(result.structuredContent["result"]) == 3
+
+        assert len(seen) == 3, f"expected one notification per URL, got {seen}"
+        assert [p for p, _, _ in seen] == [1.0, 2.0, 3.0]
+        assert {t for _, t, _ in seen} == {3.0}, "every notification names the total"
+        assert all(m for _, _, m in seen), "every notification carries a message"
+
+    @pytest.mark.asyncio
+    async def test_a_batch_without_a_progress_token_still_works(self):
+        """The overwhelming majority of calls. ``report_progress`` returns early
+        when no token was sent, so this pins that the reporting path cannot
+        break a caller who never asked for it."""
+        urls = ["gopher://example.com/0/a", "gopher://example.com/0/b"]
+        async with _offline_gopher(b"hello\r\n.\r\n"):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server
+            ) as client:
+                result = await client.call_tool("gopher_batch_fetch", {"urls": urls})
+
+        assert result.isError is not True
+        assert len(result.structuredContent["result"]) == 2

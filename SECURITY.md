@@ -52,11 +52,17 @@ be here named 0.4.x as the only supported line and was still saying so at
 0.8.0, four minor releases later, because nothing in the release path touches
 this file. If a table is ever wanted back, add a check to
 scripts/validate-release.py that asserts it names the current minor from
-pyproject.toml -- otherwise it will go stale again. -->
+pyproject.toml -- otherwise it will go stale again.
 
-Only the latest release on PyPI receives security fixes. As a pre-1.0 project,
-those fixes ship on the latest minor version; there are no maintained
-backport branches for older lines.
+The prose below states no version and no release-numbering scheme for the same
+reason. It used to say "as a pre-1.0 project, those fixes ship on the latest
+minor version", which would have become false on the day 1.0 was tagged -- in
+the one document where a stale statement about which versions get security
+fixes is not cosmetic. -->
+
+Only the latest release on PyPI receives security fixes. There are no
+maintained backport branches for older lines: a fix ships in the next release
+of the current line, and upgrading is the supported remedy.
 
 ## 📢 Reporting a Vulnerability
 

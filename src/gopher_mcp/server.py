@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 import structlog
 import uvicorn
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from pydantic import Field, ValidationError
 from pydantic_core import to_json
@@ -459,6 +459,12 @@ mcp._mcp_server.version = __version__
 
 # Bounds for the batch tools: cap the list length and the number of in-flight
 # connections so a caller (or attacker-steered model) cannot fan out an
+# ``Context`` is generic in three parameters (session, lifespan state, request)
+# and ``mypy --strict`` rejects the bare name. None of the three matter here:
+# the only thing this server ever asks a context for is ``report_progress``.
+_ToolContext = Context[Any, Any, Any]
+
+
 # unbounded number of concurrent requests.
 MAX_BATCH_URLS = 50
 BATCH_CONCURRENCY = 5
@@ -1011,6 +1017,7 @@ async def _batch_fetch(
     resolve_client: Callable[[], Awaitable[GopherClient | GeminiClient]],
     label: str,
     refresh: bool = False,
+    ctx: _ToolContext | None = None,
 ) -> list[dict[str, Any]]:
     """Shared implementation for the two parallel batch-fetch tools.
 
@@ -1041,6 +1048,38 @@ async def _batch_fetch(
 
     semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
 
+    # Progress is reported per COMPLETED item rather than per started one: the
+    # per-host rate limit spaces same-host requests a second apart, so a batch
+    # aimed at one capsule spends almost all its time waiting, and "started" would
+    # jump to the concurrency cap immediately and then sit still. `total` is the
+    # URL count, which is known up front and never changes.
+    #
+    # `report_progress` returns early when the caller sent no progressToken, so
+    # this costs nothing for the overwhelming majority of calls and cannot fail
+    # one: a client that did not ask for progress is unaffected.
+    done = 0
+
+    async def report_one_done() -> None:
+        nonlocal done
+        done += 1
+        if ctx is None:
+            return
+        try:
+            await ctx.report_progress(
+                progress=done,
+                total=len(urls),
+                message=f"Fetched {done} of {len(urls)}",
+            )
+        except Exception as e:
+            # Progress is a courtesy, and it is reported AFTER the work it
+            # describes has already succeeded -- so nothing here may turn a
+            # fetched page into a failed call. Two ways this throws: there is no
+            # request context at all (the tool function called directly in
+            # process, which is how much of this repo's own test suite drives
+            # it), and a notification that cannot be delivered on a transport
+            # that has gone away. Neither says anything about the fetch.
+            logger.debug("progress notification failed", error=str(e))
+
     async def fetch_one(url: str) -> dict[str, Any]:
         # Bounded concurrency: at most BATCH_CONCURRENCY in-flight at once.
         async with semaphore:
@@ -1048,13 +1087,18 @@ async def _batch_fetch(
             # resources at once), and one offset cannot mean anything sensible
             # across a list of different URLs. Continue a truncated item with
             # the single-URL tool, which is where `next_offset` is answerable.
-            return await _fetch_one(
+            result = await _fetch_one(
                 url,
                 request_cls=request_cls,
                 resolve_client=batch_client,
                 label=label,
                 refresh=refresh,
             )
+        # Outside the semaphore: reporting is not part of the work being paced,
+        # and holding a slot to send a notification would narrow the concurrency
+        # the cap is there to allow.
+        await report_one_done()
+        return result
 
     results = await asyncio.gather(*[fetch_one(url) for url in urls])
     return list(results)
@@ -1066,7 +1110,9 @@ async def _batch_fetch(
     flag_errors=False,
 )
 async def gopher_batch_fetch(
-    urls: _GopherUrlList, refresh: _Refresh = False
+    urls: _GopherUrlList,
+    refresh: _Refresh = False,
+    ctx: _ToolContext | None = None,
 ) -> GopherBatchResponse:
     """Fetch multiple Gopher URLs concurrently.
 
@@ -1105,6 +1151,7 @@ async def gopher_batch_fetch(
             resolve_client=_gopher_client,
             label="Gopher",
             refresh=refresh,
+            ctx=ctx,
         ),
     )
 
@@ -1115,7 +1162,9 @@ async def gopher_batch_fetch(
     flag_errors=False,
 )
 async def gemini_batch_fetch(
-    urls: _GeminiUrlList, refresh: _Refresh = False
+    urls: _GeminiUrlList,
+    refresh: _Refresh = False,
+    ctx: _ToolContext | None = None,
 ) -> GeminiBatchResponse:
     """Fetch multiple Gemini URLs concurrently.
 
@@ -1148,6 +1197,7 @@ async def gemini_batch_fetch(
             resolve_client=_gemini_client,
             label="Gemini",
             refresh=refresh,
+            ctx=ctx,
         ),
     )
 

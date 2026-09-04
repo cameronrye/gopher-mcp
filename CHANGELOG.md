@@ -7,8 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The batch fetch tools report progress. A batch is the one call here slow
+  enough to need it: the per-host rate limit spaces same-host requests a second
+  apart, so fifty URLs aimed at one capsule take at least forty-nine seconds,
+  and a client saw the request go out and then nothing at all until every URL
+  had been fetched. One notification lands per COMPLETED item, carrying the
+  batch size as the total -- per completion rather than per start, because a
+  batch spends nearly all its time waiting, so "started" would jump to the
+  concurrency cap and then sit still. Nothing changes for a client that does not
+  ask: MCP progress is only sent when the caller supplies a progress token, the
+  tools' input schemas are unchanged, and a notification that cannot be
+  delivered is logged and swallowed rather than allowed to fail a fetch that has
+  already succeeded.
+
 ### Changed
 
+- `SECURITY.md` no longer dates itself. Its support policy said "as a pre-1.0
+  project, those fixes ship on the latest minor version", which would have
+  become false the day 1.0 was tagged -- in the one document where a stale
+  claim about which versions receive security fixes is not cosmetic.
 - All six remaining tools advertise a real `outputSchema`. 0.9.0 gave the two
   fetch tools a discriminated union and left the rest on the default: the four
   trust-store and client-identity tools advertised a bare open object, and the
