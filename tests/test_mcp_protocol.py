@@ -22,6 +22,7 @@ it; the point of this file is that the port does not need that again.
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -439,3 +440,75 @@ class TestBatchProgress:
 
         assert result.isError is not True
         assert len(result.structuredContent["result"]) == 2
+
+
+class TestEveryToolKeepsItsSchemaPromiseOnEveryPath:
+    """The advertised schema has to hold on the paths nobody demos.
+
+    The SDK's own ``ClientSession`` validates ``structuredContent`` against the
+    tool's ``outputSchema`` on every call, so a payload that does not validate
+    is not a cosmetic mismatch -- it is a ``RuntimeError`` raised at the client
+    instead of the result. Success paths get exercised constantly; the ones that
+    rot quietly are the failures, and ``request_info`` now declares
+    ``additionalProperties: false``, so any provenance key a failure path
+    invents fails here rather than at a user's client.
+    """
+
+    # One call per distinct shape a tool can return, error paths included.
+    # Every host here is one conftest's DNS stub maps to a blocked address, so
+    # the failures are the SSRF guard refusing before any socket is opened. A
+    # name that merely fails to resolve would NOT do: the stub answers unknown
+    # names with a routable address, so `x.invalid` would be dialled for real
+    # and the test would sit on the connect timeout instead.
+    CALLS: ClassVar[list[tuple[str, dict[str, Any]]]] = [
+        ("gopher_fetch", {"url": "gopher://localhost/0/a"}),
+        ("gopher_fetch", {"url": "not-a-url"}),
+        ("gopher_fetch", {"url": "gopher://example.com/2/tel"}),
+        ("gemini_fetch", {"url": "gemini://blocked.example/"}),
+        ("gemini_fetch", {"url": "http://wrong.scheme/"}),
+        ("gopher_batch_fetch", {"urls": ["gopher://localhost/0/a", "bad"]}),
+        ("gemini_batch_fetch", {"urls": ["gemini://blocked.example/", "bad"]}),
+        ("gemini_trust_list", {}),
+        (
+            "gemini_trust_update",
+            {
+                "action": "remove",
+                "host": "example.org",
+                "fingerprint": "a" * 64,
+            },
+        ),
+        # The port a RequestInfo bound would have crashed on: this tool reports
+        # a bad port by echoing it back, so the echo must accept what the
+        # argument check is about to reject.
+        (
+            "gemini_trust_update",
+            {
+                "action": "remove",
+                "host": "example.org",
+                "fingerprint": "a" * 64,
+                "port": 70000,
+            },
+        ),
+        ("gemini_client_cert_list", {}),
+        ("gemini_client_cert_update", {"action": "create", "url": "not-a-url"}),
+    ]
+
+    @pytest.mark.asyncio
+    async def test_every_result_validates_the_way_a_client_validates_it(self):
+        import jsonschema
+
+        async with create_connected_server_and_client_session(
+            mcp._mcp_server
+        ) as session:
+            schemas = {
+                t.name: t.outputSchema for t in (await session.list_tools()).tools
+            }
+
+            for name, args in self.CALLS:
+                result = await session.call_tool(name, args)
+                payload = result.structuredContent
+                assert payload is not None, (
+                    f"{name}{args} returned no structured content"
+                )
+                # Exactly what mcp/client/session.py does on every call.
+                jsonschema.validate(payload, schemas[name])
