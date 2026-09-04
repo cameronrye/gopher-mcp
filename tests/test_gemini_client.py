@@ -2499,6 +2499,11 @@ class TestGeminiContinuationDoesNotRefetchTheBody:
         assert held_w == ref_w
         assert held_dl == 1
         assert ref_dl == ref_w
+        # Every character of the page, exactly once, in order -- asserted
+        # against the source as well as against the re-downloading walk,
+        # because a change corrupting both walks identically would slip past
+        # the comparison above.
+        assert held_text == self.BODY
 
     @pytest.mark.asyncio
     async def test_a_continued_window_still_reports_the_connection(self):

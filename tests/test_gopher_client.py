@@ -1742,7 +1742,7 @@ class TestContinuationDoesNotRefetchTheBody:
     async def _walk(self, *, cache_enabled: bool):
         """Read one document to the end, reporting cost and content."""
         client = self._client(cache_enabled=cache_enabled)
-        transport = AsyncMock(return_value=self.BODY + b"\r\n.\r\n")
+        transport = AsyncMock(return_value=self.BODY + b".\r\n")
 
         with patch("gopher_mcp.gopher_client.fetch_gopher", new=transport):
             offset: int | None = 0
@@ -1769,12 +1769,10 @@ class TestContinuationDoesNotRefetchTheBody:
         """The invariant that matters: a reused body must render exactly what
         another download would have rendered.
 
-        Compared against the same walk with the slot switched off rather than
-        against the raw body, deliberately. Concatenated windows do not equal
-        the body byte-for-byte -- there is a pre-existing extra newline at the
-        end -- and asserting equality with the body would fail for a reason
-        that has nothing to do with this slot, hiding the regression it is
-        here to catch.
+        Asserted twice over, against the walk that re-downloads AND against the
+        source body, because the two catch different mistakes: the first would
+        miss a change that corrupts both walks identically, and the second would
+        miss a difference in window boundaries that still reassembles.
         """
         held_windows, held_downloads, held_text = await self._walk(cache_enabled=True)
         refetched_windows, refetched_downloads, refetched_text = await self._walk(
@@ -1785,12 +1783,14 @@ class TestContinuationDoesNotRefetchTheBody:
         assert held_windows == refetched_windows
         assert held_downloads == 1
         assert refetched_downloads == refetched_windows
+        # Every character of the document, exactly once, in order.
+        assert held_text == self.BODY.decode()
 
     @pytest.mark.asyncio
     async def test_refresh_still_goes_back_to_the_server(self):
         """A reused body must not turn `refresh` into a lie."""
         client = self._client()
-        transport = AsyncMock(return_value=self.BODY + b"\r\n.\r\n")
+        transport = AsyncMock(return_value=self.BODY + b".\r\n")
 
         with patch("gopher_mcp.gopher_client.fetch_gopher", new=transport):
             await client.fetch("gopher://example.com/0/big")
