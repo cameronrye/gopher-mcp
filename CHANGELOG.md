@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rather than when it was rendered, for the same reason.
 - Reading one document now costs one download, when the response cache is
   enabled (the default; both halves of the mechanism bail out if it is off)
-  and the URL carries no query. A query-bearing Gemini request is never
+  and, on Gemini, the URL carries no query. A query-bearing Gemini request is never
   held, because that is where the answer to a status-10/11 prompt travels
   and a status-11 answer is a password — so those pages, search results
   included, still re-fetch for every window, by design. Neither protocol has a range

@@ -1059,8 +1059,11 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         if held.key != key:
             return None
         if time.time() - held.stored_at > self.cache_ttl_seconds:
-            # Both, together: the warning belongs to the page being dropped, and
-            # leaving it set would pair it with whatever body is held next.
+            # Both, together, through the one hook. The warning belongs to the
+            # page being dropped, and releasing the two separately is how they
+            # drift apart -- not because a stale warning could be read (the next
+            # store overwrites it) but because "release the slot" should mean
+            # the whole slot, in every path that releases it.
             self._release_held_content()
             return None
         return held

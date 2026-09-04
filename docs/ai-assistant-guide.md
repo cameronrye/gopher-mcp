@@ -102,10 +102,12 @@ while result.get("next_offset") is not None:
   cap exists to avoid.
 - **Gemtext windows abut exactly**: the cut is taken at the last complete line,
   so half a `=> url` never parses as a whole link with a fabricated target.
-- **Each window is a fresh request** to a small hobbyist server. Continue
-  because the answer needs what was cut, not by reflex — and if you stop early,
-  say the view was partial rather than presenting the first window as the whole
-  resource.
+- **Windows after the first come from the download the first one made**, so
+  they report `cached: true` rather than costing the server another request.
+  Continue because the answer needs what was cut, not by reflex — each window
+  still costs you context, and on Gemini a URL carrying a query does re-fetch
+  every time — and if you stop early, say the view was partial rather than
+  presenting the first window as the whole resource.
 - **The batch tools do not take `offset`.** One offset cannot mean anything
   across a list of URLs. Continue a truncated batch entry with the single-URL
   tool.

@@ -907,10 +907,16 @@ Three rules are worth knowing before you write that loop:
   window's first rather than reading them as two lines. It is deliberately not
   parsed, for the reason above — half of a `=> url text` line must never look
   like a whole link. Nothing is skipped: every character is still delivered.
-- **Each window is a fresh request to the server**, and is cached under its own
-  key. Continue because the answer needs what was cut, not by reflex, and say
-  the view was partial rather than presenting the first window as the whole
-  resource.
+- **The resource is downloaded once**, and the windows after the first are
+  rendered from the body already in hand — so they are snapshots of that one
+  download and report `cached: true` with a `cache_age_seconds`. Each window is
+  still cached under its own key, so requesting one twice costs nothing either.
+  Two exceptions download per window: when the response cache is off, and on
+  Gemini when the URL carries a query, because the answer to a status-10/11
+  prompt travels there and is never held. Continue because the answer needs
+  what was cut, not by reflex — the context a window costs the model is
+  unchanged even where the network cost is not — and say the view was partial
+  rather than presenting the first window as the whole resource.
 
 ### Cache provenance and `refresh`
 

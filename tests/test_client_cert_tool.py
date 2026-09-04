@@ -1487,3 +1487,44 @@ class TestTheRemovalPromptNamesWhatIsDestroyed:
                 )
 
         assert asked and "wider than" not in asked[0], asked
+
+    @pytest.mark.asyncio
+    async def test_a_differently_spelled_but_identical_scope_is_not_widened(
+        self, client
+    ):
+        """The widening clause has to compare scopes, not their spellings.
+
+        The stored host is matched through `normalize_host`, which strips a
+        trailing dot; the URL the caller passed is not normalised the same way.
+        So `gemini://example.org./app/` against a certificate stored for
+        `example.org` at `/app/` is an EXACT match, and announcing it as wider
+        would be a false statement made to obtain consent -- in the safe
+        direction, but a user may decline a removal that was exactly scoped.
+        """
+        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp.types import ElicitResult
+
+        from gopher_mcp.server import mcp
+
+        fingerprint = _mint(client, "example.org", "/app/")
+        asked: list[str] = []
+
+        async def accept(context, params):
+            asked.append(params.message)
+            return ElicitResult(action="accept", content={"confirm": True})
+
+        with _serving(client):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server, elicitation_callback=accept
+            ) as session:
+                await session.call_tool(
+                    "gemini_client_cert_update",
+                    {
+                        "action": "remove",
+                        "url": "gemini://example.org./app/",
+                        "fingerprint": fingerprint,
+                    },
+                )
+
+        assert asked, "no confirmation was put to the user"
+        assert "wider than" not in asked[0], asked[0]

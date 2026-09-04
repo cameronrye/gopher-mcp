@@ -73,7 +73,7 @@ from .models import (
     TOFUTrustUpdateResult,
     iso_utc,
 )
-from .ssrf import SSRFError
+from .ssrf import SSRFError, normalize_host
 
 # The trust store's own canonicalization, imported rather than reimplemented: a
 # fingerprint the tools normalize even slightly differently would fail to match
@@ -256,11 +256,13 @@ _Refresh = Annotated[
             "'check again', 'did they post yet?', 'that looks out of date' -- "
             "or when a previous result came back with `cached: true` and a "
             "`cache_age_seconds` too large to answer the question honestly. "
-            "A window fetched with `offset` often reports `cached: true` merely "
-            "because it was rendered from the download the first window made. "
-            "`cache_age_seconds` tells the two apart: a few seconds means that, "
-            "a large value means a genuinely old copy and the rule above "
-            "applies to it as much as to any other result. "
+            "A window fetched with `offset` also reports `cached: true`, having "
+            "been rendered from the download the first window made rather than "
+            "fetched again. `cache_age_seconds` says how old those bytes are, "
+            "the same as for any other cached result, and the decision follows "
+            "from the age alone. Refreshing part-way through a walk re-downloads "
+            "the resource and re-cuts every window after it, so finish the walk "
+            "before re-reading rather than refreshing mid-way. "
             "Leave it false for ordinary browsing and link-following: Gopher "
             "and Gemini are served mostly by small hobbyist hosts that the "
             "cache spares from repeat traffic. Either way the response "
@@ -282,9 +284,11 @@ _Offset = Annotated[
             "presenting a partial page as the whole one, and stop when "
             "`next_offset` comes back null. Continuing is usually cheap -- the "
             "resource is downloaded once and the later windows are rendered "
-            "from it -- but not always: a URL carrying a query re-downloads for "
-            "every window, as does every URL when caching is off. So read on "
-            "because the content is needed, not by reflex."
+            "from it -- with two exceptions: every window re-downloads when "
+            "caching is off, and a GEMINI url carrying a query re-downloads "
+            "always, because the answer to a status-10/11 prompt travels there "
+            "and is never held. So read on because the content is needed, not "
+            "by reflex."
         ),
     ),
 ]
@@ -1862,11 +1866,18 @@ async def _remove_identity(
     # A consent prompt has to describe the change it obtains consent for, and
     # the wider one is the one the user needs to see.
     covering_scope = format_gemini_url(covering.host, covering.port, covering.path)
-    also_below = (
-        ""
-        if covering_scope == scope_url
-        else f" That is wider than {scope_url}, which it covers."
+    # Compare the SCOPES, not their renderings. The stored host is matched
+    # through ``normalize_host`` (which strips a trailing dot) while the URL the
+    # caller passed is not, so ``gemini://example.org./app/`` against a
+    # certificate stored for ``example.org`` at ``/app/`` is an exact match that
+    # a string comparison announces as a widening -- telling the user their
+    # deletion is broader than they asked, to obtain consent, untruthfully.
+    exact = (
+        normalize_host(covering.host) == normalize_host(host)
+        and covering.port == port
+        and covering.path == path
     )
+    also_below = "" if exact else f" That is wider than {scope_url}, which it covers."
     if not await _confirmed(
         ctx,
         f"Remove the client identity for {covering_scope}?{also_below} Its "

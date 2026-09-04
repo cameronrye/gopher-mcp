@@ -948,7 +948,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         if held.key != key:
             return None
         if time.time() - held.stored_at > self.cache_ttl_seconds:
-            self._continuation_body = None
+            # Through the hook, not by assignment: the Gemini slot grew a second
+            # field and the expiry path that cleared only the first left them
+            # paired wrongly. Releasing in one place is what stops that
+            # recurring here the day this slot grows one too.
+            self._release_held_content()
             return None
         return held
 
