@@ -2558,3 +2558,75 @@ class TestGeminiHeldPageIsReportedAsTheSnapshotItIs:
         assert second.cached_at is not None
         assert second.cache_age_seconds is not None
         assert second.cache_age_seconds >= 240
+
+
+class TestAQueryBearingPageIsNeverHeld:
+    """A status-10/11 answer travels in the query, and 11 means it is a secret.
+
+    The response cache refuses to store any query-bearing Gemini request for
+    exactly that reason -- `parsed_url.query is None` is one of its conditions.
+    The continuation slot has to refuse for the same reason: it holds the raw
+    body AND is keyed by the wire request, so retaining one keeps the password
+    in memory, in the key, past the call that used it.
+
+    The cost of refusing is that continuing a query-bearing page re-fetches, the
+    way everything did before 0.10.0. That is the right trade: paging through
+    the answer to a password prompt is vanishingly rare, and holding the
+    password is not.
+    """
+
+    BODY = "".join(f"line {i}\n" for i in range(200))
+    SECRET = "hunter2-my-actual-password"
+
+    def _client(self):
+        client = GeminiClient(
+            respect_robots_txt=False,
+            tofu_enabled=False,
+            client_certs_enabled=False,
+            requests_per_minute=0,
+            cache_enabled=True,
+            max_rendered_chars=400,
+        )
+        client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+            return_value=(Mock(), {"cert_fingerprint": "x"})
+        )
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/plain\r\n" + self.BODY.encode()
+        )
+        return client
+
+    @pytest.mark.asyncio
+    async def test_the_answer_to_a_prompt_is_not_retained(self):
+        client = self._client()
+
+        await client.fetch(f"gemini://example.org/login?{self.SECRET}")
+
+        # The response cache already refuses this; the slot must agree.
+        assert len(client._cache) == 0
+        assert client._continuation_body is None, (
+            "the continuation slot retained a query-bearing request, which is "
+            "how a status-11 password stays in memory after the call"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_page_without_a_query_is_still_held(self):
+        """The guard must be about the query, not about turning the slot off."""
+        client = self._client()
+
+        await client.fetch("gemini://example.org/big")
+
+        assert client._continuation_body is not None
+
+    @pytest.mark.asyncio
+    async def test_closing_the_client_drops_the_held_body(self):
+        """`close()` clears the response cache; the slot holds raw bytes too,
+        and is the only other place they outlive a call."""
+        client = self._client()
+        await client.fetch("gemini://example.org/big")
+        assert client._continuation_body is not None
+
+        await client.close()
+
+        assert client._continuation_body is None

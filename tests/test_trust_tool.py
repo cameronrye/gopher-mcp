@@ -514,6 +514,21 @@ class TestDestructiveChangesAskFirst:
         assert _pinned(client, "example.org") is None
 
     @pytest.mark.asyncio
+    async def test_a_declined_confirmation_leaves_a_re_pin_alone(self, client):
+        """`pin` is destructive too -- it replaces the certificate that
+        authenticates a host -- so it asks, and a refusal must change nothing."""
+
+        async def decline(context, params):
+            from mcp.types import ElicitResult
+
+            return ElicitResult(action="decline")
+
+        result = await self._call(client, elicitation_callback=decline, action="pin")
+
+        assert result.structuredContent["error"]["code"] == "USER_DECLINED"
+        assert _pinned(client, "example.org") == FINGERPRINT_A
+
+    @pytest.mark.asyncio
     async def test_a_client_that_cannot_be_asked_is_unaffected(self, client):
         """No elicitation capability means no prompt and no refusal. Requiring
         consent a client cannot express would make the tool unusable on every

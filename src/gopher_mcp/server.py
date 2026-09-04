@@ -256,6 +256,10 @@ _Refresh = Annotated[
             "'check again', 'did they post yet?', 'that looks out of date' -- "
             "or when a previous result came back with `cached: true` and a "
             "`cache_age_seconds` too large to answer the question honestly. "
+            "A continued window (one fetched with `offset`) reports `cached: true` "
+            "because it is part of the download the first window made, not "
+            "because the page is stale -- refreshing mid-walk restarts the "
+            "download rather than telling you anything new. "
             "Leave it false for ordinary browsing and link-following: Gopher "
             "and Gemini are served mostly by small hobbyist hosts that the "
             "cache spares from repeat traffic. Either way the response "
@@ -275,9 +279,10 @@ _Offset = Annotated[
             "beginning. A result with `truncated: true` and a `next_offset` is "
             "the signal that there is more: continue from it rather than "
             "presenting a partial page as the whole one, and stop when "
-            "`next_offset` comes back null. Each window is a fresh request to "
-            "the server, so read on because the content is needed, not by "
-            "reflex."
+            "`next_offset` comes back null. The resource is downloaded once and "
+            "the later windows are rendered from it, so reading on is cheap for "
+            "the server -- but a continued window is a snapshot of that one "
+            "download and says so with `cached: true`."
         ),
     ),
 ]
@@ -1675,6 +1680,7 @@ async def _create_identity(
     path: str,
     scope_url: str,
     request_info: dict[str, Any],
+    ctx: _ToolContext | None = None,
 ) -> _IdentityChange | dict[str, Any]:
     """Mint one identity for a scope, or return the error refusing to.
 
@@ -1733,6 +1739,24 @@ async def _create_identity(
             port=port,
             path=covering.path,
         )
+
+    # Asked here rather than in the tool body: every refusal above this line is
+    # already decided, and asking someone to approve a change the tool then
+    # declines is how they learn to click the prompt away without reading it.
+    if not await _confirmed(
+        ctx,
+        f"Create a client identity for {scope_url}? Every request to that "
+        f"scope will then carry it automatically, so the capsule can link "
+        f"those visits to one persistent identity for as long as the "
+        f"certificate lasts.",
+    ):
+        return _error(
+            "USER_DECLINED",
+            f"No identity was created for {scope_url} because the confirmation "
+            f"was declined.",
+            **request_info,
+        )
+
     # Off the event loop: RSA key generation is CPU-bound and the certificate,
     # its private key and the registry are all written to disk, which would
     # otherwise stall every in-flight fetch.
@@ -1764,6 +1788,7 @@ async def _remove_identity(
     path: str,
     scope_url: str,
     request_info: dict[str, Any],
+    ctx: _ToolContext | None = None,
 ) -> _IdentityChange | dict[str, Any]:
     """Destroy the identity covering a scope, or return the error refusing to.
 
@@ -1815,6 +1840,23 @@ async def _remove_identity(
                 changed=False,
                 key_retained=False,
             ),
+        )
+
+    # Below every refusal AND below the "nothing covers this scope" answer, so
+    # the question is only ever asked when a private key really is about to be
+    # destroyed. Asked earlier, it told the user their key would be deleted on
+    # a scope that held none -- a false statement made to obtain consent.
+    if not await _confirmed(
+        ctx,
+        f"Remove the client identity for {scope_url}? Its private key is "
+        f"deleted, and a new certificate is a different identity -- anything "
+        f"the capsule associated with the old one is not recoverable.",
+    ):
+        return _error(
+            "USER_DECLINED",
+            f"The identity for {scope_url} was left in place because the "
+            f"confirmation was declined.",
+            **request_info,
         )
 
     key_retained = False
@@ -1972,24 +2014,6 @@ async def gemini_client_cert_update(
             stored = await asyncio.to_thread(client.list_client_certificates)
             covering = _covering_certificate(stored, host, port, path)
             if action == "create":
-                # A client certificate is a persistent pseudonymous identity
-                # with a private key on disk, and every later request in scope
-                # carries it automatically -- so the capsule can link those
-                # visits, across sessions, to one identity. That is a decision
-                # for the person, not for a model that hit a 60 response.
-                if not await _confirmed(
-                    ctx,
-                    f"Create a client identity for {scope_url}? Every request "
-                    f"to that scope will then carry it automatically, so the "
-                    f"capsule can link those visits to one persistent identity "
-                    f"for as long as the certificate lasts.",
-                ):
-                    return _error(
-                        "USER_DECLINED",
-                        f"No identity was created for {scope_url} because the "
-                        f"confirmation was declined.",
-                        **request_info,
-                    )
                 outcome = await _create_identity(
                     client,
                     stored=stored,
@@ -1999,25 +2023,9 @@ async def gemini_client_cert_update(
                     path=path,
                     scope_url=scope_url,
                     request_info=request_info,
+                    ctx=ctx,
                 )
             else:
-                # Removal destroys a private key. Nothing re-creates it: the
-                # capsule knows that identity by its public key, so anything
-                # tied to it -- an account, a posting history -- is not
-                # recoverable by making a new certificate.
-                if not await _confirmed(
-                    ctx,
-                    f"Remove the client identity for {scope_url}? Its private "
-                    f"key is deleted, and a new certificate is a different "
-                    f"identity -- anything the capsule associated with the old "
-                    f"one is not recoverable.",
-                ):
-                    return _error(
-                        "USER_DECLINED",
-                        f"The identity for {scope_url} was left in place "
-                        f"because the confirmation was declined.",
-                        **request_info,
-                    )
                 outcome = await _remove_identity(
                     client,
                     covering=covering,
@@ -2028,6 +2036,7 @@ async def gemini_client_cert_update(
                     path=path,
                     scope_url=scope_url,
                     request_info=request_info,
+                    ctx=ctx,
                 )
         if isinstance(outcome, dict):
             return outcome

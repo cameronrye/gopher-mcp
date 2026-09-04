@@ -462,11 +462,12 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 # What the cache stores is the RENDERED WINDOW, not the body, so
                 # two windows of one page are two entries -- serving window 0 to
                 # a request for window 50000 would silently answer the wrong
-                # question. Caching the whole body instead would put full-size
-                # bodies in a cache whose entry cap exists to bound its memory,
-                # so the offset goes in the key and a continuation pays for its
-                # own fetch. NUL cannot appear in a URL, so this can never
-                # collide with the key another URL formats to.
+                # question. That is still the only job this key does: the page
+                # BODY is held separately (see ``_ContinuationBody``), so a
+                # continuation no longer pays for its own fetch -- but it still
+                # must not be handed another window's render. NUL cannot appear
+                # in a URL, so this can never collide with the key another URL
+                # formats to.
                 cache_key = f"{cache_key}\x00offset={offset}"
 
             # Check cache first, unless the caller asked for the current state.
@@ -999,16 +1000,35 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
             result.request_info.client_cert_warning = client_cert_warning
         return result
 
+    def _release_held_content(self) -> None:
+        """Drop the held body (see the base class)."""
+        self._continuation_body = None
+        self._continuation_cert_warning = None
+
     def _remember_continuation_body(
         self,
         raw: bytes,
         result: GeminiFetchResponse,
         connection: RequestInfo,
         client_cert_warning: str | None,
+        has_query: bool = False,
     ) -> None:
-        """Hold this page only if a later window could ask for it."""
+        """Hold this page only if a later window could ask for it.
+
+        Never when the request carried a query. The answer to a status-10/11
+        prompt travels there, and status 11 means it is a secret -- which is why
+        the response cache refuses a query-bearing request outright
+        (``parsed_url.query is None`` is one of its conditions). This slot is
+        keyed by the wire request and holds the raw body, so retaining one would
+        keep the password in memory, inside the key, past the call that used it
+        -- reintroducing through an optimisation exactly what that cache
+        condition exists to prevent.
+
+        The cost is that paging through the answer to a prompt re-fetches, as
+        everything did before the slot existed. That is the right way round.
+        """
         key = _BODY_SLOT_KEY.get()
-        if key is None or not self.cache_enabled:
+        if key is None or not self.cache_enabled or has_query:
             return
         if getattr(result, "next_offset", None) is None:
             return
@@ -1331,6 +1351,7 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                             tofu_warning=tofu_warning,
                         ),
                         client_cert_warning,
+                        has_query=parsed_url.query is not None,
                     )
 
                 return result

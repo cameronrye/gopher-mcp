@@ -244,4 +244,16 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
     async def close(self) -> None:
         """Close the client and cleanup resources."""
         self._cache.clear()
+        self._release_held_content()
         logger.info(f"{self._log_label} client closed")
+
+    def _release_held_content(self) -> None:
+        """Drop any response body held outside the cache.
+
+        Both fetch clients keep the most recently truncated body so the windows
+        after the first need not download it again, and that buffer is the
+        largest single thing either of them holds -- so ``close`` has to drop it
+        along with the cache. A hook rather than a base attribute because the
+        two clients hold different shapes (Gemini's carries the connection the
+        bytes arrived over), and the base itself holds nothing.
+        """

@@ -468,12 +468,12 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 # What the cache stores is the RENDERED WINDOW, not the body, so
                 # two windows of one resource are two entries -- serving window
                 # 0 to a request for window 200 would silently answer the wrong
-                # question. The alternative (cache the whole body and window on
-                # the way out) would put full-size bodies in a cache whose
-                # entry cap exists to bound its memory, so the offset goes in
-                # the key instead and a continuation pays for its own fetch.
-                # NUL cannot appear in a URL, so this can never collide with a
-                # key some other URL normalizes to.
+                # question. That is still the only job this key does: the BODY
+                # is held separately (see ``_ContinuationBody``), so a
+                # continuation no longer pays for its own fetch -- but it still
+                # must not be handed another window's render. NUL cannot appear
+                # in a URL, so this can never collide with a key some other URL
+                # normalizes to.
                 cache_key = f"{cache_key}\x00offset={offset}"
 
             # Check cache first, unless the caller asked for the current state.
@@ -902,6 +902,10 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         else:
             # Text (type 0, h/HTML, i/info) and unknown types - try as text
             return self._process_text_response(raw, offset)
+
+    def _release_held_content(self) -> None:
+        """Drop the held body (see the base class)."""
+        self._continuation_body = None
 
     def _remember_continuation_body(
         self, raw: bytes, response: GopherFetchResponse

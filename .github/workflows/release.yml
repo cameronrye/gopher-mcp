@@ -151,10 +151,12 @@ jobs:
           # package indiscriminately; against the oci entry it would have found
           # None and failed the tag with a nonsense message.
           #
-          # The image tag matters more than the rest of this step, because it is
-          # the one field a version bump silently leaves behind:
-          # scripts/prepare-release.py rewrites `version` fields only, and never
-          # touches `identifier`. A stale tag here does not fail anything later
+          # The image tag matters more than the rest of this step, because it
+          # is the field a version bump most easily leaves behind. It is bumped
+          # by scripts/prepare-release.py -- but only since the same commit that
+          # added this check, and only there: nothing else in the repo touches
+          # it, and a hand-edited release would miss it. A stale tag here does
+          # not fail anything later
           # -- publish-image pushes the NEW tag, publish-registry then verifies
           # the OLD one, finds it (it is a real image from the last release) and
           # publishes a registry entry telling every client to pull the previous
@@ -190,9 +192,9 @@ jobs:
               print(f"❌ server.json does not match the tag (expected {version}):")
               for problem in problems:
                   print(f"::error file=server.json::{problem} -- expected {version}")
-              print("Update server.json -- note that the oci package's version is")
-              print("the tag in its `identifier`, which prepare-release.py does")
-              print("not rewrite for you.")
+              print("Update server.json -- note that the oci package's version")
+              print("is the tag inside its `identifier`, not a `version` key.")
+              print("prepare-release.py rewrites it; a hand-edited bump will not.")
               sys.exit(1)
           PY
           echo "✅ Version consistency validated (pyproject.toml + server.json)"

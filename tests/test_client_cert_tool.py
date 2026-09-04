@@ -1272,6 +1272,29 @@ class TestIdentityChangesAskFirst:
         assert not _attached_to(client, "example.org", "/app/")
 
     @pytest.mark.asyncio
+    async def test_a_declined_removal_keeps_the_private_key(self, client):
+        """The refusal that matters most: the key still exists afterwards."""
+        fingerprint = _mint(client, "example.org", "/app/")
+
+        async def decline(context, params):
+            from mcp.types import ElicitResult
+
+            return ElicitResult(action="decline")
+
+        result = await self._call(
+            client,
+            {
+                "action": "remove",
+                "url": "gemini://example.org/app/",
+                "fingerprint": fingerprint,
+            },
+            elicitation_callback=decline,
+        )
+
+        assert result.structuredContent["error"]["code"] == "USER_DECLINED"
+        assert _attached_to(client, "example.org", "/app/")
+
+    @pytest.mark.asyncio
     async def test_an_accepted_creation_mints_the_identity(self, client):
         async def accept(context, params):
             from mcp.types import ElicitResult
@@ -1287,3 +1310,97 @@ class TestIdentityChangesAskFirst:
         assert result.structuredContent["kind"] == "client_cert_update"
         assert result.structuredContent["changed"] is True
         assert _attached_to(client, "example.org", "/app/")
+
+
+class TestTheQuestionComesAfterTheRefusal:
+    """Never ask for a change the tool is about to refuse anyway.
+
+    `gemini_trust_update` already gets this right, and its comment says why:
+    "putting a question to the user that the tool then refuses anyway trains
+    them to click through it." The identity tool asked first, so it prompted
+    for three changes it then declined -- and the removal prompt says the
+    private key is deleted, which for a scope holding no identity is simply
+    untrue. A confirmation dialog that says false things is worse than none.
+    """
+
+    @staticmethod
+    async def _call_counting_prompts(client, args):
+        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp.types import ElicitResult
+
+        from gopher_mcp.server import mcp
+
+        asked = []
+
+        async def accept(context, params):
+            asked.append(params.message)
+            return ElicitResult(action="accept", content={"confirm": True})
+
+        with _serving(client):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server, elicitation_callback=accept
+            ) as session:
+                result = await session.call_tool("gemini_client_cert_update", args)
+        return result.structuredContent, asked
+
+    @pytest.mark.asyncio
+    async def test_creating_over_an_existing_identity_asks_nothing(self, client):
+        _mint(client, "example.org", "/app/")
+
+        payload, asked = await self._call_counting_prompts(
+            client, {"action": "create", "url": "gemini://example.org/app/"}
+        )
+
+        assert payload["error"]["code"] == "CERTIFICATE_EXISTS"
+        assert asked == [], f"asked before refusing: {asked}"
+
+    @pytest.mark.asyncio
+    async def test_removing_an_identity_that_is_not_there_asks_nothing(self, client):
+        payload, asked = await self._call_counting_prompts(
+            client,
+            {
+                "action": "remove",
+                "url": "gemini://example.org/nothing-here/",
+                "fingerprint": "a" * 64,
+            },
+        )
+
+        assert payload["kind"] == "client_cert_update"
+        assert payload["changed"] is False
+        assert asked == [], (
+            f"asked to confirm destroying a private key that does not exist: {asked}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_removing_with_the_wrong_fingerprint_asks_nothing(self, client):
+        _mint(client, "example.org", "/app/")
+
+        payload, asked = await self._call_counting_prompts(
+            client,
+            {
+                "action": "remove",
+                "url": "gemini://example.org/app/",
+                "fingerprint": "b" * 64,
+            },
+        )
+
+        assert payload["error"]["code"] == "FINGERPRINT_MISMATCH"
+        assert asked == [], f"asked before refusing: {asked}"
+
+    @pytest.mark.asyncio
+    async def test_a_removal_that_will_happen_still_asks(self, client):
+        """The guard must not silence the question on the path that needs it."""
+        fingerprint = _mint(client, "example.org", "/app/")
+
+        payload, asked = await self._call_counting_prompts(
+            client,
+            {
+                "action": "remove",
+                "url": "gemini://example.org/app/",
+                "fingerprint": fingerprint,
+            },
+        )
+
+        assert payload["kind"] == "client_cert_update"
+        assert payload["changed"] is True
+        assert len(asked) == 1

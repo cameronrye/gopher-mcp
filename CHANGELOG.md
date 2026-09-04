@@ -12,8 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The two tools that change stored state ask the user first, on clients that
-  can carry the question. Removing a certificate pin, and creating or removing
-  a client identity, are destructive, model-initiated, and not undone by trying
+  can carry the question. Removing or replacing a certificate pin, and creating or
+  removing a client identity, are destructive, model-initiated, and not undone by trying
   again -- a capsule knows an identity by its public key, so a replacement
   certificate is a different person. MCP has had a channel for putting that
   decision to a human since before this server existed, and nothing used it.
@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   mean acting on consent nobody actually gave.
 
 - A continuation window rendered from a held body reports itself as the
-  snapshot it is: `cached` true, with `cached_at` and `cache_age_seconds`
+  snapshot it is (again, only when the cache is enabled): `cached` true, with `cached_at` and `cache_age_seconds`
   naming when the bytes actually came off the wire. Holding the body is what
   makes this necessary -- those windows are no longer fetched during the call
   that returns them, and `cached` is documented as exactly that condition, so
@@ -40,7 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   while telling it to treat that as the resource's current state. A window
   cached for later replay is now stamped with when its content was fetched
   rather than when it was rendered, for the same reason.
-- Reading one document now costs one download. Neither protocol has a range
+- Reading one document now costs one download, when the response cache is
+  enabled (the default; both halves of the mechanism bail out if it is off). Neither protocol has a range
   request, so a windowed read transfers the whole resource and shows a slice of
   it -- and every continuation went back to the server for the same bytes.
   Measured on a 208 KB page at a 10k cap: 21 windows, 21 downloads, 4.4 MB, and

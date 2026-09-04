@@ -47,6 +47,12 @@ do change:
   unordered so nothing parses differently, but the pretty-printed text block
   that many hosts show the model reads differently.
 
+The same strictness now applies to **six more tools**. The four trust-store and
+client-identity tools, and both batch tools, previously advertised an open
+object and now advertise the real union of what they return — with this same
+`request_info` inside it. Their payloads are unchanged, but a validating client
+that tolerated an extra key from them will no longer.
+
 If you import `gopher_mcp` directly, `request_info` is no longer a `dict`:
 
 | Was | Now |
@@ -81,7 +87,8 @@ user was never actually asked, and these calls write and destroy private keys.
 ### Continuation windows report their age
 
 Reading a truncated resource with `offset` now downloads it once rather than
-once per window. The windows after the first are rendered from the body already
+once per window, provided the response cache is enabled (it is by default;
+with `*_CACHE_ENABLED=false` every window re-fetches, as before). The windows after the first are rendered from the body already
 in hand, so they are snapshots rather than fresh reads and now say so: `cached`
 is `true`, with `cached_at` and `cache_age_seconds` naming when the bytes came
 off the wire.
@@ -92,9 +99,6 @@ server, and the held body expires on the same TTL as a cached response.
 
 ### Additive, nothing to do
 
-- The four trust-store and client-identity tools, and both batch tools, now
-  advertise a real `outputSchema` instead of an open object. Payloads are
-  unchanged; only the description got stricter.
 - The batch fetch tools report progress as each URL completes, for clients that
   send a progress token.
 
