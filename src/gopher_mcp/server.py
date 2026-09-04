@@ -256,10 +256,11 @@ _Refresh = Annotated[
             "'check again', 'did they post yet?', 'that looks out of date' -- "
             "or when a previous result came back with `cached: true` and a "
             "`cache_age_seconds` too large to answer the question honestly. "
-            "A continued window (one fetched with `offset`) reports `cached: true` "
-            "because it is part of the download the first window made, not "
-            "because the page is stale -- refreshing mid-walk restarts the "
-            "download rather than telling you anything new. "
+            "A window fetched with `offset` often reports `cached: true` merely "
+            "because it was rendered from the download the first window made. "
+            "`cache_age_seconds` tells the two apart: a few seconds means that, "
+            "a large value means a genuinely old copy and the rule above "
+            "applies to it as much as to any other result. "
             "Leave it false for ordinary browsing and link-following: Gopher "
             "and Gemini are served mostly by small hobbyist hosts that the "
             "cache spares from repeat traffic. Either way the response "
@@ -279,10 +280,11 @@ _Offset = Annotated[
             "beginning. A result with `truncated: true` and a `next_offset` is "
             "the signal that there is more: continue from it rather than "
             "presenting a partial page as the whole one, and stop when "
-            "`next_offset` comes back null. The resource is downloaded once and "
-            "the later windows are rendered from it, so reading on is cheap for "
-            "the server -- but a continued window is a snapshot of that one "
-            "download and says so with `cached: true`."
+            "`next_offset` comes back null. Continuing is usually cheap -- the "
+            "resource is downloaded once and the later windows are rendered "
+            "from it -- but not always: a URL carrying a query re-downloads for "
+            "every window, as does every URL when caching is off. So read on "
+            "because the content is needed, not by reflex."
         ),
     ),
 ]
@@ -1680,7 +1682,10 @@ async def _create_identity(
     path: str,
     scope_url: str,
     request_info: dict[str, Any],
-    ctx: _ToolContext | None = None,
+    # Required and keyword-only: this function owns a destructive
+    # confirmation, and `_confirmed(None, ...)` proceeds. A default
+    # would let a call site skip consent by omission, silently.
+    ctx: _ToolContext | None,
 ) -> _IdentityChange | dict[str, Any]:
     """Mint one identity for a scope, or return the error refusing to.
 
@@ -1788,7 +1793,10 @@ async def _remove_identity(
     path: str,
     scope_url: str,
     request_info: dict[str, Any],
-    ctx: _ToolContext | None = None,
+    # Required and keyword-only: this function owns a destructive
+    # confirmation, and `_confirmed(None, ...)` proceeds. A default
+    # would let a call site skip consent by omission, silently.
+    ctx: _ToolContext | None,
 ) -> _IdentityChange | dict[str, Any]:
     """Destroy the identity covering a scope, or return the error refusing to.
 
@@ -1843,19 +1851,33 @@ async def _remove_identity(
         )
 
     # Below every refusal AND below the "nothing covers this scope" answer, so
-    # the question is only ever asked when a private key really is about to be
-    # destroyed. Asked earlier, it told the user their key would be deleted on
-    # a scope that held none -- a false statement made to obtain consent.
+    # the question is only asked when an identity really is about to be removed.
+    # Asked earlier, it told the user their key would be deleted on a scope that
+    # held none -- a false statement made to obtain consent.
+    #
+    # It names the COVERING scope, not the URL the caller passed. An identity
+    # covers its scope and everything below it, so the certificate in play for
+    # /app/deep/page.gmi can be the one scoped to /app/ -- and approving a
+    # prompt that said "page.gmi" would destroy the key for the whole of /app/.
+    # A consent prompt has to describe the change it obtains consent for, and
+    # the wider one is the one the user needs to see.
+    covering_scope = format_gemini_url(covering.host, covering.port, covering.path)
+    also_below = (
+        ""
+        if covering_scope == scope_url
+        else f" That is wider than {scope_url}, which it covers."
+    )
     if not await _confirmed(
         ctx,
-        f"Remove the client identity for {scope_url}? Its private key is "
-        f"deleted, and a new certificate is a different identity -- anything "
-        f"the capsule associated with the old one is not recoverable.",
+        f"Remove the client identity for {covering_scope}?{also_below} Its "
+        f"private key is deleted, and a new certificate is a different "
+        f"identity -- anything the capsule associated with the old one is not "
+        f"recoverable.",
     ):
         return _error(
             "USER_DECLINED",
-            f"The identity for {scope_url} was left in place because the "
-            f"confirmation was declined.",
+            f"The identity for {covering_scope} was left in place because "
+            f"the confirmation was declined.",
             **request_info,
         )
 

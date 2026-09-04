@@ -915,6 +915,14 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         A response that was not truncated has no next window, so keeping its
         body would spend the slot on a resource nothing will ask about again and
         evict one that is mid-walk.
+
+        No query guard here, unlike the Gemini client, and the asymmetry is
+        deliberate rather than an oversight: a type-7 search sends its terms on
+        the wire and they are already in this client's response cache key, so
+        refusing to hold the body would withhold nothing the cache is not
+        holding anyway. Gemini is different because a query there can be the
+        answer to a status-11 prompt -- a password -- which is why its response
+        cache refuses query-bearing requests outright and its slot follows.
         """
         key = _BODY_SLOT_KEY.get()
         if key is None or not self.cache_enabled:

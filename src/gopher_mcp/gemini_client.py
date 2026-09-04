@@ -1011,7 +1011,8 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         result: GeminiFetchResponse,
         connection: RequestInfo,
         client_cert_warning: str | None,
-        has_query: bool = False,
+        *,
+        has_query: bool,
     ) -> None:
         """Hold this page only if a later window could ask for it.
 
@@ -1026,6 +1027,13 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
 
         The cost is that paging through the answer to a prompt re-fetches, as
         everything did before the slot existed. That is the right way round.
+
+        ``has_query`` is keyword-only and has NO default on purpose. Every other
+        condition below is read from state this method can see for itself; this
+        one is the caller's word, so a default would have to be ``False`` -- the
+        permissive answer -- and a second call site that forgot it would
+        silently re-open the retention this guard exists to close, with no test
+        able to notice. Forgetting it is now a TypeError.
         """
         key = _BODY_SLOT_KEY.get()
         if key is None or not self.cache_enabled or has_query:
@@ -1051,7 +1059,9 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         if held.key != key:
             return None
         if time.time() - held.stored_at > self.cache_ttl_seconds:
-            self._continuation_body = None
+            # Both, together: the warning belongs to the page being dropped, and
+            # leaving it set would pair it with whatever body is held next.
+            self._release_held_content()
             return None
         return held
 

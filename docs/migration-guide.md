@@ -87,8 +87,12 @@ user was never actually asked, and these calls write and destroy private keys.
 ### Continuation windows report their age
 
 Reading a truncated resource with `offset` now downloads it once rather than
-once per window, provided the response cache is enabled (it is by default;
-with `*_CACHE_ENABLED=false` every window re-fetches, as before). The windows after the first are rendered from the body already
+once per window — provided the response cache is enabled (it is by default;
+a `*_CACHE_ENABLED=false` or a zero TTL turns it off) and the URL carries no
+query. A query-bearing Gemini request is deliberately never held: that is
+where a status-10/11 answer travels, and a status-11 answer is a password.
+So a Gemini search result still re-fetches for every window, and reports
+`cached: false`, exactly as it did before. The windows after the first are rendered from the body already
 in hand, so they are snapshots rather than fresh reads and now say so: `cached`
 is `true`, with `cached_at` and `cache_age_seconds` naming when the bytes came
 off the wire.

@@ -41,7 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cached for later replay is now stamped with when its content was fetched
   rather than when it was rendered, for the same reason.
 - Reading one document now costs one download, when the response cache is
-  enabled (the default; both halves of the mechanism bail out if it is off). Neither protocol has a range
+  enabled (the default; both halves of the mechanism bail out if it is off)
+  and the URL carries no query. A query-bearing Gemini request is never
+  held, because that is where the answer to a status-10/11 prompt travels
+  and a status-11 answer is a password — so those pages, search results
+  included, still re-fetch for every window, by design. Neither protocol has a range
   request, so a windowed read transfers the whole resource and shows a slice of
   it -- and every continuation went back to the server for the same bytes.
   Measured on a 208 KB page at a 10k cap: 21 windows, 21 downloads, 4.4 MB, and

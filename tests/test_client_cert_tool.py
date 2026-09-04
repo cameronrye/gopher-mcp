@@ -1404,3 +1404,86 @@ class TestTheQuestionComesAfterTheRefusal:
         assert payload["kind"] == "client_cert_update"
         assert payload["changed"] is True
         assert len(asked) == 1
+
+
+class TestTheRemovalPromptNamesWhatIsDestroyed:
+    """A consent prompt has to describe the change it is consenting to.
+
+    An identity covers its scope AND everything below it, so the certificate in
+    play for `/app/deep/page.gmi` can be the one scoped to `/app/`. The removal
+    prompt named the URL the caller passed, so approving "remove the identity
+    for gemini://example.org/app/deep/page.gmi" destroyed the key for the whole
+    of `/app/` -- broader than what was described, and the result payload says
+    so afterwards while the prompt did not say so beforehand.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_prompt_names_the_scope_whose_key_dies(self, client):
+        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp.types import ElicitResult
+
+        from gopher_mcp.server import mcp
+
+        fingerprint = _mint(client, "example.org", "/app/")
+        asked: list[str] = []
+
+        async def accept(context, params):
+            asked.append(params.message)
+            return ElicitResult(action="accept", content={"confirm": True})
+
+        with _serving(client):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server, elicitation_callback=accept
+            ) as session:
+                result = await session.call_tool(
+                    "gemini_client_cert_update",
+                    {
+                        "action": "remove",
+                        "url": "gemini://example.org/app/deep/page.gmi",
+                        "fingerprint": fingerprint,
+                    },
+                )
+
+        assert result.structuredContent["changed"] is True
+        assert asked, "no confirmation was put to the user"
+        prompt = asked[0]
+
+        # It must ASK ABOUT the scope whose key dies, which is /app/ -- naming
+        # the narrower URL as if that were the extent of the deletion is the
+        # bug. Mentioning it as context is fine and better, so what is pinned
+        # here is which one the question is about, not which strings appear.
+        assert prompt.startswith(
+            "Remove the client identity for gemini://example.org/app/?"
+        ), prompt
+        # ... and the user has to be told the deletion is wider than they asked.
+        assert "wider than" in prompt and "/app/deep/page.gmi" in prompt, prompt
+
+    @pytest.mark.asyncio
+    async def test_an_exact_scope_match_is_not_told_it_is_wider(self, client):
+        """The widening clause must not appear when nothing is widened."""
+        from mcp.shared.memory import create_connected_server_and_client_session
+        from mcp.types import ElicitResult
+
+        from gopher_mcp.server import mcp
+
+        fingerprint = _mint(client, "example.org", "/app/")
+        asked: list[str] = []
+
+        async def accept(context, params):
+            asked.append(params.message)
+            return ElicitResult(action="accept", content={"confirm": True})
+
+        with _serving(client):
+            async with create_connected_server_and_client_session(
+                mcp._mcp_server, elicitation_callback=accept
+            ) as session:
+                await session.call_tool(
+                    "gemini_client_cert_update",
+                    {
+                        "action": "remove",
+                        "url": "gemini://example.org/app/",
+                        "fingerprint": fingerprint,
+                    },
+                )
+
+        assert asked and "wider than" not in asked[0], asked
