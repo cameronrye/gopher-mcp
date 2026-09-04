@@ -1813,3 +1813,52 @@ class TestContinuationDoesNotRefetchTheBody:
 
         assert transport.await_count == 2
         assert "bbb" in other.text and "aaa" not in other.text
+
+
+class TestAHeldBodyIsReportedAsTheSnapshotItIs:
+    """A window rendered from a held body was not fetched during this call.
+
+    ``cached`` is documented as "True when this result was replayed from the
+    local response cache instead of being fetched from the server during this
+    call. Treat the content as a snapshot taken at `cached_at`, not as the
+    current state of the resource." A continuation served from the held body
+    meets that description exactly -- the bytes can be up to a full cache TTL
+    old -- so reporting ``cached: false`` tells the model to treat five-minute-
+    old content as current, which is the one thing these three fields exist to
+    prevent.
+    """
+
+    BODY = ("".join(f"line {i}\n" for i in range(200))).encode()
+
+    def _client(self):
+        return GopherClient(
+            respect_robots_txt=False,
+            requests_per_minute=0,
+            cache_enabled=True,
+            max_rendered_chars=400,
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_continuation_says_how_old_its_bytes_are(self):
+        client = self._client()
+        transport = AsyncMock(return_value=self.BODY + b".\r\n")
+
+        with patch("gopher_mcp.gopher_client.fetch_gopher", new=transport):
+            first = await client.fetch("gopher://example.com/0/big")
+            # Age the held body without sleeping: the caller came back later.
+            held = client._continuation_body
+            client._continuation_body = held._replace(stored_at=held.stored_at - 240)
+            second = await client.fetch(
+                "gopher://example.com/0/big", offset=first.next_offset
+            )
+
+        # The download that produced the first window is genuinely current.
+        assert first.cached is False
+        assert first.cached_at is None
+
+        # The second window is the same download, four minutes on.
+        assert transport.await_count == 1
+        assert second.cached is True
+        assert second.cached_at is not None
+        assert second.cache_age_seconds is not None
+        assert second.cache_age_seconds >= 240

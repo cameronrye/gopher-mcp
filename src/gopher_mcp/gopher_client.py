@@ -523,7 +523,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             held = self._reuse_continuation_body(body_key, refresh)
             if held is not None:
                 response = self._render_body(
-                    held, gopher_type_category(parsed_url.gopher_type)
+                    held.raw, gopher_type_category(parsed_url.gopher_type)
                 )
                 logger.debug(
                     "Continuation served from the body already downloaded",
@@ -541,7 +541,22 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             # otherwise be served stale for the whole TTL. Mirrors the Gemini
             # client, which excludes error/redirect/input/certificate results.
             if self.cache_enabled and response.kind != "error":
-                self._cache_response(cache_key, response)
+                self._cache_response(
+                    cache_key,
+                    response,
+                    fetched_at=None if held is None else held.stored_at,
+                )
+
+            # Rendered from a body downloaded earlier in this walk, so it is a
+            # snapshot and has to say so: `cached` is documented as "not fetched
+            # from the server during this call ... treat the content as a
+            # snapshot taken at `cached_at`", which is exactly this. Reporting
+            # it as fresh would hand the model content up to a full cache TTL
+            # old with nothing to indicate it. Marked AFTER the entry above is
+            # stored so the cache keeps a clean copy rather than one that says
+            # it came from a cache.
+            if held is not None:
+                response = mark_from_cache(response, held.stored_at)
 
             # Full URL/selector/search are request metadata; keep them at DEBUG
             # so default INFO logs don't record every browsed resource/query.
@@ -904,7 +919,9 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
             return
         self._continuation_body = _ContinuationBody(key, raw, time.time())
 
-    def _reuse_continuation_body(self, key: str, refresh: bool) -> bytes | None:
+    def _reuse_continuation_body(
+        self, key: str, refresh: bool
+    ) -> _ContinuationBody | None:
         """The body for ``key`` if this client just downloaded it.
 
         ``refresh`` means "go and look again", so it must miss here as well as
@@ -921,7 +938,7 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         if time.time() - held.stored_at > self.cache_ttl_seconds:
             self._continuation_body = None
             return None
-        return held.raw
+        return held
 
     def _process_menu_response(self, raw: bytes, offset: int = 0) -> MenuResult:
         """Parse a Gopher menu (RFC 1436) into a structured result.

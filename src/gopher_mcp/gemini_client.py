@@ -565,7 +565,21 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                     "certificate",
                 )
             ):
-                self._cache_response(cache_key, response)
+                self._cache_response(
+                    cache_key,
+                    response,
+                    fetched_at=None if held is None else held.stored_at,
+                )
+
+            # Rendered from a page downloaded earlier in this walk, so it is a
+            # snapshot and has to say so: `cached` is documented as "not fetched
+            # from the server during this call ... treat the content as a
+            # snapshot taken at `cached_at`", which is exactly this. Reporting
+            # it as fresh would hand the model content up to a full cache TTL
+            # old with nothing to indicate it. Marked AFTER the entry above is
+            # stored so the cache keeps a clean copy.
+            if held is not None:
+                response = mark_from_cache(response, held.stored_at)
 
             # Host/port/path are request metadata; keep them at DEBUG so default
             # INFO logs don't record every browsed resource. The query is NOT

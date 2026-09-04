@@ -24,6 +24,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refused -- the one place failing open would be indefensible, since it would
   mean acting on consent nobody actually gave.
 
+- A continuation window rendered from a held body reports itself as the
+  snapshot it is: `cached` true, with `cached_at` and `cache_age_seconds`
+  naming when the bytes actually came off the wire. Holding the body is what
+  makes this necessary -- those windows are no longer fetched during the call
+  that returns them, and `cached` is documented as exactly that condition, so
+  leaving it false would hand the model content up to a full cache TTL old
+  while telling it to treat that as the resource's current state. A window
+  cached for later replay is now stamped with when its content was fetched
+  rather than when it was rendered, for the same reason.
 - Reading one document now costs one download. Neither protocol has a range
   request, so a windowed read transfers the whole resource and shows a slice of
   it -- and every continuation went back to the server for the same bytes.

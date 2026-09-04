@@ -2514,3 +2514,47 @@ class TestGeminiContinuationDoesNotRefetchTheBody:
 
         assert prints, "no windows were produced"
         assert all(p == "abc123" for p in prints), prints
+
+
+class TestGeminiHeldPageIsReportedAsTheSnapshotItIs:
+    """The Gemini half: a continuation from a held page is a snapshot."""
+
+    BODY = "".join(f"line {i}\n" for i in range(200))
+
+    def _client(self):
+        client = GeminiClient(
+            respect_robots_txt=False,
+            tofu_enabled=False,
+            client_certs_enabled=False,
+            requests_per_minute=0,
+            cache_enabled=True,
+            max_rendered_chars=400,
+        )
+        client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
+            return_value=(Mock(), {"cert_fingerprint": "abc123"})
+        )
+        client.tls_client.send_data = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.close = AsyncMock()  # type: ignore[method-assign]
+        client.tls_client.receive_data = AsyncMock(  # type: ignore[method-assign]
+            return_value=b"20 text/plain\r\n" + self.BODY.encode()
+        )
+        return client
+
+    @pytest.mark.asyncio
+    async def test_a_continuation_says_how_old_its_bytes_are(self):
+        client = self._client()
+
+        first = await client.fetch("gemini://example.org/big")
+        held = client._continuation_body
+        client._continuation_body = held._replace(stored_at=held.stored_at - 240)
+        second = await client.fetch(
+            "gemini://example.org/big", offset=first.next_offset
+        )
+
+        assert first.cached is False
+        assert first.cached_at is None
+        assert client.tls_client.receive_data.await_count == 1
+        assert second.cached is True
+        assert second.cached_at is not None
+        assert second.cache_age_seconds is not None
+        assert second.cache_age_seconds >= 240

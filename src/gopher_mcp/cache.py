@@ -65,8 +65,18 @@ class TTLCacheMixin(Generic[V]):
         entry = self._get_cached_entry(url)
         return None if entry is None else entry.value
 
-    def _cache_response(self, url: str, response: V) -> None:
-        """Cache ``response`` for ``url`` with LRU eviction when full."""
+    def _cache_response(
+        self, url: str, response: V, fetched_at: float | None = None
+    ) -> None:
+        """Cache ``response`` for ``url`` with LRU eviction when full.
+
+        ``fetched_at`` is when the CONTENT came off the wire, which is not
+        always now: a continuation window is rendered from a body downloaded
+        earlier, and stamping it with the current time would understate its age
+        by however long the walk has been running -- so a later replay would
+        report a snapshot as fresher than it is. Defaults to now, which is
+        correct for anything fetched during this call.
+        """
         if not self.cache_enabled:
             return
 
@@ -81,7 +91,7 @@ class TTLCacheMixin(Generic[V]):
         self._cache[url] = self._cache_entry_cls(
             key=url,
             value=response,
-            timestamp=time.time(),
+            timestamp=time.time() if fetched_at is None else fetched_at,
             ttl=self.cache_ttl_seconds,
         )
         self._cache.move_to_end(url)
