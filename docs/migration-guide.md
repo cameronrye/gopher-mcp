@@ -8,6 +8,7 @@ crosses three releases means reading three sections.
 
 | Version | Why you have to read it |
 |---------|-------------------------|
+| [0.10.0](#v0100) | `request_info` is a closed, described object; destructive tools may now ask the user and refuse; continuation windows report their age |
 | [0.9.0](#v090) | Result payload shapes, four new or widened error codes, where trust state lives on disk, and the project's own tooling |
 | [0.8.0](#error-code-changes-in-080) | Four error codes split or renamed — anything switching on `error["code"]` |
 | [0.7.0](#changed-defaults-in-070) | `robots.txt` is honoured by default; a fetch that used to succeed can now be refused |
@@ -18,6 +19,84 @@ There is no need to migrate stored data at any version. Caches are rebuilt on
 demand, and the one on-disk format that moved (see
 [Where trust state lives](#where-trust-state-lives)) keeps reading its old
 location permanently.
+
+## v0.10.0
+
+One breaking change to what a result contains, and one change to what a call
+may *do*. Nothing was renamed or removed, and no existing argument changed
+meaning, so a client that fetches a URL and branches on `kind` needs no change.
+
+### `request_info` is a closed object
+
+**Breaking.** It was `dict[str, Any]` on every result model, so the schema
+described the one field every result carries as "any object". It is now a
+described object with fourteen named, individually optional fields — `url`,
+`timestamp`, `host`, `port`, `type`, `selector`, `search_ignored`, `path`,
+`has_query`, `tls_version`, `cipher`, `cert_fingerprint`, `tofu_warning`,
+`client_cert_warning` — advertised with `additionalProperties: false`.
+
+**The values you receive are byte-identical to 0.9.1.** No key was added,
+removed or renamed, and a key that was absent before is absent now. Two things
+do change:
+
+- A client that validates results against the advertised `outputSchema` will
+  now **reject** a payload carrying any other key. Nothing this server emits
+  does; this bites a fork or a proxy that appends its own provenance key.
+- The **order** of keys within `request_info` follows the field declarations
+  rather than the order the producer happened to insert them. JSON objects are
+  unordered so nothing parses differently, but the pretty-printed text block
+  that many hosts show the model reads differently.
+
+If you import `gopher_mcp` directly, `request_info` is no longer a `dict`:
+
+| Was | Now |
+|-----|-----|
+| `request_info["url"]`, `"url" in request_info`, `.get("url")` | unchanged, all still work |
+| `request_info.update({...})` | `request_info.merge(RequestInfo(...))` |
+| `request_info.keys()`, `dict(**request_info)` | iterate the model, or `model_dump()` |
+| `request_info["key"] = value` | `request_info.key = value` (declared fields only) |
+
+### Destructive tools may now ask, and may refuse
+
+**Not a schema change, but it can turn a call that always succeeded into a
+failure.** `gemini_trust_update` and `gemini_client_cert_update` now put the
+change to the user before making it, using MCP elicitation, and return the new
+`USER_DECLINED` error code if the answer is no.
+
+This only happens on a client that **advertises the elicitation capability**. A
+client without it is never asked, never sees `USER_DECLINED`, and behaves
+exactly as it did in 0.9.1. So:
+
+- **Interactive clients** gain a confirmation step on the two calls that change
+  stored state. Nothing to do.
+- **Automated callers on an elicitation-capable client** should handle
+  `USER_DECLINED`. Treat it as an answer, not a transient failure — retrying
+  asks again. If a workflow must not be interrupted, run it on a session that
+  does not advertise elicitation.
+
+A confirmation that cannot be delivered is also refused, deliberately: a client
+that advertised the capability and then failed to carry the question means the
+user was never actually asked, and these calls write and destroy private keys.
+
+### Continuation windows report their age
+
+Reading a truncated resource with `offset` now downloads it once rather than
+once per window. The windows after the first are rendered from the body already
+in hand, so they are snapshots rather than fresh reads and now say so: `cached`
+is `true`, with `cached_at` and `cache_age_seconds` naming when the bytes came
+off the wire.
+
+If you branch on `cached` to decide whether to re-read something, continuation
+windows will now take the cached branch. `refresh=true` still goes to the
+server, and the held body expires on the same TTL as a cached response.
+
+### Additive, nothing to do
+
+- The four trust-store and client-identity tools, and both batch tools, now
+  advertise a real `outputSchema` instead of an open object. Payloads are
+  unchanged; only the description got stricter.
+- The batch fetch tools report progress as each URL completes, for clients that
+  send a progress token.
 
 ## v0.9.0
 

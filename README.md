@@ -426,7 +426,10 @@ ever changed after the user confirms the new certificate is expected — checked
 against the operator or another device, never on the say-so of a fetched page. To
 enforce that, `action: "remove"` requires the fingerprint **currently** pinned
 (as reported by `gemini_trust_list`); a mismatch returns `FINGERPRINT_MISMATCH`
-and changes nothing.
+and changes nothing. On a client that supports MCP elicitation the change is
+also put to you before it is made, and declining returns `USER_DECLINED` with
+the pin untouched; a client without that capability is never asked, and behaves
+as it always has.
 
 ### Gemini Client-Identity Tools
 
@@ -441,7 +444,10 @@ an explicit call:
   identity — each as a ready-to-use scope URL with its fingerprint, validity
   window and whether it has expired. Never a private key or its location.
 - **`gemini_client_cert_update`** (destructive) creates the identity for the
-  scope of a named `gemini://` URL, or removes the one covering it.
+  scope of a named `gemini://` URL, or removes the one covering it. Like the
+  trust-store tool, it asks first on a client that supports elicitation —
+  creating an identity is a decision about being linkable across visits, and
+  removing one destroys a private key that nothing can recreate.
 
 The certificate covers that URL's path and everything below it, so
 `gemini://host/app/page.gmi` covers one page, `gemini://host/app/` the section,

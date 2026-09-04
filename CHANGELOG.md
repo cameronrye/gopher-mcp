@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-09-03
+
 ### Added
 
 - The two tools that change stored state ask the user first, on clients that
@@ -15,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   again -- a capsule knows an identity by its public key, so a replacement
   certificate is a different person. MCP has had a channel for putting that
   decision to a human since before this server existed, and nothing used it.
+
+  **This can turn a call that always succeeded into a failure**, so it is in the
+  migration notes as well as here: an automated caller running on an
+  elicitation-capable client has to handle `USER_DECLINED`, and should treat it
+  as an answer rather than a transient failure, because retrying asks again.
 
   Behaviour is unchanged for every client that does not advertise elicitation:
   it is never asked and never sees a refusal, because consent a client cannot
@@ -1344,7 +1351,8 @@ they were cut at (`git log -1 --format=%ai vX.Y.Z`); the pre-0.3 tail carried
 January placeholders that were wrong by 8-11 months.
 -->
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.7.0...v0.8.0

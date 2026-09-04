@@ -3,7 +3,7 @@
   "name": "io.github.cameronrye/gopher-mcp",
   "title": "Gopher & Gemini MCP Server",
   "description": "Browse Gopher and Gemini resources safely: SSRF protection, TLS/TOFU, structured JSON output.",
-  "version": "0.9.1",
+  "version": "0.10.0",
   "repository": {
     "url": "https://github.com/cameronrye/gopher-mcp",
     "source": "github"
@@ -13,7 +13,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "gopher-mcp",
-      "version": "0.9.1",
+      "version": "0.10.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -21,7 +21,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/cameronrye/gopher-mcp:0.9.1",
+      "identifier": "ghcr.io/cameronrye/gopher-mcp:0.10.0",
       "runtimeHint": "docker",
       "packageArguments": [
         {
