@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-09-04
+## [0.10.0] - 2026-09-05
 
 ### Added
 
@@ -146,10 +146,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `tools/list` failed outright for every TypeScript-SDK client. The six tools
   whose output is a discriminated union advertised an `outputSchema` that was a
-  bare `oneOf` with no root `"type": "object"`. The MCP spec requires one and
-  the TypeScript SDK enforces it -- `ToolSchema` declares `outputSchema` with
-  `type: z.literal('object')` -- so those clients rejected the response with
-  `-32603`. Because `ListToolsResultSchema` parses the tools array as a unit,
+  bare `oneOf` with no root `"type": "object"`. Every `outputSchema` in the
+  spec's own examples has one, and the TypeScript SDK turns that into a hard
+  requirement -- at 1.30.0 `ToolSchema` declares `outputSchema` as
+  `z.object({ type: z.literal('object'), ... })` -- so those clients rejected
+  the response with `-32603`. Because `ListToolsResultSchema` parses the tools
+  array as a unit,
   one rootless schema hid ALL eight tools, not just its own: the server
   completed `initialize` and then appeared to have no tools at all.
 
@@ -162,9 +164,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   nobody asked was whether the advertised _schema_ is itself legal. It is now
   a wire-level assertion over every tool in `tests/test_mcp_protocol.py`.
 
-  Found when Glama's registry inspection failed against
-  @modelcontextprotocol/sdk 1.30.0. The two `*_batch_fetch` tools were never
-  affected, because a list return is already wrapped in a `result` object.
+  Found by audit rather than by a bug report, and confirmed against the
+  TypeScript SDK's own source at 1.30.0. Worth knowing that the constraint is
+  narrower than it looks: SEP-2106 has since widened the SDK's neutral schema
+  to accept any JSON Schema root, `oneOf` included, keeping `type: "object"`
+  only in the frozen 2025-11-25 wire revision. Declaring the root is still the
+  compatible choice -- it satisfies the strict parse and the widened one alike
+  -- but a client new enough to carry SEP-2106 would have accepted the old
+  schema. The two `*_batch_fetch` tools were never affected either way,
+  because a list return is already wrapped in a `result` object.
 
   No payload changes. Every branch of every union was already an object, so
   the constraint was true before it was stated; each advertised schema gained

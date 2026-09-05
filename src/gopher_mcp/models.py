@@ -111,11 +111,15 @@ class _ObjectRoot(RootModel[_RootT]):
     Pydantic serializes a discriminated union to a bare ``oneOf`` with no root
     ``type``, and every Python client accepts that: the MCP SDK's
     ``ClientSession`` validates results with ``jsonschema``, which does not
-    require one. The MCP spec does, and the TypeScript SDK enforces it --
-    ``ToolSchema`` declares ``outputSchema`` with ``type: z.literal('object')``
-    -- so a rootless schema makes ``tools/list`` fail with ``-32603`` for every
-    TypeScript client, and fail for ALL tools at once, because the tools array
-    is parsed as a unit. Glama's registry inspection died exactly this way.
+    require one. The TypeScript SDK does: at 1.30.0 ``ToolSchema`` declares
+    ``outputSchema`` as ``z.object({type: z.literal('object'), ...})`` -- so a
+    rootless schema makes ``tools/list`` fail with ``-32603`` for a TypeScript
+    client of that vintage, and fail for ALL tools at once, because the tools
+    array is parsed as a unit.
+
+    SEP-2106 has since widened that neutral schema to accept any JSON Schema
+    root, keeping the object constraint only in the frozen 2025-11-25 wire
+    revision. Declaring the root is still what we want: it parses under both.
 
     Adding ``type: "object"`` changes no payload: every branch of every union
     below is an object, so the constraint was already true and is now merely

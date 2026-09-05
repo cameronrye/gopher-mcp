@@ -113,19 +113,25 @@ class TestToolListing:
     @pytest.mark.asyncio
     async def test_every_output_schema_is_an_object_at_its_root(self):
         """``outputSchema`` must be an object schema, and the check has to be
-        this literal: the MCP spec says the root is ``"type": "object"``, and
-        the TypeScript SDK enforces it as ``z.literal('object')`` in its own
-        ``ToolSchema``. A discriminated union serializes to a bare ``oneOf``
-        with no root ``type``, which every Python client accepts -- the SDK's
+        this literal: the TypeScript SDK at 1.30.0 declares ``outputSchema`` in
+        its ``ToolSchema`` as ``z.object({type: z.literal('object'), ...})``.
+        A discriminated union serializes to a bare ``oneOf`` with no root
+        ``type``, which every Python client accepts -- the SDK's
         ``ClientSession`` validates with ``jsonschema``, and ``jsonschema`` is
-        happy -- so the whole suite stays green while every TypeScript client
-        fails ``tools/list`` outright with ``-32603``.
+        happy -- so the whole suite stays green while a TypeScript client of
+        that vintage fails ``tools/list`` outright with ``-32603``.
 
         And it fails for ALL of them: ``ListToolsResultSchema`` parses the
         tools array as a unit, so one rootless schema hides all eight tools,
-        not just its own. That is not hypothetical -- it is what took down
-        Glama's registry inspection (build ``01a06d36``, @modelcontextprotocol/
-        sdk 1.30.0), which is why the assertion is per tool and exhaustive.
+        not just its own, which is why this assertion is per tool and
+        exhaustive.
+
+        The assertion is deliberately kept strict even though the requirement
+        has since loosened: SEP-2106 widened the SDK's neutral schema to permit
+        any JSON Schema root, retaining ``type: "object"`` only in the frozen
+        2025-11-25 wire revision. Declaring the root satisfies both the strict
+        and the widened parse, so there is no client this test's demand breaks
+        and several it protects.
         """
         async with _connected() as session:
             tools = {t.name: t for t in (await session.list_tools()).tools}
