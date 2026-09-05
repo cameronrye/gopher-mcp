@@ -18,6 +18,17 @@ if TYPE_CHECKING:
 
 V = TypeVar("V")
 
+#: What a per-window cache key appends to the key for the whole resource.
+#: A rendered window is stored under ``f"{base}{OFFSET_KEY_PREFIX}{offset}"``,
+#: so this is both how the clients build that key and how
+#: :meth:`TTLCacheMixin._evict_cached_family` finds every window cut from one
+#: resource. It lives here so the two cannot drift: a separator changed at the
+#: build site but not the eviction site would leave windows behind that
+#: ``refresh`` is supposed to drop, and the staleness would be silent. NUL
+#: cannot appear in a URL, so a window key can never collide with the key
+#: another resource formats to.
+OFFSET_KEY_PREFIX = "\x00offset="
+
 
 class TTLCacheMixin(Generic[V]):
     """LRU + TTL cache get/put over ``self._cache``.
@@ -64,6 +75,35 @@ class TTLCacheMixin(Generic[V]):
         """
         entry = self._get_cached_entry(url)
         return None if entry is None else entry.value
+
+    def _evict_cached_family(self, base_url: str) -> int:
+        """Drop the entry for ``base_url`` and every window cut from it.
+
+        A windowed read caches each rendered window separately, under the base
+        key plus :data:`OFFSET_KEY_PREFIX` and the offset. Those entries are
+        siblings of one download, so anything that invalidates the resource has
+        to reach all of them: dropping only the key the caller happened to ask
+        for leaves the rest of the walk serving pre-invalidation bytes while
+        reporting ``cached: true``, which reads as "old but from this resource"
+        rather than "from the version you just replaced".
+
+        Returns the number of entries dropped, which is what the tests assert
+        on -- a fix here is invisible from the outside except as a re-fetch.
+        """
+        if not self._cache:
+            return 0
+
+        window_prefix = base_url + OFFSET_KEY_PREFIX
+        # Materialised before deleting: mutating an OrderedDict while iterating
+        # it raises RuntimeError.
+        doomed = [
+            key
+            for key in self._cache
+            if key == base_url or key.startswith(window_prefix)
+        ]
+        for key in doomed:
+            del self._cache[key]
+        return len(doomed)
 
     def _cache_response(
         self, url: str, response: V, fetched_at: float | None = None

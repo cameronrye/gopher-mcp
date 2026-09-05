@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 import structlog
 
+from .cache import OFFSET_KEY_PREFIX
 from .client_base import FetchClientBase
 from .gopher_parse import (
     gopher_type_category,
@@ -474,7 +475,13 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                 # must not be handed another window's render. NUL cannot appear
                 # in a URL, so this can never collide with a key some other URL
                 # normalizes to.
-                cache_key = f"{cache_key}\x00offset={offset}"
+                cache_key = f"{cache_key}{OFFSET_KEY_PREFIX}{offset}"
+
+            if refresh:
+                # Asking for the current state has to invalidate the whole
+                # resource, not just the window named. See
+                # ``_invalidate_for_refresh``.
+                self._invalidate_for_refresh(body_key)
 
             # Check cache first, unless the caller asked for the current state.
             if self.cache_enabled and not refresh:
@@ -902,6 +909,11 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
         else:
             # Text (type 0, h/HTML, i/info) and unknown types - try as text
             return self._process_text_response(raw, offset)
+
+    def _held_content_key(self) -> str | None:
+        """The key of the held body, if one is held (see the base class)."""
+        held = self._continuation_body
+        return None if held is None else held.key
 
     def _release_held_content(self) -> None:
         """Drop the held body (see the base class)."""

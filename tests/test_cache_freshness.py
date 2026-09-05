@@ -318,6 +318,169 @@ class TestRefreshBypassesTheCache:
         mock_fetch.assert_not_called()
 
 
+class TestRefreshInvalidatesEveryWindowOfTheResource:
+    """`refresh` means the resource, not the one window that asked for it.
+
+    A windowed read caches each rendered window under its own key (the
+    resource's key plus the offset), so `refresh` -- which only ever skipped
+    the cache READ for the exact key passed -- used to re-fetch the window
+    named and leave every sibling in place. The caller asked for the current
+    state and was handed, for every window but one, the state it was replacing:
+    marked `cached: true`, which reads as "old" rather than "superseded".
+    """
+
+    @pytest.mark.asyncio
+    async def test_gopher_refresh_drops_the_windows_it_did_not_ask_for(self):
+        client = GopherClient(respect_robots_txt=False, requests_per_minute=0)
+        url = "gopher://example.com/0/doc.txt"
+        body = {"text": "A" * 10000}
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.side_effect = lambda *a, **k: TextResult(
+                text=body["text"], bytes=len(body["text"])
+            )
+            for offset in (0, 1000, 2000):
+                await client.fetch(url, offset=offset)
+
+            # The resource changes, and the caller asks for the current state
+            # from the middle of the walk.
+            body["text"] = "B" * 10000
+            await client.fetch(url, offset=1000, refresh=True)
+
+            # Reading the siblings must now show the replacement, not the copy
+            # taken before it.
+            after = [await client.fetch(url, offset=o) for o in (0, 2000)]
+
+        for result in after:
+            assert result.text.startswith("B"), (
+                "a sibling window served content from before the refresh"
+            )
+            assert result.cached is False
+
+    @pytest.mark.asyncio
+    async def test_gemini_refresh_drops_the_windows_it_did_not_ask_for(self):
+        client = GeminiClient(
+            tofu_enabled=False,
+            client_certs_enabled=False,
+            respect_robots_txt=False,
+            requests_per_minute=0,
+        )
+        url = "gemini://example.org/doc.gmi"
+        body = {"text": "A" * 10000}
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.side_effect = lambda *a, **k: _gemini_result(body["text"])
+            for offset in (0, 1000, 2000):
+                await client.fetch(url, offset=offset)
+
+            body["text"] = "B" * 10000
+            await client.fetch(url, offset=1000, refresh=True)
+
+            after = [await client.fetch(url, offset=o) for o in (0, 2000)]
+
+        for result in after:
+            assert result.content.startswith("B"), (
+                "a sibling window served content from before the refresh"
+            )
+            assert result.cached is False
+
+    @pytest.mark.asyncio
+    async def test_refresh_leaves_other_resources_cached(self):
+        """Invalidating one resource must not empty the cache.
+
+        The eviction is keyed by prefix, and the window suffix starts with NUL
+        precisely so it cannot be confused with another URL's key -- but a
+        prefix match is exactly the kind of thing that quietly matches too much
+        (``/a.txt`` is a prefix of ``/a.txt.bak``), so this pins the boundary.
+        """
+        client = GopherClient(respect_robots_txt=False, requests_per_minute=0)
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = TextResult(text="fresh", bytes=5)
+            await client.fetch("gopher://example.com/0/a.txt")
+            await client.fetch("gopher://example.com/0/a.txt.bak")
+            await client.fetch("gopher://example.com/0/a.txt", refresh=True)
+            neighbour = await client.fetch("gopher://example.com/0/a.txt.bak")
+
+        assert neighbour.cached is True, (
+            "refreshing one resource evicted a different one whose key it prefixes"
+        )
+
+    def test_evicting_a_family_reports_what_it_dropped(self):
+        """The count is the only outward sign the eviction did anything."""
+        client = GopherClient(respect_robots_txt=False, requests_per_minute=0)
+        base = "gopher://example.com/0/doc.txt"
+        client._cache_response(base, TextResult(text="w0", bytes=2))
+        for offset in (1000, 2000):
+            client._cache_response(
+                f"{base}\x00offset={offset}", TextResult(text="wN", bytes=2)
+            )
+        client._cache_response(
+            "gopher://example.com/0/other", TextResult(text="x", bytes=1)
+        )
+
+        assert client._evict_cached_family(base) == 3
+        assert list(client._cache) == ["gopher://example.com/0/other"]
+        # Idempotent: a second call has nothing left to drop.
+        assert client._evict_cached_family(base) == 0
+
+
+class TestRefreshDropsTheHeldBody:
+    """The body held for continuations is invalidated with the cache.
+
+    `_reuse_continuation_body` already declines to SERVE the held body under
+    `refresh`, but declining to read it is not dropping it. If the refreshed
+    response has no `next_offset` -- the resource shrank, or now fits in one
+    window -- nothing overwrites the slot, and the pre-refresh body is still
+    there to answer the next continuation that does not pass `refresh`.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_held_body_for_the_refreshed_resource_is_released(self):
+        from gopher_mcp.gopher_client import _ContinuationBody
+
+        client = GopherClient(respect_robots_txt=False, requests_per_minute=0)
+        url = "gopher://example.com/0/doc.txt"
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = TextResult(text="fresh", bytes=5)
+            await client.fetch(url)
+            # Plant a held body under this resource's key, as a truncated first
+            # window would have done. Planting it rather than provoking one
+            # keeps the test about the release, not about what makes a body
+            # worth holding.
+            body_key = next(iter(client._cache))
+            client._continuation_body = _ContinuationBody(
+                key=body_key, raw=b"stale", stored_at=time.time()
+            )
+            assert client._held_content_key() == body_key
+
+            await client.fetch(url, refresh=True)
+
+        assert client._held_content_key() is None, (
+            "the held body survived a refresh of the resource it belongs to"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_held_body_for_another_resource_survives(self):
+        """Releasing an unrelated body would be wasteful, not wrong -- but it
+        would cost a re-download nobody asked for, so the key is checked."""
+        from gopher_mcp.gopher_client import _ContinuationBody
+
+        client = GopherClient(respect_robots_txt=False, requests_per_minute=0)
+
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = TextResult(text="fresh", bytes=5)
+            await client.fetch("gopher://example.com/0/other.txt")
+            other_key = next(iter(client._cache))
+            client._continuation_body = _ContinuationBody(
+                key=other_key, raw=b"held", stored_at=time.time()
+            )
+            await client.fetch("gopher://example.com/0/doc.txt", refresh=True)
+
+        assert client._held_content_key() == other_key
+
+
 class TestRefreshReachesTheClientFromTheTools:
     """The tools thread `refresh` through to the client that owns the cache."""
 

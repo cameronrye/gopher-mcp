@@ -8,6 +8,7 @@ from typing import Any, NamedTuple
 
 import structlog
 
+from .cache import OFFSET_KEY_PREFIX
 from .client_base import FetchClientBase
 from .client_certs import ClientCertificateManager
 from .gemini_parse import (
@@ -468,7 +469,13 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
                 # must not be handed another window's render. NUL cannot appear
                 # in a URL, so this can never collide with the key another URL
                 # formats to.
-                cache_key = f"{cache_key}\x00offset={offset}"
+                cache_key = f"{cache_key}{OFFSET_KEY_PREFIX}{offset}"
+
+            if refresh:
+                # Asking for the current state has to invalidate the whole
+                # resource, not just the window named. See
+                # ``_invalidate_for_refresh``.
+                self._invalidate_for_refresh(body_key)
 
             # Check cache first, unless the caller asked for the current state.
             if self.cache_enabled and not refresh:
@@ -999,6 +1006,11 @@ class GeminiClient(FetchClientBase[GeminiFetchResponse, GeminiURL]):
         if client_cert_warning is not None:
             result.request_info.client_cert_warning = client_cert_warning
         return result
+
+    def _held_content_key(self) -> str | None:
+        """The key of the held page, if one is held (see the base class)."""
+        held = self._continuation_body
+        return None if held is None else held.key
 
     def _release_held_content(self) -> None:
         """Drop the held body (see the base class)."""

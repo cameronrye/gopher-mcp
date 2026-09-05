@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `refresh` now invalidates the whole resource instead of one window of it. A
+  windowed read caches each rendered window under its own key -- the resource's
+  key plus the offset -- and `refresh` only ever skipped the cache _read_ for
+  the exact key it was passed. So refreshing at offset 1000 re-fetched that
+  window and left every sibling in place: the next read of offset 0 or 2000 was
+  served the bytes from before the refresh, marked `cached: true`. A caller who
+  had asked for the current state was told about the state it was replacing,
+  and told it in the one way that reads as merely old rather than superseded.
+
+  The body held for continuations needed the same treatment. Declining to
+  _serve_ it under `refresh` -- which it already did -- is not dropping it: if
+  the refreshed response has no `next_offset`, because the resource shrank or
+  now fits in one window, nothing overwrites the slot and the pre-refresh body
+  is still there for the next continuation that does not pass `refresh`. It is
+  released only when it belongs to the resource being refreshed; releasing
+  another one would cost a re-download nobody asked for.
+
+  Both halves are 0.9.x bugs rather than fallout from 0.10.0's one-download
+  change -- the per-offset key and the single-slot store both predate it.
+
+  The `refresh` description shipped in every `tools/list` claimed the old
+  behaviour re-cut every window, which was never true of any release. It now
+  says what happens: the windows are discarded and re-downloaded when next
+  read, which is still a reason to finish a walk before re-reading.
+
 ## [0.10.0] - 2026-09-05
 
 ### Added

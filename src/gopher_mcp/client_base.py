@@ -247,6 +247,40 @@ class FetchClientBase(TTLCacheMixin[ResponseT], Generic[ResponseT, UrlT]):
         self._release_held_content()
         logger.info(f"{self._log_label} client closed")
 
+    def _held_content_key(self) -> str | None:
+        """The cache key of the body currently held, if any.
+
+        A hook for the same reason :meth:`_release_held_content` is one: the
+        base holds nothing, and the two clients hold different shapes. This
+        exists so :meth:`_invalidate_for_refresh` can ask whether the slot is
+        about to go stale without knowing what is in it.
+        """
+        return None
+
+    def _invalidate_for_refresh(self, body_key: str) -> None:
+        """Make ``refresh`` mean the whole resource, not one window of it.
+
+        ``refresh`` used to do no more than skip the cache READ for the exact
+        key being asked for. On a windowed read that key carries the offset, so
+        refreshing at offset 1000 re-fetched that window and left every other
+        window of the same resource in the cache -- the next read of offset 0
+        or 2000 was served the pre-refresh bytes, marked ``cached: true``. The
+        caller had asked for the current state and been told, for every window
+        but one, about the state it was trying to replace.
+
+        The held body needs the same treatment, and only when it belongs to
+        this resource. ``_reuse_continuation_body`` already declines to serve
+        it under ``refresh``, but declining to READ it is not dropping it: if
+        the refreshed response has no ``next_offset`` (the document shrank, or
+        now fits in one window) nothing overwrites the slot, and the stale body
+        is still there to answer the next continuation that does not pass
+        ``refresh``. Releasing another resource's body would be merely
+        wasteful rather than wrong, so the key is checked first.
+        """
+        self._evict_cached_family(body_key)
+        if self._held_content_key() == body_key:
+            self._release_held_content()
+
     def _release_held_content(self) -> None:
         """Drop any response body held outside the cache.
 
