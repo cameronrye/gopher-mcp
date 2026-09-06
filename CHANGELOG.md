@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-09-05
+
 ### Fixed
 
 - `refresh` now invalidates the whole resource instead of one window of it. A
@@ -1419,7 +1421,8 @@ they were cut at (`git log -1 --format=%ai vX.Y.Z`); the pre-0.3 tail carried
 January placeholders that were wrong by 8-11 months.
 -->
 
-[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/cameronrye/gopher-mcp/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.9.1...v0.10.0
 [0.9.1]: https://github.com/cameronrye/gopher-mcp/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/cameronrye/gopher-mcp/compare/v0.8.0...v0.9.0
