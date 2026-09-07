@@ -125,8 +125,10 @@ truth:
 | `src/gopher_mcp/__init__.py`              | **No action needed** — `__version__` is derived at runtime from the installed package metadata, not hardcoded. |
 
 The helper script `scripts/prepare-release.py` automates the `pyproject.toml`
-and `server.json` bumps and a CHANGELOG entry, but **does not** update
-`uv.lock` — run `uv lock` yourself after bumping:
+and `server.json` bumps, promotes the `## [Unreleased]` section into a dated
+one, and rewrites the compare links at the foot of the CHANGELOG (points
+`[Unreleased]` at the new tag and adds the release's own definition). It
+**does not** update `uv.lock` — run `uv lock` yourself after bumping:
 
 ```bash
 # Update pyproject.toml + CHANGELOG, then run the full preparation checks.
@@ -177,6 +179,15 @@ GitHub Release notes.
 
 `prepare-release.py` creates this section automatically from the `[Unreleased]`
 content, but review it for accuracy.
+
+It also maintains the link definitions at the foot of the file — `[Unreleased]`
+moves to compare against the new tag, and the release gets its own
+`[X.Y.Z]: .../compare/vPREVIOUS...vX.Y.Z`. These matter more than they look:
+Markdown renders an undefined reference as literal text, so a missing
+definition ships a bare `[X.Y.Z]` on the GitHub Release page and the docs site,
+and a stale `[Unreleased]` link shows the release that just shipped as though
+it were still pending. Nothing fails when they are wrong, so if you bump by
+hand, fix them by hand too.
 
 ### 3. Validate locally
 
@@ -281,6 +292,7 @@ checking locally avoids a failed release run.)
 - [ ] CI is green on the commit you are about to tag — the release workflow enforces this, see [The CI gate](#the-ci-gate).
 - [ ] `README.md` and configuration examples reflect any new behavior.
 - [ ] `CHANGELOG.md` has a complete, dated `## [X.Y.Z]` section; breaking changes and any migration notes are called out.
+- [ ] `CHANGELOG.md`'s link definitions are current: `[Unreleased]` compares against the tag you are about to create, and `[X.Y.Z]` exists. `prepare-release.py` does both; a hand-edited bump does neither, and nothing downstream catches it — the heading just renders as literal `[X.Y.Z]` in the release notes.
 - [ ] `version` in `pyproject.toml` matches the tag you will create.
 - [ ] **Every** `server.json` version matches the tag: the top-level `version`, each package's `version`, and the image tag inside the OCI package's `identifier` (the registry rejects a `version` key on an OCI package, so for that entry the tag *is* the version). `scripts/prepare-release.py` moves all of them, and release.yml's "Validate version consistency" step checks all of them — including the image tag, which matters because a stale one would publish a registry entry pointing at the previous release's container. Two things that sound like they check versions and do not: `scripts/validate-release.py`, which despite the name runs quality gates only, and anything comparing `uv.lock`'s own `gopher-mcp` pin to the tag — a stale pin is caught instead by CI's `uv sync --locked`, which fails with "the lockfile needs to be updated".
 - [ ] `README.md` carries the `mcp-name: io.github.cameronrye/gopher-mcp` marker. The MCP Registry proves ownership of the PyPI package by reading the **live** long description for `packages[0].version` and looking for that line, and `README.md` is the long description — without it `publish-registry` fails with a namespace/ownership error.

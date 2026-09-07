@@ -58,9 +58,33 @@ def prep(tmp_path):
         )
         + "\n"
     )
+    (tmp_path / "CHANGELOG.md").write_text(CHANGELOG_BEFORE)
     preparer = module.ReleasePreparation.__new__(module.ReleasePreparation)
     preparer.project_root = tmp_path
+    preparer.errors = []
+    preparer.warnings = []
     return preparer
+
+
+_COMPARE = "https://github.com/cameronrye/gopher-mcp/compare"
+
+CHANGELOG_BEFORE = f"""# Changelog
+
+## [Unreleased]
+
+### Fixed
+
+- Something worth releasing.
+
+## [0.9.0] - 2026-01-01
+
+### Added
+
+- The previous release.
+
+[Unreleased]: {_COMPARE}/v0.9.0...HEAD
+[0.9.0]: {_COMPARE}/v0.8.0...v0.9.0
+"""
 
 
 class TestVersionBumpReachesEveryVersion:
@@ -106,3 +130,80 @@ class TestVersionBumpReachesEveryVersion:
         content = (tmp_path / "pyproject.toml").read_text()
         assert 'version = "0.9.1"' in content
         assert 'target-version = "py311"' in content
+
+
+class TestChangelogLinksFollowTheRelease:
+    """The compare links at the foot of the changelog must move with the bump.
+
+    ``_update_changelog`` promoted the ``[Unreleased]`` section into a dated one
+    but left the link definitions untouched, so every release shipped with
+    ``[Unreleased]`` still comparing against the PREVIOUS tag and no link at all
+    for the version just cut. Markdown renders an undefined reference as literal
+    text, so the new heading came out as a bare ``[0.10.1]`` on the GitHub
+    release page and the docs site -- and the repo's history carries at least two
+    commits doing this fix up by hand afterwards.
+    """
+
+    def test_the_unreleased_link_moves_to_the_new_tag(self, prep, tmp_path):
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert f"[Unreleased]: {_COMPARE}/v0.9.1...HEAD" in content
+        assert f"[Unreleased]: {_COMPARE}/v0.9.0...HEAD" not in content
+
+    def test_the_new_release_gets_its_own_compare_link(self, prep, tmp_path):
+        """Spanning the previous tag to this one -- the range the section covers."""
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert f"[0.9.1]: {_COMPARE}/v0.9.0...v0.9.1" in content
+
+    def test_the_new_link_sits_directly_below_unreleased(self, prep, tmp_path):
+        """The block is newest-first, matching the sections above it."""
+        prep._update_changelog("0.9.1")
+
+        lines = (tmp_path / "CHANGELOG.md").read_text().splitlines()
+        keys = [ln.split(":")[0] for ln in lines if ln.startswith("[")]
+        assert keys == ["[Unreleased]", "[0.9.1]", "[0.9.0]"]
+
+    def test_the_promoted_section_keeps_its_content(self, prep, tmp_path):
+        """The links are a side effect; the promotion still has to work."""
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert "## [0.9.1] - " in content
+        assert "- Something worth releasing." in content
+        # The old section survives untouched below the new one.
+        assert "## [0.9.0] - 2026-01-01" in content
+
+    def test_no_blank_line_is_left_under_the_unreleased_heading(self, prep, tmp_path):
+        """A promoted section used to land two blank lines below ``[Unreleased]``,
+        which every release then had to tidy by hand before committing."""
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert "## [Unreleased]\n\n## [0.9.1]" in content
+
+    def test_a_changelog_without_links_is_warned_about_not_crashed(
+        self, prep, tmp_path
+    ):
+        """Not every changelog carries a link block, and a release must not die
+        on its absence -- the sections are the content, the links are polish."""
+        (tmp_path / "CHANGELOG.md").write_text(
+            "# Changelog\n\n## [Unreleased]\n\n- Something.\n"
+        )
+
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert "## [0.9.1] - " in content
+        assert any("link" in w.lower() for w in prep.warnings)
+
+    def test_rerunning_does_not_duplicate_the_link(self, prep, tmp_path):
+        """`_update_changelog` returns early when the section already exists;
+        the links must not be appended a second time by a repeated run."""
+        prep._update_changelog("0.9.1")
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert content.count(f"[0.9.1]: {_COMPARE}") == 1

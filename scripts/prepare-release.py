@@ -135,13 +135,18 @@ class ReleasePreparation:
                 today = datetime.date.today().strftime("%Y-%m-%d")
                 new_section = f"\n## [{version}] - {today}\n\n{unreleased_content}\n"
 
-                # Replace unreleased section
+                # Replace unreleased section. The replacement is `\1` plus a
+                # section that already opens with a newline -- an extra `\n`
+                # here puts TWO blank lines under the `## [Unreleased]` heading,
+                # which prettier does not collapse and every release then had to
+                # tidy by hand before committing.
                 content = re.sub(
                     r"(## \[Unreleased\].*?\n).*?(?=\n## \[|\n\[unreleased\]|\Z)",
-                    r"\1\n" + new_section,
+                    r"\1" + new_section,
                     content,
                     flags=re.DOTALL | re.IGNORECASE,
                 )
+                content = self._update_changelog_links(content, version)
 
                 changelog_path.write_text(content)
                 print(f"✅ Updated CHANGELOG.md with version {version}")
@@ -149,6 +154,54 @@ class ReleasePreparation:
                 self.warnings.append("No unreleased changes found in CHANGELOG.md")
         else:
             self.warnings.append("Could not find unreleased section in CHANGELOG.md")
+
+    #: The `[Unreleased]` link definition, which names the tag it compares
+    #: against and so tells us what the previous release was. `[ \t]*$` rather
+    #: than `\s*$`: with MULTILINE, `\s` would swallow the newline and the
+    #: definitions below it, and the replacement would eat the rest of the block.
+    _UNRELEASED_LINK = re.compile(
+        r"^\[unreleased\]:[ \t]*(?P<url>\S+/compare/)v(?P<prev>\S+?)\.\.\.HEAD[ \t]*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    def _update_changelog_links(self, content: str, version: str) -> str:
+        """Point `[Unreleased]` at the new tag and give the release its own link.
+
+        Promoting the section is only half the job. The link definitions at the
+        foot of the file are what make `## [0.10.1]` a link at all -- Markdown
+        renders an undefined reference as literal text, so a release whose
+        definition is missing shows a bare `[0.10.1]` on the GitHub release page
+        and the docs site. And `[Unreleased]` keeps comparing against the
+        PREVIOUS tag, so the "unreleased changes" link shows the release that
+        just shipped as though it were still pending.
+
+        Neither failure stops a release or trips any check, which is why this
+        belongs in code rather than in the checklist: the repo's history carries
+        more than one commit repairing these by hand afterwards.
+
+        The previous version is read out of the `[Unreleased]` link rather than
+        passed in, because that link is the one place already required to name
+        it -- deriving it from a sorted tag list or from the section headings
+        would be a second source that can disagree with this one.
+        """
+        match = self._UNRELEASED_LINK.search(content)
+        if match is None:
+            self.warnings.append(
+                "CHANGELOG.md has no [Unreleased] compare link, so the link "
+                f"definition for {version} was not added -- add it by hand."
+            )
+            return content
+
+        if re.search(rf"^\[{re.escape(version)}\]:", content, flags=re.MULTILINE):
+            return content
+
+        url, previous = match.group("url"), match.group("prev")
+        replacement = (
+            f"[Unreleased]: {url}v{version}...HEAD\n"
+            f"[{version}]: {url}v{previous}...v{version}"
+        )
+        print(f"✅ Updated CHANGELOG.md compare links for {version}")
+        return content[: match.start()] + replacement + content[match.end() :]
 
     def _create_git_tag(self, version: str, message: str | None = None) -> None:
         """Create and push git tag."""
