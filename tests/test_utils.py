@@ -15,6 +15,8 @@ from gopher_mcp.helpers import describe_oserror, window_text
 from gopher_mcp.utils import (
     atomic_write_json,
     format_gemini_url,
+    format_gopher_url,
+    normalize_cache_key,
     parse_gopher_menu,
     parse_gopher_url,
     parse_menu_line,
@@ -652,3 +654,87 @@ class TestUtilsFacadeIsExternalCompatOnly:
     def test_it_still_re_exports_every_name_it_promises(self):
         for name in gopher_mcp.utils.__all__:
             assert hasattr(gopher_mcp.utils, name), name
+
+
+class TestFormatGopherUrl:
+    """The canonical form the Gopher cache is keyed on."""
+
+    @staticmethod
+    def _key(url: str) -> str:
+        """The cache key the client builds, via the same two calls it makes."""
+        p = parse_gopher_url(url)
+        return format_gopher_url(p.host, p.port, p.gopher_type, p.selector, p.search)
+
+    def test_spellings_of_one_request_collapse_to_one_key(self):
+        """Drive it from the URL, not from arguments.
+
+        Passing `port=70` on one side and letting it default on the other is
+        the same call twice: it asserts nothing, and still passed with the
+        default-port branch deleted. These are spellings a caller can actually
+        write.
+        """
+        canonical = self._key("gopher://example.com/0/a.txt")
+        for spelling in (
+            "gopher://example.com:70/0/a.txt",
+            "gopher://EXAMPLE.COM/0/a.txt",
+            "gopher://example.com/%30/a.txt",
+        ):
+            assert self._key(spelling) == canonical, spelling
+
+    def test_a_non_default_port_is_kept(self):
+        """Collapsing must not go so far as to merge two different hosts."""
+        assert format_gopher_url("example.com", 7070, "0", "/a") != format_gopher_url(
+            "example.com", 70, "0", "/a"
+        )
+
+    def test_an_absent_query_differs_from_an_empty_one(self):
+        """A type-7 request carrying an empty query is not a query-less one."""
+        assert format_gopher_url("h", 70, "7", "/s", None) != format_gopher_url(
+            "h", 70, "7", "/s", ""
+        )
+
+    def test_a_latin1_selector_byte_survives_encoding(self):
+        """The selector arrives carrying surrogate escapes, not clean text.
+
+        `_percent_decode` decodes with `surrogateescape` so a non-UTF-8 selector
+        byte stays recoverable; the strict default encoder raises
+        UnicodeEncodeError on the lone surrogate rather than putting the byte
+        back, which turned a perfectly good fetch into an INVALID_REQUEST.
+        """
+        parsed = parse_gopher_url("gopher://example.com/0/caf%E9.txt")
+
+        assert (
+            format_gopher_url(
+                parsed.host, parsed.port, parsed.gopher_type, parsed.selector
+            )
+            == "gopher://example.com/0/caf%E9.txt"
+        )
+
+    def test_it_round_trips_through_the_parser(self):
+        """Canonical output must parse back to the request it came from."""
+        for url in (
+            "gopher://example.com/0/a.txt",
+            "gopher://example.com:7070/1/dir",
+            "gopher://example.com/7/search?a b",
+        ):
+            parsed = parse_gopher_url(url)
+            again = parse_gopher_url(
+                format_gopher_url(
+                    parsed.host,
+                    parsed.port,
+                    parsed.gopher_type,
+                    parsed.selector,
+                    parsed.search,
+                )
+            )
+            assert again == parsed, url
+
+
+class TestNormalizeCacheKey:
+    """Retained as public API on the `utils` facade after the Gopher client
+    moved to `format_gopher_url`; nothing inside the package calls it now."""
+
+    def test_host_case_is_folded_but_the_path_is_not(self):
+        assert normalize_cache_key("gopher://EXAMPLE.ORG/0/CaseSensitive") == (
+            "gopher://example.org/0/CaseSensitive"
+        )

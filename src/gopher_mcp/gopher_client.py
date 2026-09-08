@@ -14,6 +14,7 @@ import structlog
 from .cache import OFFSET_KEY_PREFIX
 from .client_base import FetchClientBase
 from .gopher_parse import (
+    format_gopher_url,
     gopher_type_category,
     parse_gopher_menu,
     parse_gopher_url,
@@ -24,7 +25,7 @@ from .gopher_transport import (
     decode_gopher_text,
     fetch_gopher,
 )
-from .helpers import normalize_cache_key, sanitize_display_text, window_text
+from .helpers import sanitize_display_text, window_text
 from .mime import detect_binary_mime_type
 from .models import (
     BinaryResult,
@@ -457,9 +458,19 @@ class GopherClient(FetchClientBase[GopherFetchResponse, GopherURL]):
                         url, parsed_url.host, decision.reason, decision.detail
                     )
 
-            # Canonical cache key (case-insensitive host) so requests differing
-            # only in host case share one entry instead of duplicating.
-            cache_key = normalize_cache_key(url)
+            # Canonical cache key built from the PARSED request, not the
+            # caller's URL string. Host case was already folded, but every
+            # other spelling difference still opened its own entry -- writing
+            # the default port out, escaping the item type, encoding the
+            # selector differently -- so one resource could be downloaded twice
+            # and `refresh` reached only the spelling it was handed.
+            cache_key = format_gopher_url(
+                parsed_url.host,
+                parsed_url.port,
+                parsed_url.gopher_type,
+                parsed_url.selector,
+                parsed_url.search,
+            )
             # The body is filed under the RESOURCE, so every window of it can be
             # rendered from one download; only the rendered-window cache below
             # is keyed per offset.

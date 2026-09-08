@@ -53,6 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   problem. Both now raise a protocol error naming the response as the fault.
   The Gopher parser already guarded its port field this way.
 
+- The Gopher cache is keyed on the parsed request rather than on the caller's
+  URL string, so `refresh` invalidates the resource instead of one _spelling_ of
+  it. Host case was already folded, but nothing else was: `gopher://host/0/a`
+  and `gopher://host:70/0/a` are the same request and opened two entries, which
+  cost a second download and -- the sharp half -- meant a `refresh` spelled one
+  way left the other's copy in place. The next read was served the pre-refresh
+  body marked `cached: true`, which reads as merely old rather than superseded.
+  This is the same defect 0.10.1 fixed for windows of a resource, one level up;
+  the Gemini client already built its key from parsed components.
+
+  An internationalized host is folded to its A-label while parsing, which
+  `parse_gemini_url` already did and the Gopher parser did not. `socket`
+  IDNA-encodes a non-ASCII host before resolving it and Gopher sends no host
+  header, so `gopher://bücher.example/…` and `gopher://xn--bcher-kva.example/…`
+  reach the same server over byte-identical wire content -- one request, and so
+  one cache entry. Error messages and `request_info` now report the A-label for
+  such a host.
+
 ## [0.10.1] - 2026-09-05
 
 ### Fixed

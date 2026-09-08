@@ -549,3 +549,69 @@ class TestCacheSchemaReachesTheModel:
     async def test_instructions_tell_the_model_cached_results_exist(self):
         assert "cached" in mcp.instructions
         assert "refresh=true" in mcp.instructions
+
+
+class TestTheGopherCacheIsKeyedOnTheRequestNotItsSpelling:
+    """Two spellings of one request are one resource, so one entry."""
+
+    @pytest.mark.asyncio
+    async def test_the_default_port_written_out_shares_the_entry(self):
+        """`gopher://h/0/a` and `gopher://h:70/0/a` are the same request.
+
+        The key was the caller's URL string with only the authority lowercased,
+        so writing the default port out produced a second entry for the same
+        resource -- a wasted download, and a second copy that ages separately.
+        """
+        client = GopherClient(respect_robots_txt=False)
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = TextResult(text="fresh", bytes=5)
+
+            first = await client.fetch("gopher://example.com/0/a.txt")
+            second = await client.fetch("gopher://example.com:70/0/a.txt")
+
+        assert first.cached is False
+        assert second.cached is True, "the second spelling missed the cache"
+        assert mock_fetch.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_refresh_reaches_the_resource_not_one_spelling_of_it(self):
+        """This is the 0.10.1 bug in a second guise.
+
+        `refresh` invalidated the entry under the key it was handed, so a
+        refresh spelled differently from the read left the stale copy in place
+        -- and the next read was served it marked `cached: true`, which reads
+        as merely old rather than superseded.
+        """
+        client = GopherClient(respect_robots_txt=False)
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = TextResult(text="before", bytes=6)
+            await client.fetch("gopher://example.com/0/a.txt")
+
+            mock_fetch.return_value = TextResult(text="after", bytes=5)
+            await client.fetch("gopher://example.com:70/0/a.txt", refresh=True)
+
+            after = await client.fetch("gopher://example.com/0/a.txt")
+
+        assert after.text == "after", "a stale copy survived the refresh"
+
+
+class TestAnInternationalisedHostIsOneResource:
+    """The U-label and the A-label name the same host, so one cache entry."""
+
+    @pytest.mark.asyncio
+    async def test_the_two_spellings_of_an_idn_share_the_entry(self):
+        """`socket` IDNA-encodes a non-ASCII host before resolving it, so both
+        spellings reach the same server over the same wire bytes -- Gopher
+        sends no host header. The Gemini parser already folds this at parse
+        time; the Gopher one kept the U-label, so the canonical cache key was
+        canonical in every respect but this one.
+        """
+        client = GopherClient(respect_robots_txt=False)
+        with patch.object(client, "_fetch_content") as mock_fetch:
+            mock_fetch.return_value = TextResult(text="fresh", bytes=5)
+
+            await client.fetch("gopher://bücher.example/0/a.txt")
+            second = await client.fetch("gopher://xn--bcher-kva.example/0/a.txt")
+
+        assert second.cached is True
+        assert mock_fetch.await_count == 1

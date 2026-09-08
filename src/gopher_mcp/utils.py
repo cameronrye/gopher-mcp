@@ -21,6 +21,7 @@ from .gemini_parse import (
 )
 from .gemtext import parse_gemtext
 from .gopher_parse import (
+    format_gopher_url,
     gopher_type_category,
     parse_gopher_menu,
     parse_gopher_url,
@@ -48,6 +49,7 @@ __all__ = [
     "bracket_host",
     "detect_binary_mime_type",
     "format_gemini_url",
+    "format_gopher_url",
     "get_default_gemini_mime_type",
     "get_home_directory",
     "gopher_type_category",

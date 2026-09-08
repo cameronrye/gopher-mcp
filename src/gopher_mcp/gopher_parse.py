@@ -126,6 +126,19 @@ def parse_gopher_url(url: str) -> GopherURL:
 
     host = parsed.hostname
 
+    # An internationalized host is folded to its A-label, as ``parse_gemini_url``
+    # already does. ``socket`` IDNA-encodes a non-ASCII host before resolving it,
+    # and Gopher sends no host header, so both spellings reach the same server
+    # over byte-identical wire content -- they are one request. Leaving the
+    # U-label here meant the canonical cache key was canonical in every respect
+    # but this one: the two spellings opened two entries, so the resource was
+    # downloaded twice and ``refresh`` on one left the other's copy in place.
+    if not host.isascii():
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as e:
+            raise ValueError(f"Invalid internationalized hostname: {e}") from e
+
     # Parse the path to extract gopher type and selector
     path = parsed.path or "/"
 
@@ -178,6 +191,53 @@ def parse_gopher_url(url: str) -> GopherURL:
         selector=selector,
         search=search,
     )
+
+
+def format_gopher_url(
+    host: str,
+    port: int = 70,
+    gopher_type: str = "1",
+    selector: str = "",
+    search: str | None = None,
+) -> str:
+    """Format a canonical Gopher URL from parsed request components.
+
+    The counterpart to ``parse_gopher_url``, and the form the cache is keyed
+    on. Distinct spellings of ONE request have to collapse to one string here:
+    the default port written out or left off, an item type escaped or literal,
+    a selector percent-encoded differently. Keying on the caller's URL string
+    instead meant each spelling opened its own cache entry, so the same
+    resource could be downloaded twice and, worse, ``refresh`` only ever
+    invalidated the spelling it was handed -- the next read under any other
+    spelling was served the pre-refresh body marked ``cached: true``, which
+    reads as merely old rather than superseded. ``format_gemini_url`` does the
+    same job on the other side.
+
+    Args:
+        host: Hostname, already lowercased and IDNA-folded by the parser.
+        port: Port number; the default is omitted so it cannot vary.
+        gopher_type: Single-character Gopher item type.
+        selector: Selector string, in its on-wire (decoded) form.
+        search: Search string for a type-7 request. ``None`` means no query at
+            all; an empty string is a PRESENT but empty query, which is a
+            different request and so must produce a different key.
+
+    Returns:
+        A canonical ``gopher://`` URL for this request.
+
+    """
+    url = f"gopher://{bracket_host(host)}"
+    if port != 70:
+        url += f":{port}"
+    url += "/" + _encode_item_type(gopher_type)
+    # ``surrogateescape`` on the way out because ``_percent_decode`` used it on
+    # the way in: a selector byte that is not valid UTF-8 -- every non-ASCII
+    # selector on a latin-1 server -- is carried as a lone surrogate, and the
+    # default strict encoder raises on it rather than putting the byte back.
+    url += quote(selector, safe="/", errors="surrogateescape")
+    if search is not None:
+        url += "?" + quote(search, safe="", errors="surrogateescape")
+    return url
 
 
 def parse_menu_line(line: str, *, charset: str = "utf-8") -> GopherMenuItem | None:
