@@ -308,7 +308,12 @@ class TestTheReleaseDocEnumeratesEveryVersion:
 
     @staticmethod
     def _releasing_doc() -> str:
-        return (PROJECT_ROOT / "docs" / "development" / "releasing.md").read_text()
+        # Explicit UTF-8 for the same reason as in test_utils.py: `read_text()`
+        # decodes with the locale encoding, so a doc with any non-ASCII content
+        # is read differently (or not at all) on the Windows runners.
+        return (PROJECT_ROOT / "docs" / "development" / "releasing.md").read_text(
+            encoding="utf-8"
+        )
 
     def test_the_doc_does_not_claim_server_json_has_two_version_fields(self):
         """It has three, and the third is the one that blocks a tag run.

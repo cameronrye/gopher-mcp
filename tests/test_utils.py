@@ -645,7 +645,15 @@ class TestUtilsFacadeIsExternalCompatOnly:
             for path in sorted(package.glob("*.py"))
             if path.name != "utils.py"
             and re.search(
-                r"^from \.utils import|^from \. import utils", path.read_text(), re.M
+                r"^from \.utils import|^from \. import utils",
+                # Explicit UTF-8: Python source is UTF-8 by definition
+                # (PEP 3120), but `read_text()` uses the LOCALE encoding, which
+                # is cp1252 on the Windows runners. A non-ASCII character in any
+                # module -- a comment quoting the superscript digits the status
+                # guard rejects, say -- then raised UnicodeDecodeError here on
+                # Windows only, in a test that has nothing to do with encodings.
+                path.read_text(encoding="utf-8"),
+                re.M,
             )
         ]
 

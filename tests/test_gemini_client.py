@@ -1943,6 +1943,15 @@ class TestSlowDownIsAnswerNotASleep:
             slept.append(seconds)
 
         client._rate_limiter._sleep = record  # type: ignore[assignment]
+        # Freeze the clock. `penalize` records `now + seconds` and `acquire`
+        # subtracts its own `now`, so the slept value is the penalty MINUS
+        # however long the fetch machinery took to get between them. Against a
+        # real monotonic clock that is a wall-clock race the test loses on a
+        # slow runner -- observed at 0.878 against a 0.1 tolerance -- and it
+        # measures scheduling latency rather than the behaviour under test.
+        # Both methods read this injectable clock, so pinning it makes the
+        # expected value exact.
+        client._rate_limiter._clock = lambda: 0.0  # type: ignore[assignment]
         client._rate_limiter.penalize("example.org", 1.0)
         client.tls_client.connect = AsyncMock(  # type: ignore[method-assign]
             return_value=(_reader_conn(b"20 text/plain\r\nhi"), {})
@@ -1953,7 +1962,7 @@ class TestSlowDownIsAnswerNotASleep:
         result = await client.fetch("gemini://example.org/page")
 
         assert isinstance(result, GeminiSuccessResult)
-        assert slept and slept[0] == pytest.approx(1.0, abs=0.1)
+        assert slept == [1.0]
 
     @pytest.mark.asyncio
     async def test_the_refused_request_does_not_extend_the_backoff(self):
