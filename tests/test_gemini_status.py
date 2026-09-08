@@ -2,6 +2,7 @@
 
 import pytest
 
+from gopher_mcp.gemini_parse import GeminiProtocolError
 from gopher_mcp.models import (
     GeminiBinaryResult,
     GeminiCertificateResult,
@@ -372,10 +373,16 @@ class TestValidateGeminiMimeType:
         mime = GeminiMimeType(type="text", subtype="gemini", lang="en-US")
         assert validate_gemini_mime_type(mime) is True
 
-    def test_invalid_language_tag(self):
-        """Test invalid language tag."""
-        mime = GeminiMimeType(type="text", subtype="gemini", lang="en@US")
-        assert validate_gemini_mime_type(mime) is False
+    def test_an_invalid_language_tag_is_dropped_not_rejected(self):
+        """A bad `lang` must not invalidate the type that carries it.
+
+        Rejecting here made the caller discard the whole MIME type, charset
+        included, and fall through to the `text/gemini` default -- so a
+        `text/plain` body was re-parsed as gemtext and its lines became links.
+        The value is dropped at parse time instead.
+        """
+        assert parse_gemini_mime_type("text/gemini; lang=en@US").lang is None
+        assert validate_gemini_mime_type(parse_gemini_mime_type("text/gemini")) is True
 
     def test_comma_separated_language_list(self):
         """The Gemini spec allows a comma-separated list of BCP47 tags in the
@@ -386,11 +393,13 @@ class TestValidateGeminiMimeType:
         mime = GeminiMimeType(type="text", subtype="gemini", lang="en-US,fr-CA,de")
         assert validate_gemini_mime_type(mime) is True
 
-    def test_malformed_language_list_is_rejected(self):
-        """A trailing/empty tag in the list is still malformed."""
+    def test_a_malformed_language_list_is_dropped(self):
+        """A trailing/empty tag in the list is still malformed -- and still
+        only costs the caller the `lang`, not the content type."""
         for bad in ("en,", ",fr", "en,,fr"):
-            mime = GeminiMimeType(type="text", subtype="gemini", lang=bad)
-            assert validate_gemini_mime_type(mime) is False
+            mime = parse_gemini_mime_type(f"text/gemini; lang={bad}")
+            assert mime.lang is None, bad
+            assert mime.full_type == "text/gemini"
 
 
 class TestProcessGeminiResponse:
@@ -1195,22 +1204,37 @@ class TestGemtextLinkResolution:
 class TestMetaThatParsesButFailsValidation:
     """A ``<META>`` can be well-formed and still not be a usable MIME type.
 
-    ``parse_gemini_mime_type`` only splits the header; ``validate_gemini_mime_type``
-    is what rejects an empty component, a text type with no charset or a
-    malformed language tag. That second gate has its own fall-through to the
-    spec's default (text/gemini, sniffing the body first), and it is reachable
-    only by a meta that parses -- ``20 text/`` raises inside the parser and
-    never gets here.
+    ``parse_gemini_mime_type`` only splits the header. What rejects a header it
+    accepts is the ``_MIME_TOKEN`` check on the type and subtype, which RFC 2045
+    makes tokens -- an ESC or BEL in either is not a MIME type. That gate has its
+    own fall-through to the spec's default (text/gemini, sniffing the body
+    first), and it is reachable only by a meta that parses: ``20 text/`` raises
+    inside the parser and never gets here.
+
+    ``validate_gemini_mime_type`` is a second gate on the same path, but nothing
+    a server can send now reaches its ``False``: an absent or empty ``charset``
+    falls back to utf-8 in the parser, and an empty component is caught by
+    ``_MIME_TOKEN`` first. Its checks are defensive against a
+    directly-constructed model, not a live trigger.
+
+    A malformed language tag used to reach that gate, and the discard it caused
+    is the defect ``_usable_lang`` was written to fix: a bad ``lang`` condemned
+    the whole declaration, so a ``text/plain`` body was re-parsed as gemtext.
+    Tests for that live in ``TestAnUnusableLangDoesNotDiscardTheContentType``.
     """
 
-    def test_a_malformed_lang_tag_falls_back_to_the_gemtext_default(self):
-        """``lang=en_US`` uses an underscore, which BCP47 does not permit, so
-        validation fails on a header that parsed cleanly. The body is textual,
-        so the sniff finds nothing and the spec default applies -- the page is
-        still shown to the model rather than withheld as binary."""
+    def test_an_unparseable_type_with_a_textual_body_shows_the_page(self):
+        """The sniff finds nothing in a textual body, so the spec default
+        applies and the page is still shown rather than withheld as binary.
+        The sibling test covers the same trigger with a body that DOES sniff.
+
+        This used to be driven with ``lang=en_US``, which no longer reaches the
+        fall-through at all -- the tag is dropped and the declaration stands --
+        so it was passing without exercising the branch it is here for.
+        """
         response = GeminiResponse(
             status=GeminiStatusCode.SUCCESS,
-            meta="text/gemini; lang=en_US; charset=utf-8",
+            meta="text\x1b/gemini; charset=utf-8",
             body=b"# Title\nStill readable\n",
         )
         result = process_gemini_response(response, "gemini://example.org/")
@@ -1221,13 +1245,22 @@ class TestMetaThatParsesButFailsValidation:
             "Still readable",
         ]
 
-    def test_a_malformed_lang_tag_still_lets_the_body_sniff_win(self):
+    def test_an_unparseable_type_lets_the_body_sniff_win(self):
         """The fallback sniffs before defaulting, so genuinely binary content
         served under an unusable header is still reported as binary rather than
-        decoded as gemtext."""
+        decoded as gemtext.
+
+        The trigger has to be the *type* being unparseable. A malformed `lang`
+        used to reach here too, which made binary detection depend on the
+        spelling of a language tag: the same gzip body under
+        `text/gemini; lang=en` was decoded as gemtext, and only
+        `lang=en_US` was caught. `lang` no longer condemns the declaration
+        (see `_usable_lang`), so this now turns on the one thing that should
+        decide it.
+        """
         response = GeminiResponse(
             status=GeminiStatusCode.SUCCESS,
-            meta="text/gemini; lang=en_US; charset=utf-8",
+            meta="text\x1b/gemini; charset=utf-8",
             body=b"\x1f\x8b\x08\x00" + b"\x00" * 16,  # gzip magic
         )
         result = process_gemini_response(response, "gemini://example.org/")
@@ -1251,3 +1284,103 @@ class TestMetaThatParsesButFailsValidation:
         result = process_gemini_response(response, "gemini://example.org/")
 
         assert isinstance(result, GeminiGemtextResult)
+
+
+class TestAnUnusableLangDoesNotDiscardTheContentType:
+    """`lang` is cosmetic; it must never reclassify the body."""
+
+    def test_a_space_after_the_comma_is_still_a_valid_list(self):
+        """`lang=en, fr` is the natural spelling of a list and is spec-valid.
+
+        The comma-split was added so a list would not be rejected, but it never
+        stripped the surrounding whitespace, so only the unspaced spelling
+        worked.
+        """
+        mime = parse_gemini_mime_type("text/gemini; lang=en, fr")
+        assert mime.lang == "en,fr"
+        assert validate_gemini_mime_type(mime) is True
+
+        mime = parse_gemini_mime_type("text/gemini; lang=en-US, fr-CA, de")
+        assert validate_gemini_mime_type(mime) is True
+
+    def test_a_malformed_lang_leaves_the_type_and_charset_intact(self):
+        """Dropping the whole MIME type over a bad parameter is the real defect.
+
+        A rejected MIME falls through to the spec's text/gemini default, so a
+        `text/plain` body was re-parsed as gemtext -- and its ordinary lines
+        became `document.links` the capsule never published, indistinguishable
+        from real ones. The type and subtype were never in doubt here; only the
+        cosmetic parameter was. Drop the parameter, keep the declaration.
+        """
+        mime = parse_gemini_mime_type("text/plain; charset=utf-8; lang=en@US")
+        assert validate_gemini_mime_type(mime) is True
+        assert mime.type == "text"
+        assert mime.subtype == "plain"
+        assert mime.charset == "utf-8"
+        assert not mime.lang, "an unusable lang must be dropped, not kept"
+
+    def test_a_text_file_is_not_turned_into_links_by_its_lang_parameter(self):
+        """End-to-end: the consequence the two fixes above exist to prevent."""
+        body = b"=> gemini://evil.example/ not-a-real-link\r\nplain text\r\n"
+        raw = b"20 text/plain; charset=utf-8; lang=en, fr\r\n" + body
+
+        result = process_gemini_response(
+            parse_gemini_response(raw), "gemini://example.org/notes.txt"
+        )
+
+        assert result.kind == "success"
+        assert getattr(result, "document", None) is None
+
+
+class TestAStatusCodeIsTwoAsciiDigits:
+    """`str.isdigit()` is true of far more than 0-9."""
+
+    def test_arabic_indic_digits_are_not_a_status_code(self):
+        """`٢٠` passed `isdigit()` and `int()` read it as 20.
+
+        So a status line the spec forbids -- it requires two ASCII digits --
+        was accepted, and its body rendered as though the server had answered
+        20 SUCCESS. The Gopher parser already guards the same way, at
+        `gopher_parse.py`'s port check: `.isascii() and .isdigit()`.
+        """
+        with pytest.raises(GeminiProtocolError, match="Invalid status code"):
+            parse_gemini_response("٢٠ text/gemini\r\nhello\r\n".encode())
+
+    def test_superscript_digits_are_reported_as_a_protocol_error(self):
+        """`²⁰` passes `isdigit()` but `int()` rejects it.
+
+        The bare `ValueError` that escaped was reported to the model as
+        `INVALID_REQUEST` -- telling it that its own valid URL was malformed,
+        and sending it to rewrite the one thing that was not the problem. The
+        fault is the server's response, so it has to be a protocol error.
+        """
+        with pytest.raises(GeminiProtocolError, match="Invalid status code"):
+            parse_gemini_response("²⁰ text/gemini\r\nhello\r\n".encode())
+
+    def test_ascii_digits_still_parse(self):
+        """The guard must not reject the only spelling the spec allows."""
+        assert parse_gemini_response(b"20 text/gemini\r\nhi\r\n").status == 20
+
+
+class TestLangIsNormalisedNotJustAccepted:
+    """Validating a stripped value while storing the raw one lets it through."""
+
+    def test_whitespace_control_characters_do_not_survive_in_lang(self):
+        """`_usable_lang` validates each tag stripped, so anything
+        `str.isspace()` removes -- CR, LF, FF, NEL, U+2028, U+2029, the file/
+        group/record separators -- passed the check and was then stored raw.
+
+        `helpers.py` drops those categories from every server-controlled string
+        precisely because they reach the model verbatim, and `lang` is on the
+        success path, which is the one meta path that does not sanitise. The
+        value has to be rebuilt from the tags that were actually validated.
+        """
+        for raw in ("en,\rfr", "en,\nfr", "en,\u2028fr", "en,\x1cfr"):
+            mime = parse_gemini_mime_type(f"text/gemini; lang={raw}")
+            assert mime.lang == "en,fr", repr(raw)
+
+    def test_a_spaced_list_is_normalised(self):
+        """The stored value is rebuilt from the validated tags, so the
+        harmless spelling is folded to one form too -- which is also what makes
+        it a single cache-visible value rather than several."""
+        assert parse_gemini_mime_type("text/gemini; lang=en, fr").lang == "en,fr"

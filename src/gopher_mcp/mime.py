@@ -8,6 +8,39 @@ import re
 
 from .models import GeminiMimeType
 
+#: One BCP47 tag, loosely. The Gemini spec permits a comma-separated LIST in
+#: ``lang``, and whitespace after the comma is the natural spelling of one, so
+#: each tag is matched after stripping -- a list was accepted as ``en,fr`` but
+#: not as ``en, fr`` until that strip was added.
+_LANG_TAG = re.compile(r"[a-zA-Z0-9-]+")
+
+
+def _usable_lang(lang: str | None) -> str | None:
+    """The normalized ``lang`` if every tag in it is well-formed, else ``None``.
+
+    Returning ``None`` rather than raising is the point. ``lang`` is cosmetic
+    metadata -- it says what language the body is written in, not what the body
+    *is* -- so an unusable value must not be allowed to condemn the declaration
+    that carries it. It previously failed validation, and the caller discards
+    the whole MIME type on that failure, charset included; the response then
+    fell through to the spec's ``text/gemini`` default and a ``text/plain`` file
+    was re-parsed as gemtext, turning its ordinary lines into ``document.links``
+    the capsule never published. Drop the parameter, keep the content type.
+    """
+    if not lang:
+        return None
+    tags = [tag.strip() for tag in lang.split(",")]
+    if all(_LANG_TAG.fullmatch(tag) for tag in tags):
+        # Rebuilt from the tags that were actually checked, not the raw string.
+        # Validating a stripped value and storing the unstripped one lets
+        # through everything ``str.strip`` removes -- CR, LF, FF, NEL, U+2028,
+        # U+2029, the separator controls -- and ``lang`` rides the success path,
+        # the one meta path that does not run through ``sanitize_display_text``.
+        # ``helpers`` drops those categories from server-controlled strings
+        # exactly because they reach the model verbatim.
+        return ",".join(tags)
+    return None
+
 
 def parse_gemini_mime_type(mime_string: str) -> "GeminiMimeType":
     """Parse MIME type string into GeminiMimeType object.
@@ -67,7 +100,7 @@ def parse_gemini_mime_type(mime_string: str) -> "GeminiMimeType":
             # Note: content-encoding not supported in Gemini protocol
 
     return GeminiMimeType(
-        type=mime_type, subtype=mime_subtype, charset=charset, lang=lang
+        type=mime_type, subtype=mime_subtype, charset=charset, lang=_usable_lang(lang)
     )
 
 
@@ -192,25 +225,23 @@ def validate_gemini_mime_type(mime_type: "GeminiMimeType") -> bool:
     # All MIME types are technically valid in Gemini
     # But we can check for common issues
 
+    # Only what makes the DECLARATION unusable belongs here. Returning False
+    # makes the caller discard the whole MIME type and fall through to the
+    # spec's text/gemini default, so every condition below has to be worth
+    # reclassifying the body over.
+    #
+    # `lang` is deliberately not among them. A malformed language tag says
+    # nothing about whether the type/subtype are usable, and rejecting on it
+    # meant a `text/plain` file was re-parsed as gemtext, turning its ordinary
+    # lines into links the capsule never published. `_usable_lang` drops an
+    # unusable value at parse time instead, so none ever reaches this function.
+
     # Check for empty or invalid components
     if not mime_type.type or not mime_type.subtype:
         return False
 
     # Check charset for text types
-    if mime_type.is_text and not mime_type.charset:
-        return False
-
-    # Validate language tag format (basic check). The Gemini spec permits a
-    # comma-separated LIST of BCP47 tags (e.g. "en,fr"), so validate each tag
-    # rather than the whole string -- a bare letters/numbers/hyphens regex would
-    # reject a spec-valid list, and the caller then discards the entire MIME type
-    # (charset included) on that failure.
-    if mime_type.lang:
-        tags = mime_type.lang.split(",")
-        if not all(re.fullmatch(r"[a-zA-Z0-9-]+", tag) for tag in tags):
-            return False
-
-    return True
+    return not (mime_type.is_text and not mime_type.charset)
 
 
 def mime_is_denied(full_type: str, denied: "frozenset[str] | set[str]") -> bool:

@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `lang` parameter the parser could not read no longer discards the MIME type
+  that carries it. `lang` is cosmetic -- it says what language the body is
+  written in, not what the body _is_ -- but failing to validate it returned
+  "invalid MIME type" for the whole header, and the caller answers that by
+  falling through to the spec's `text/gemini` default. So a `text/plain`
+  document came back with `kind: gemtext`, its declared charset dropped, and
+  its ordinary lines parsed as gemtext: any line beginning `=>` became an entry
+  in `document.links`, a followable `gemini://` target indistinguishable from a
+  link the capsule actually published. That is the hazard the truncation path
+  already refuses -- half a link must not be presented as a whole one -- arrived
+  at from the other side.
+
+  The trigger did not even have to be malformed. The Gemini spec permits a
+  comma-separated list of tags, and the list was split on the comma but never
+  stripped, so `lang=en,fr` was accepted and `lang=en, fr` -- the natural
+  spelling, and the one a server emits following ordinary parameter
+  conventions -- was not. An unusable value is now dropped at parse time and the
+  content type survives it.
+
+  The value that survives is rebuilt from the tags that were checked, so
+  `lang=en, fr` is reported as `en,fr`. That is not cosmetic: validating a
+  stripped value while storing the raw one would admit every character
+  `strip` removes -- CR, LF, U+2028, the separator controls -- into a field
+  that rides the one response path which does not otherwise sanitize, and so
+  reaches the model verbatim.
+
+  **One behaviour change worth naming**: a response whose `lang` was malformed
+  used to reach the body-sniffing fallback, so a `text/gemini` header over gzip
+  bytes was reported as binary. That was the bug's side effect, not a
+  safeguard -- the same body under `lang=en` was decoded as gemtext, because
+  binary detection was never meant to hinge on the spelling of a language tag.
+  Sniffing now happens where it always should have: when the type itself is
+  unparseable.
+
+- A Gemini status line is checked for two _ASCII_ digits. `str.isdigit()` is
+  true of every Unicode decimal, so `٢٠` passed it and `int()` read it as 20 --
+  a status line the spec forbids was honoured as `20 SUCCESS` and its body
+  rendered. A different spelling of the same malformation, `²⁰`, passed the
+  check and then failed inside `int()`, escaping as a bare `ValueError` that
+  was reported to the caller as `INVALID_REQUEST`: the model was told its own
+  valid URL was malformed and sent to rewrite the one thing that was not the
+  problem. Both now raise a protocol error naming the response as the fault.
+  The Gopher parser already guarded its port field this way.
+
 ## [0.10.1] - 2026-09-05
 
 ### Fixed

@@ -366,7 +366,15 @@ def parse_gemini_response(raw_response: bytes) -> "GeminiResponse":
         # Validate status code. The status is server-controlled and lands in a
         # message the model (and often a terminal) renders, so an unparseable one
         # is reported sanitized -- a raw "\x1bc" here is a full terminal reset.
-        if not status_str.isdigit():
+        #
+        # `.isascii()` as well as `.isdigit()`: the spec asks for two ASCII
+        # digits, but `isdigit()` is true of every Unicode decimal. Without it
+        # "٢٠" passed and `int()` read it as 20, so a forbidden status line was
+        # honoured as 20 SUCCESS; and "²⁰" passed here only to fail inside
+        # `int()`, escaping as a bare ValueError that surfaced to the model as
+        # INVALID_REQUEST -- blaming the caller's URL for the server's response.
+        # `gopher_parse.py` guards its port field the same way.
+        if not (status_str.isascii() and status_str.isdigit()):
             raise GeminiProtocolError(
                 f"Invalid status code: "
                 f"{sanitize_display_text(status_str, keep_whitespace=False)}"
