@@ -120,7 +120,7 @@ truth:
 | Location                                  | What to do                                                                 |
 | ----------------------------------------- | -------------------------------------------------------------------------- |
 | `pyproject.toml` (`version = "X.Y.Z"`)    | **Source of truth.** Update this. The release workflow checks the tag against it. |
-| `server.json` (**two** fields: top-level `version` **and** `packages[0].version`) | Update **both**. The release workflow fails the tag run if either one differs from the tag. |
+| `server.json` (**three** places: top-level `version`, each package's `version`, **and** the image tag inside the OCI package's `identifier`) | Update **all three**. The release workflow fails the tag run if any one of them differs from the tag. |
 | `uv.lock` (the `gopher-mcp` package entry)| Regenerate by running `uv lock` (or any `uv sync`) so the lockfile records the new version. |
 | `src/gopher_mcp/__init__.py`              | **No action needed** — `__version__` is derived at runtime from the installed package metadata, not hardcoded. |
 
@@ -145,14 +145,20 @@ uv lock
     package version in the lockfile will be stale.
 
 You can also bump everything manually: edit `version` in `pyproject.toml`, edit
-**both** version fields in `server.json`, run `uv lock`, and add the CHANGELOG
-entry by hand.
+**all three** version places in `server.json`, run `uv lock`, and add the
+CHANGELOG entry by hand.
 
-!!! warning "`server.json` has two version fields"
+!!! warning "`server.json` carries the version in three places, not two"
     The MCP registry manifest repeats the version at the top level and inside
-    `packages[0]`. The release workflow rejects a tag if either differs, so
-    missing one means deleting and re-pushing the tag. Check both with
-    `python -c "import json; d=json.load(open('server.json')); print(d['version'], d['packages'][0]['version'])"`.
+    each package — and the third is not a `version` key at all. The registry
+    **rejects** a `version` key on an OCI package ("include version in
+    identifier instead"), so for that entry the image tag inside `identifier`
+    *is* the version. The release workflow rejects a tag if any of the three
+    differs, so missing one means deleting and re-pushing the tag. Check all
+    three with
+    `python -c "import json; d=json.load(open('server.json')); print(d['version'], *[p.get('version') or p['identifier'].rsplit(':', 1)[1] for p in d['packages']])"`.
+    `scripts/prepare-release.py` bumps all three, and its "Checking Version
+    Consistency" step compares them against `pyproject.toml` before you tag.
 
 `validate-release` also validates the whole manifest against the official MCP
 registry schema its `$schema` names, so a field that drifts away from the schema

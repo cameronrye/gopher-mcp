@@ -207,3 +207,172 @@ class TestChangelogLinksFollowTheRelease:
 
         content = (tmp_path / "CHANGELOG.md").read_text()
         assert content.count(f"[0.9.1]: {_COMPARE}") == 1
+
+
+class TestChangelogProseIsDataNotAPattern:
+    """Release-note prose is substituted into the file, never interpreted."""
+
+    def test_a_backslash_in_the_notes_survives_promotion(self, prep, tmp_path):
+        """A Windows path in the notes must not be read as a regex escape.
+
+        The promotion used an `re.sub` *replacement string* built by
+        concatenating the unreleased prose onto `\\1`. In a replacement,
+        backslash sequences are escapes, not literals: `C:\\docs` is read as the
+        group reference `\\d` and aborts the bump with `re.error: bad escape`.
+        That happens after `_update_version` has already rewritten pyproject.toml
+        and all three server.json versions, so the tree is left half-bumped.
+        """
+        (tmp_path / "CHANGELOG.md").write_text(
+            CHANGELOG_BEFORE.replace(
+                "- Something worth releasing.",
+                "- Fixed cache paths under `C:\\docs` on Windows.",
+            )
+        )
+
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert "C:\\docs" in content
+
+    def test_an_escape_sequence_stays_two_characters(self, prep, tmp_path):
+        """`\\n` in a code span is text about a newline, not a newline.
+
+        A valid-but-wrong escape does not crash -- it silently expands. The
+        promoted section becomes the GitHub Release body verbatim, so this ships
+        a real control character into the published notes with nothing red.
+        """
+        (tmp_path / "CHANGELOG.md").write_text(
+            CHANGELOG_BEFORE.replace(
+                "- Something worth releasing.",
+                "- Menu lines are split on `\\n` rather than `\\r\\n`.",
+            )
+        )
+
+        prep._update_changelog("0.9.1")
+
+        content = (tmp_path / "CHANGELOG.md").read_text()
+        assert "`\\n`" in content
+        assert "`\\r\\n`" in content
+
+
+class TestAFailedStepIsRecordedNotJustPrinted:
+    """A gate that returns False must say why, or the run reports success."""
+
+    def test_a_failing_config_validation_records_an_error(self, prep, tmp_path):
+        """`prepare_release` returns `len(self.errors) == 0`, not the step result.
+
+        `_validate_configuration` returned `result.returncode == 0` and appended
+        nothing on the non-zero path, so a failed first gate printed `FAILED`,
+        left `errors` empty, and the summary then printed "Ready for release!"
+        and exited 0. tmp_path has no `scripts/validate-config.py`, so the child
+        exits non-zero -- the same shape as a real validation failure.
+        """
+        assert prep._validate_configuration() is False
+        assert prep.errors, "a failed gate recorded no error"
+
+
+class TestVersionConsistencyComparesVersions:
+    """The step named for consistency must actually compare the files."""
+
+    def test_a_stale_oci_image_tag_is_caught(self, prep, tmp_path):
+        """This is the exact failure release.yml blocks the tag run for.
+
+        The local step validated the version's *format* and looked for a
+        colliding git tag, then printed PASSED -- it never opened server.json.
+        So a hand-edited bump (a path the release doc explicitly offers) passes
+        here and fails in CI after the tag is pushed.
+        """
+        data = json.loads((tmp_path / "server.json").read_text())
+        oci = next(p for p in data["packages"] if p["registryType"] == "oci")
+        oci["identifier"] = "ghcr.io/cameronrye/gopher-mcp:0.8.0"
+        (tmp_path / "server.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        assert prep._check_version_consistency() is False
+        assert any("0.8.0" in e for e in prep.errors)
+
+    def test_a_stale_top_level_version_is_caught(self, prep, tmp_path):
+        data = json.loads((tmp_path / "server.json").read_text())
+        data["version"] = "0.8.0"
+        (tmp_path / "server.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        assert prep._check_version_consistency() is False
+
+    def test_a_consistent_manifest_passes(self, prep, tmp_path):
+        """The fixture is coherent at 0.9.0, so the check must not cry wolf."""
+        assert prep._check_version_consistency() is True
+        assert not prep.errors
+
+
+class TestTheReleaseDocEnumeratesEveryVersion:
+    """The manual-bump instructions must not undercount server.json."""
+
+    @staticmethod
+    def _releasing_doc() -> str:
+        return (PROJECT_ROOT / "docs" / "development" / "releasing.md").read_text()
+
+    def test_the_doc_does_not_claim_server_json_has_two_version_fields(self):
+        """It has three, and the third is the one that blocks a tag run.
+
+        `docs/development/releasing.md` offers a hand-editing path, so its count
+        is load-bearing: a maintainer who follows it leaves the OCI image tag on
+        the previous release, and `release.yml`'s validate-release job fails the
+        tag after it has been pushed.
+        """
+        doc = self._releasing_doc().lower()
+        assert "two** fields" not in doc
+        assert "two version fields" not in doc
+
+    def test_the_bump_section_names_the_image_tag(self, prep):
+        """Derived from the code, so the doc cannot drift away from it again.
+
+        Scoped to the "Bump the version" section: the image tag was already
+        named further down, in the pre-release checklist, which is exactly how
+        the file came to contradict itself. The section that tells you what to
+        edit is the one that has to be complete.
+        """
+        prep.project_root = PROJECT_ROOT
+        shapes = {where for where, _ in prep._declared_versions()}
+        assert len(shapes) == 3, f"unexpected version shapes: {shapes}"
+
+        doc = self._releasing_doc()
+        start = doc.index("### 1. Bump the version")
+        section = doc[start : doc.index("### 2.", start)]
+        assert "identifier" in section, "the OCI image tag is never named in section 1"
+
+
+class TestTheLocalVersionCheckMatchesTheCiOne:
+    """A local gate looser than CI is a gate that passes what CI will fail."""
+
+    def test_a_package_missing_its_version_key_is_caught(self, prep, tmp_path):
+        """`release.yml` compares `package.get("version")`, so an absent key is
+        `None` and is a mismatch. Guarding on `"version" in package` instead
+        made the local check skip the package entirely and report PASSED.
+        """
+        data = json.loads((tmp_path / "server.json").read_text())
+        del data["packages"][0]["version"]
+        (tmp_path / "server.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        assert prep._check_version_consistency() is False
+
+    def test_an_oci_identifier_with_no_tag_is_caught(self, prep, tmp_path):
+        """`release.yml` fails a tagless identifier explicitly."""
+        data = json.loads((tmp_path / "server.json").read_text())
+        oci = next(p for p in data["packages"] if p["registryType"] == "oci")
+        oci["identifier"] = "ghcr.io/cameronrye/gopher-mcp"
+        (tmp_path / "server.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        assert prep._check_version_consistency() is False
+
+    def test_a_registry_port_is_not_mistaken_for_a_tag(self, prep, tmp_path):
+        """`localhost:5000/o/n` carries a port, not a tag -- CI tells them
+        apart by whether a '/' follows the last colon. Splitting on the last
+        colon alone reports the port as a mismatched tag, which fails for the
+        right reason with the wrong explanation.
+        """
+        data = json.loads((tmp_path / "server.json").read_text())
+        oci = next(p for p in data["packages"] if p["registryType"] == "oci")
+        oci["identifier"] = "localhost:5000/cameronrye/gopher-mcp"
+        (tmp_path / "server.json").write_text(json.dumps(data, indent=2) + "\n")
+
+        assert prep._check_version_consistency() is False
+        assert any("no image tag" in e for e in prep.errors), prep.errors

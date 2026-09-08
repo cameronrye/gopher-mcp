@@ -81,12 +81,16 @@ class ReleasePreparation:
         # on an OCI package ("include version in identifier instead") -- so for
         # that entry the tag is the version.
         #
-        # Missing it does not fail the run, which is why it needs code rather
-        # than a checklist line: publish-image pushes the new tag while
-        # publish-registry verifies the stale one, finds a real image left over
-        # from the previous release, and publishes a registry entry pointing
-        # every client at the wrong container. Use json load/dump so we touch
-        # only version fields and preserve formatting elsewhere.
+        # Missing it fails the tag run at validate-release, which reads the tag
+        # out of the identifier and compares it -- but only after the tag is
+        # pushed, so the cost is the delete-and-re-push dance rather than a bad
+        # artifact. That gate is why this is safe; it is not why it is here.
+        # Before the gate existed, a stale tag published silently: publish-image
+        # pushed the new tag while publish-registry verified the old one, found
+        # a real image left over from the previous release, and published a
+        # registry entry pointing every client at the wrong container. Use json
+        # load/dump so we touch only version fields and preserve formatting
+        # elsewhere.
         server_json_path = self.project_root / "server.json"
         if server_json_path.exists():
             import json
@@ -135,14 +139,25 @@ class ReleasePreparation:
                 today = datetime.date.today().strftime("%Y-%m-%d")
                 new_section = f"\n## [{version}] - {today}\n\n{unreleased_content}\n"
 
-                # Replace unreleased section. The replacement is `\1` plus a
+                # Replace unreleased section. The replacement is group 1 plus a
                 # section that already opens with a newline -- an extra `\n`
                 # here puts TWO blank lines under the `## [Unreleased]` heading,
                 # which prettier does not collapse and every release then had to
                 # tidy by hand before committing.
+                #
+                # A callable, not a replacement string: `re.sub` interprets
+                # backslashes in a replacement as escapes, and the notes are
+                # arbitrary prose. `C:\docs` reads as the group reference `\d`
+                # and aborts the bump -- after `_update_version` has already
+                # rewritten pyproject.toml and all three server.json versions,
+                # so the tree is left half-bumped. A valid-but-wrong escape is
+                # worse than the crash: `\n` in a code span expands to a real
+                # newline, and this section becomes the GitHub Release body
+                # verbatim, so it ships a control character with nothing red.
+                # A callable's return value is used literally.
                 content = re.sub(
                     r"(## \[Unreleased\].*?\n).*?(?=\n## \[|\n\[unreleased\]|\Z)",
-                    r"\1" + new_section,
+                    lambda m: m.group(1) + new_section,
                     content,
                     flags=re.DOTALL | re.IGNORECASE,
                 )
@@ -296,7 +311,20 @@ class ReleasePreparation:
                 capture_output=True,
                 text=True,
             )
-            return result.returncode == 0
+            if result.returncode != 0:
+                # Record it, don't just return False. `prepare_release` reports
+                # success on `len(self.errors) == 0`, not on the step results,
+                # so a bare `return False` printed FAILED for the step and then
+                # "Ready for release!" with exit 0 -- inverting the first gate
+                # in the list. Carry the child's output too: it holds the only
+                # statement of what actually failed, and it is captured.
+                detail = (result.stderr or result.stdout or "").strip()
+                self.errors.append(
+                    "Configuration validation failed"
+                    + (f":\n{detail}" if detail else " (no output)")
+                )
+                return False
+            return True
         except Exception as e:
             self.errors.append(f"Configuration validation failed: {e}")
             return False
@@ -340,6 +368,51 @@ class ReleasePreparation:
             self.errors.append(f"Changelog validation failed: {e}")
             return False
 
+    def _declared_versions(self) -> "list[tuple[str, str | None]]":
+        """Every version in server.json, as (human-readable location, value).
+
+        Three shapes, matching `_update_version`: the top-level field, each
+        package's `version` key, and the image tag inside an OCI package's
+        `identifier` -- the registry rejects a `version` key on an OCI package,
+        so for that entry the tag IS the version. An absent server.json yields
+        nothing to compare rather than an error; it is optional to the bump.
+
+        A value of `None` means the field is missing or unreadable, which is a
+        mismatch rather than something to skip -- this has to fail exactly what
+        `release.yml`'s validate-release job fails, or it passes manifests the
+        tag run will reject.
+        """
+        server_json_path = self.project_root / "server.json"
+        if not server_json_path.exists():
+            return []
+
+        import json
+
+        data = json.loads(server_json_path.read_text())
+        found = [("server.json version", data.get("version"))]
+        for i, package in enumerate(data.get("packages", [])):
+            registry = package.get("registryType")
+            where = f"server.json packages[{i}] ({registry})"
+            if registry == "oci":
+                # A canonical reference is registry[:port]/path:tag, so the tag
+                # is what follows the LAST colon -- and only if no '/' follows
+                # it, which is what tells "ghcr.io/o/n:1.2.3" from a bare
+                # "localhost:5000/o/n" that carries no tag at all.
+                identifier = package.get("identifier", "")
+                repository, separator, tag = identifier.rpartition(":")
+                if not separator or not repository or "/" in tag:
+                    found.append((f"{where} image tag", None))
+                else:
+                    found.append((f"{where} image tag", tag))
+            else:
+                # ``.get``, not an ``in`` guard: an absent key is a MISSING
+                # version, which release.yml compares as None and fails. Skipping
+                # the package instead made this check pass every manifest CI
+                # would reject -- a local gate looser than the one it stands in
+                # for is worse than no local gate.
+                found.append((where, package.get("version")))
+        return found
+
     def _check_version_consistency(self) -> bool:
         """Check version consistency across files."""
         try:
@@ -348,6 +421,28 @@ class ReleasePreparation:
             # Check if version format is valid
             if not self._validate_version_format(current_version):
                 self.errors.append(f"Invalid version format: {current_version}")
+                return False
+
+            # Compare pyproject's version against every other place it is
+            # written. The step was named for consistency but only checked the
+            # format and looked for a colliding tag -- it never opened
+            # server.json, so the one failure it exists to catch (a hand-edited
+            # bump that missed a field) passed here and failed in CI *after* the
+            # tag was pushed, which costs the delete-and-re-push-the-tag dance.
+            # Same three shapes `_update_version` writes, and the same
+            # comparison release.yml's validate-release job makes.
+            mismatches = [
+                f"{where} carries no image tag"
+                if found is None and where.endswith("image tag")
+                else f"{where} is {found!r}, expected {current_version!r}"
+                for where, found in self._declared_versions()
+                if found != current_version
+            ]
+            if mismatches:
+                self.errors.append(
+                    "Version is inconsistent with pyproject.toml: "
+                    + "; ".join(mismatches)
+                )
                 return False
 
             # Check for any git tags that might conflict
@@ -366,7 +461,7 @@ class ReleasePreparation:
                 # Git not available or not a git repo, skip tag check
                 pass
 
-            print(f"✅ Version {current_version} format is valid")
+            print(f"✅ Version {current_version} is consistent and well-formed")
             return True
 
         except Exception as e:
