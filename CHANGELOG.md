@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Breaking:** the `mcp` floor rises to 1.30.0. Below it the SDK's stateful
+  Streamable HTTP transport never reclaimed a session: none expired, a client's
+  `DELETE` left its entry registered, and nothing capped how many a server held
+  (GHSA-84m7-p3x7-pcfv). That reaches this server whenever it serves
+  `--transport streamable-http`, the container's default. From 1.30.0 an idle
+  session closes after 30 minutes and a server holds at most 10,000 at once; a
+  client that idles past that gets a 404 and has to initialize again. The SDK's
+  own client keeps its GET stream open and is not affected. The other three
+  advisories 1.30.0 fixed do not reach this server: GHSA-w4fh-qvv9-3v23 needs
+  the SDK's bearer authentication, which it does not configure, and
+  GHSA-5h93-6whr-6q8j and GHSA-rwrf-2pqf-9j8j are in the client transports.
+- Upgraded the locked dependencies to clear all 55 Dependabot alerts and the
+  matching nightly `pip-audit` findings. The lockfile is what CI and
+  development install; a `pip install` resolves for itself and already picks
+  these releases up.
+  - `mcp` 1.29.1 → 1.30.0 (the four above)
+  - `PyJWT` 2.13.0 → 2.15.0 (fifteen, including the critical
+    GHSA-ffc3-869f-jxw9); installed through `mcp[crypto]`, never loaded by this
+    server
+  - `certifi` 2026.7.22 → 2026.10.18 (GHSA-6q48-6c7w-9gw2, emSign roots with
+    compromised intermediate keys); installed through `httpx`, never loaded by
+    this server, whose Gemini TLS trusts on first use rather than by CA
+  - Development tooling only: `virtualenv` 21.7.8 → 21.14.13 (nineteen),
+    `filelock` 3.32.5 → 4.2.1 (twelve), `urllib3` 2.7.0 → 2.8.0 (three) and
+    `msgpack` 1.2.2 → 1.2.3 (GHSA-j586-36cw-2gc2)
+
+### Changed
+
+- Bumped CI workflow actions: `astral-sh/setup-uv` 10.0.1 → 10.3.3,
+  `pypa/gh-action-pypi-publish` 1.14.2 → 1.14.3 (GHSA-5xjx-3w67-w9x9; it now
+  hash-checks its own runtime dependencies), `docker/build-push-action`
+  7.3.0 → 7.4.0, `docker/setup-qemu-action` 4.3.0 → 4.4.0 and
+  `docker/setup-buildx-action` 4.3.0 → 4.4.1.
+
 ## [0.10.2] - 2026-09-07
 
 ### Fixed
