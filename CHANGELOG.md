@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Breaking:** the `mcp` floor rises to 1.30.0. Below it the SDK's stateful
+  Streamable HTTP transport never reclaimed a session: none expired, a client's
+  `DELETE` left its entry registered, and nothing capped how many a server held
+  (GHSA-84m7-p3x7-pcfv). That reaches this server whenever it serves
+  `--transport streamable-http`, the container's default. From 1.30.0 an idle
+  session closes after 30 minutes and a server holds at most 10,000 at once; a
+  client that idles past that gets a 404 and has to initialize again. The SDK's
+  own client keeps its GET stream open and is not affected. The other three
+  advisories 1.30.0 fixed do not reach this server: GHSA-w4fh-qvv9-3v23 needs
+  the SDK's bearer authentication, which it does not configure, and
+  GHSA-5h93-6whr-6q8j and GHSA-rwrf-2pqf-9j8j are in the client transports.
+
 ## [0.10.2] - 2026-09-07
 
 ### Fixed

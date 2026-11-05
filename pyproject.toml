@@ -83,13 +83,24 @@ dependencies = [
     # first release whose `FastMCP.tool()` accepts `title=`, which every tool
     # here passes; below that the failures are import-time and
     # resolver-invisible (<1.2 has no mcp.server.fastmcp at all, <1.7 no
-    # ToolAnnotations). It is now set by security instead: 1.28.1 is the first
-    # release clear of four high advisories the old `>=1.10.0` range admitted --
-    # GHSA-9h52-p55h-vw2f (DNS-rebinding protection off by default),
-    # GHSA-jpw9-pfvf-9f58, GHSA-hvrp-rf83-w775 and GHSA-vj7q-gjh5-988w.
-    # Only the last of those actually sets this number -- the rebinding one was
-    # fixed in 1.23.0 and the middle two in 1.27.2, so 1.28.1 is
-    # GHSA-vj7q-gjh5-988w's floor and the rest are already covered by it.
+    # ToolAnnotations). It is now set by security instead, and has moved twice
+    # for that reason.
+    #
+    # 1.30.0 is GHSA-84m7-p3x7-pcfv's floor. Below it the stateful Streamable
+    # HTTP transport never reclaimed a session -- none expired, a client's
+    # `DELETE` left its entry registered, and nothing capped how many a server
+    # held -- so any client that can reach `--transport streamable-http`, the
+    # container's default, can exhaust the server by opening sessions. server.py
+    # leaves `stateless_http` at its False default, so this server runs in the
+    # affected mode. 1.30.0 fixed three more advisories that do not reach it:
+    # GHSA-w4fh-qvv9-3v23 needs the SDK's bearer auth, which server.py does not
+    # configure, and GHSA-5h93-6whr-6q8j and GHSA-rwrf-2pqf-9j8j are in the
+    # client transports.
+    #
+    # Before that, 1.28.1 was the first release clear of four high advisories
+    # the old `>=1.10.0` range admitted -- GHSA-9h52-p55h-vw2f (DNS-rebinding
+    # protection off by default), GHSA-jpw9-pfvf-9f58, GHSA-hvrp-rf83-w775 and
+    # GHSA-vj7q-gjh5-988w.
     # Rebinding still deserves the word, because which deployment it protects is
     # easy to read backwards: server.py builds FastMCP without
     # `transport_security`, so a plain `gopher-mcp --transport streamable-http`
@@ -104,9 +115,9 @@ dependencies = [
     # pins an old SDK -- the case the minimum-versions CI job exercises.
     # Keep all three components -- Dependabot derives the current version by
     # scraping \d+\.\d+\.\d+ from this string, and a two-part floor like
-    # >=1.28 makes the `ignore` rule that holds the cap silently inert.
-    "mcp>=1.28.1,<2",
-    # Floor governed by mcp, not by anything this code needs: mcp 1.28.1
+    # >=1.30 makes the `ignore` rule that holds the cap silently inert.
+    "mcp>=1.30.0,<2",
+    # Floor governed by mcp, not by anything this code needs: mcp 1.30.0
     # requires pydantic>=2.11.0, so any lower number here is unreachable and
     # only pretends to be a tested minimum. Move it whenever the mcp floor
     # moves.

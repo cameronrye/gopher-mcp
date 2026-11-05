@@ -826,7 +826,7 @@ This project is licensed under the MIT License - see the [LICENSE](https://githu
 ## Acknowledgments
 
 - **[Model Context Protocol](https://modelcontextprotocol.io/)** by Anthropic - The foundation that makes this integration possible
-- **[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)** - Its bundled `FastMCP` (`mcp.server.fastmcp`) is what this server is built on, pinned to `mcp>=1.28.1,<2`
+- **[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)** - Its bundled `FastMCP` (`mcp.server.fastmcp`) is what this server is built on, pinned to `mcp>=1.30.0,<2`
 - **The Gopher Protocol Community** - Keeping the spirit of the early internet alive
 
 ## Related Projects
